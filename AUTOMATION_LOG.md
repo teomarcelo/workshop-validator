@@ -85,3 +85,11 @@ Actual local tests: synthetic PDF parser 7 tests passed; synthetic Playwright sm
 Current scope: **No live Salesforce login or instruction was attempted.** The source inventory is candidate-only and explicitly unverified. Public CI tests are safe synthetic jobs; they are not the private cloud validation runner. No paid cloud resources or external LLM APIs were provisioned.
 
 Next: Add deterministic source reconciliation and trusted action-manifest interface; integrate browser observations with durable checkpoint transitions and private HTML reporting. Actual org validation is blocked on a separately approved PRIVATE execution workflow, company-approved source PDF access, and new operator-entered rotated org secrets. Preserve the $0 budget and prohibit confidential artifacts in public GitHub Actions.
+
+## 2026-10-13 13:29 PDT — Scheduled run 5
+
+Implemented a fail-closed, page-by-page PDF reconciliation review gate, with 17 synthetic tests and documentation. Implementation commit: 35c69ac822a38e8c059d70e230aaf0b861160587.
+
+Local commands: git clone --depth 1 (failed: DNS unavailable); python3 -W error::ResourceWarning -m unittest discover -s tests -v (17 new tests passed using a minimal GuideInventory stand-in); python3 -m compileall -q workshop_validator tests (passed); git hash-object (new source/test bytes matched GitHub blobs). Full repository tests were not run locally. Prior green public CI: 38457059197, before this change.
+
+Blockers: No approved private runner, guide audit, rotated secrets, or real Salesforce run. Next: trusted manifest-to-action planning interface, followed by browser-to-checkpoint integration. Reviewer attestations do not independently prove completeness.
