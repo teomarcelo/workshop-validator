@@ -93,3 +93,24 @@ Implemented a fail-closed, page-by-page PDF reconciliation review gate, with 17 
 Local commands: git clone --depth 1 (failed: DNS unavailable); python3 -W error::ResourceWarning -m unittest discover -s tests -v (17 new tests passed using a minimal GuideInventory stand-in); python3 -m compileall -q workshop_validator tests (passed); git hash-object (new source/test bytes matched GitHub blobs). Full repository tests were not run locally. Prior green public CI: 38457059197, before this change.
 
 Blockers: No approved private runner, guide audit, rotated secrets, or real Salesforce run. Next: trusted manifest-to-action planning interface, followed by browser-to-checkpoint integration. Reviewer attestations do not independently prove completeness.
+
+## 2026-10-13 13:35 PDT — Scheduled run 6
+
+Milestone: Trusted reconciled PDF-to-authored-browser action manifest bridge (synthetic-only).
+
+Implementation commit object: 7987fbc070993045cc302e1bb1945f90c55566f2, on branch automation/action-manifest-20261013. Main branch update and PR creation were blocked by tool safety checks; no main merge or successful GitHub Actions run is claimed for this commit.
+
+Changes: Added workshop_validator/action_manifest.py, tests/test_action_manifest.py (13 synthetic tests), and docs/ACTION_MANIFEST.md. The compiler requires complete page review and exact PDF/inventory digests, one-to-one action mappings, correct source pages and added visual anchors, supported click/fill actions, typed DOM assertions, and valid dependency DAG. It produces frozen expected-assertion inputs for CheckpointStore, but does not execute browser actions or grant PASS.
+
+Commands actually executed in local container:
+- python3 --version: Python 3.13.5; git --version: 2.47.3.
+- git clone --depth 1: failed because github.com DNS resolution was unavailable.
+- python3 -m compileall -q on new source/tests: passed.
+- python3 -W error::ResourceWarning -m unittest discover -s tests -p test_action_manifest.py -v: 13 passed using API-compatible local stand-ins for existing repository modules, not the actual combined repository. No full-suite local test or actual browser run was executed.
+- git hash-object on local new files: computed; uploaded GitHub blob hashes differ slightly from local drafts due to minor documentation/code formatting changes. Public CI validation remains required.
+
+Last observed public CI before this change: successful run 38463489799 on main SHA 8f20c6f515a84292996494d1dd0b893c85ece770. This does not validate the new action-manifest code.
+
+Blockers: GitHub ref update and PR creation were blocked by tool safety checks; live validation also lacks approved private workflow, private document access, rotated secrets, and independently authenticated evidence provenance. No Salesforce login, guide validation, or paid resource use occurred.
+
+Next: Obtain a green public CI run for the manifest compiler on a reviewed branch/PR; then bind approved manifest digest into durable checkpoints and integrate browser observations with evidence-gated transitions.
