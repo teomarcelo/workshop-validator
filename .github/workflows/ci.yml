@@ -51,4 +51,6 @@ jobs:
       - name: Run synthetic browser smoke
         env:
           RUN_BROWSER_SMOKE: '1'
-        run: python -m unittest discover -s tests -p test_browser_worker.py -v
+        run: |
+          python -m unittest discover -s tests -p test_browser_worker.py -v
+          python -m unittest discover -s tests -p test_pipeline.py -v
