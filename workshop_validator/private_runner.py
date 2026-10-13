@@ -24,6 +24,7 @@ from .reconciliation import (CandidateReview, AddedAction, PageReview,
                               SourceReview, file_sha256, reconcile_inventory)
 from .pdf_annotations import ReviewNote, annotate_pdf
 from .pipeline import PlannedStep, RateLimitDetected, validate_plan
+from .retries import RetryPolicy
 from .report import write_private_report
 
 
@@ -194,7 +195,8 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                     page.screenshot(path=str(screenshot), full_page=False, animations="disabled")
                     screenshot.chmod(0o600)
                     if responses:
-                        raise RateLimitDetected("Observed Salesforce HTTP 429")
+                        raise RateLimitDetected("Observed Salesforce HTTP 429",
+                            retry_after=responses[0].headers.get("retry-after"))
                     return observed
                 except RateLimitDetected:
                     raise
@@ -209,6 +211,9 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                 page, out / "checkpoint.sqlite", run_id, org_id, plans,
                 source_action_ids=reviewed_ids, source_reconciled=reconciled,
                 execute_step=collect_privately,
+                retry_policy=RetryPolicy(max_attempts=3,base_seconds=60,
+                                         max_backoff_seconds=3600),
+                max_wait_seconds=600,
             )
         finally:
             browser.close()

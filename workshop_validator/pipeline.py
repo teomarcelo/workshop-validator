@@ -10,7 +10,10 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 import sqlite3
+import time
 from typing import Callable, Sequence
+
+from .retries import RetryPolicy, RetryQueue
 
 from .browser_worker import (UIAction, UIAssertion, BrowserActionError,
                              perform_actions, collect_observations)
@@ -21,7 +24,12 @@ from .report import ReportStep, render_report
 
 
 class RateLimitDetected(RuntimeError):
-    """Only raise this from a trustworthy observed HTTP 429 classification."""
+    """Only raise from a trustworthy observed HTTP 429 classification."""
+
+    def __init__(self, message: str = "Observed HTTP 429", *,
+                 retry_after: str | None = None):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class PlanMismatch(ValueError):
@@ -75,7 +83,11 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
                   source_reconciled: bool = False,
                   executor_id: str = "playwright-worker",
                   verifier_id: str = "independent-verifier",
-                  execute_step: Callable | None = None) -> PipelineOutcome:
+                  execute_step: Callable | None = None,
+                  retry_policy: RetryPolicy | None = None,
+                  max_wait_seconds: int = 0,
+                  clock: Callable[[], float] = time.time,
+                  sleeper: Callable[[float], None] = time.sleep) -> PipelineOutcome:
     """Run each eligible step once, then produce a fail-closed private HTML report.
 
     A reconciled source MUST supply the exact same set of action IDs as plans.
@@ -83,9 +95,11 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
     Callers must only set source_reconciled based on a genuine reviewed source
     reconciliation, never an executor's unverified opinion.
 
-    This is a single worker's local execution loop. No automatic HTTP 429
-    retries or durable cloud restart/re-authentication are claimed.
+    Optional bounded RetryPolicy supports same-job 429 cooldowns while
+    unrelated branches run. Durable cross-run cloud restart is not claimed.
     """
+    if type(max_wait_seconds) is not int or not 0 <= max_wait_seconds <= 1800:
+        raise PlanMismatch("Retry wait budget must be 0..1800 seconds")
     plans = tuple(plans)
     if not plans or len(plans) > 5000:
         raise PlanMismatch("A nonempty, bounded set of steps is required")
@@ -112,10 +126,24 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
         {s.step_id: [a.spec for a in s.assertions] for s in plans}
     )
     by_id = {s.step_id: s for s in plans}
+    retries = RetryQueue(str(db_path), retry_policy) if retry_policy else None
+    deadline = clock() + max_wait_seconds
     while True:
         sched = store.schedule(run_id)
         if not sched.runnable:
-            break
+            if retries is None or max_wait_seconds == 0:
+                break
+            future = sorted(t.retry_at for t in retries.tickets(run_id)
+                            if t.retry_at is not None)
+            if not future or future[0] > deadline:
+                break
+            delay = max(0, future[0] - clock())
+            if delay:
+                sleeper(delay)
+            released = retries.wake_due(now=clock())
+            if not released:
+                break
+            continue
         for step_id in sched.runnable:
             step = by_id[step_id]
             attempt = store.start_step(run_id, step_id)
@@ -124,8 +152,11 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
             )
             try:
                 observations = executor(page, step, context)
-            except RateLimitDetected:
+            except RateLimitDetected as exc:
                 store.block_step(run_id, step_id, attempt, "ENV_BLOCKED")
+                if retries is not None:
+                    retries.record_429(run_id, step_id, now=clock(),
+                                       retry_after=exc.retry_after)
             except BrowserActionError:
                 # A missing target/failed browser action has no trusted
                 # supporting observations; verifier must refuse PASS.
