@@ -164,3 +164,13 @@ Pilot success is measured by **step inventory coverage**, required-assertion pas
 This file is a **living, version-controlled draft**. Update it when decisions change, using descriptive commits and, once multiple contributors are involved, pull requests. Keep decisions separate from implementation status; do not label a proposed agent or capability as deployed until independently demonstrated.
 
 **Current state:** Plan drafted. No cloud orchestrator, agents, Playwright tests, or PDF annotation pipeline have been deployed.
+
+
+## 11. First-run credentials and unattended execution (confirmed requirements)
+
+- The first pilot uses **one specifically provisioned, disposable Salesforce trial org** and **one username/password pair**. Reuse that pair for all relevant first-pilot test runs; do **not** require fresh credentials for every run.
+- Different workshops may use different disposable trial orgs later. When an org is retired or replaced, the operator can update its credentials; do not assume automatic per-run rotation.
+- The operator wants to give initial access **once** and leave the computer off while build/test work continues. Treat this as an explicit product requirement, **not** as a capability of the present chat session.
+- **Current limitation:** This ChatGPT conversation cannot persistently build and run agents after the user disconnects, and credentials pasted into the chat are not a durable credentials handoff to future cloud processes. Do not promise unattended testing until the cloud runner is deployed and verified.
+- The intended handoff is an encrypted secret or equivalent secure deployment credential channel, consumed by the running cloud worker. Never commit credentials, private exercise PDFs, or unredacted screenshots to this public repository.
+- The first unattended milestone is complete only when a real job can authenticate to the disposable org using its configured credential, resume after worker restart, save per-step evidence, and finish independently of the user's computer.
