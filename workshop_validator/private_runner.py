@@ -22,7 +22,8 @@ from .discovery import propose_locators, proposals_to_private_dict
 from .evidence import AssertionSpec
 from .guide_inventory import extract_inventory
 from .reconciliation import (CandidateReview, AddedAction, PageReview,
-                              SourceReview, file_sha256, reconcile_inventory)
+                              SourceReview, file_sha256)
+from .private_preflight import SourcePreflightError, require_executable_source_review
 from .pdf_annotations import ReviewNote, annotate_pdf
 from .pipeline import PlannedStep, RateLimitDetected, validate_plan
 from .retries import RetryPolicy
@@ -155,16 +156,15 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
     digest = file_sha256(guide)
     inventory = extract_inventory(guide)
     plans = load_plan(plan_path, pdf_digest=digest, page_count=inventory.page_count)
-    reviewed_ids = None
-    reconciled = False
-    if source_review_path:
-        review = load_source_review(source_review_path)
-        audit = reconcile_inventory(inventory, review, digest)
-        if audit.complete:
-            reconciled, reviewed_ids = True, audit.action_ids
-        # Never elevate an incomplete review to full source coverage.
-    if reconciled and set(reviewed_ids) != {step.step_id for step in plans}:
-        raise PrivateRunnerError("Executable plan does not cover reconciled source actions")
+    # Require full page review and exact executable coverage BEFORE authentication.
+    if not source_review_path:
+        raise PrivateRunnerError("A complete private page review is required before login")
+    review = load_source_review(source_review_path)
+    try:
+        reviewed_ids = require_executable_source_review(inventory, review, digest, plans)
+    except SourcePreflightError:
+        raise PrivateRunnerError("Private source review or plan preflight failed") from None
+    reconciled = True
     user = os.environ.get("SF_USERNAME", "")
     password = os.environ.get("SF_PASSWORD", "")
     if not user or not password:
