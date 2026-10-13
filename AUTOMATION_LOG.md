@@ -113,3 +113,23 @@ Private artifacts generated for the operator in the conversation (NOT in the pub
 Limits/blockers: No real Salesforce login or Guide step has been executed. No private Actions runner, enterprise-approved PDF/plan storage, rotated trial-org secrets or full page-by-page reviewed executable AGT503 manifest is configured. The public GitHub integration cannot create a private repo or set its secrets. No paid cloud resources or model API calls were used. Autonomous arbitrary Salesforce UI repair and durable cross-job private execution remain outstanding.
 
 Next safe milestone: confirm latest CI is green; add synthetic cross-run checkpoint/crash recovery and secure source-to-manifest authoring scaffolding. Real-org validation must wait for operator-authorized private infrastructure/secrets; do not falsely claim 100% step coverage.
+
+## 2026-10-13 15:26 PDT — Scheduled public-safety milestone
+
+Milestone: Added a conservative tracked-file boundary gate to the public CI job. Implementation commit: cb022d2310d699ff07214a8098605dbbb10de79d.
+
+Changes: New `workshop_validator/public_safety.py`, `tests/test_public_safety.py`, `docs/PUBLIC_SAFETY.md`, and a public CI step. The gate rejects tracked PDF/image/browser-trace/database and secret-container file formats, designated private-output folders, symlinks, unexpected file types, unreadable/binary/non-UTF8 files and files over 1 MiB. It prints generic reasons/counts only. This is a **file type/path** check, not content secret scanning, and cannot prevent a secret from reaching Git history before CI; human review and repository secret scanning remain essential.
+
+Actual local commands/results:
+- `git clone --depth 1 https://github.com/teomarcelo/workshop-validator.git /tmp/workshop-validator-run6`: failed (local DNS resolution unavailable).
+- `python3 -m unittest discover -s tests -v` in a minimal local workspace containing the two new files: 4 tests passed.
+- `python3 -m compileall -q workshop_validator tests` in that workspace: passed.
+- `git init -q && git add workshop_validator/public_safety.py tests/test_public_safety.py`: passed locally.
+- `python3 -m workshop_validator.public_safety` on those two locally tracked files: passed.
+- `git hash-object workshop_validator/public_safety.py tests/test_public_safety.py`: hashes matched both GitHub blobs; post-commit GitHub reads verified the two blobs and CI/doc blobs.
+
+CI status: Existing public GitHub Actions run 38470713483 on predecessor 645f7ed completed successfully. A green Actions run for implementation cb022d was **not yet observed** at log time. The full repository suite and Chromium were **not run locally**.
+
+Blockers: No approved private runner or source storage, no rotated org secrets, no complete page-reviewed executable manifest, no real Salesforce login. No live org steps or private PDF were executed. No paid infrastructure or API was used.
+
+Next: Verify public Actions for cb022d, then add a fail-closed reviewed-source preflight before any real-org mutation and synthetic tests for missing/incomplete review.
