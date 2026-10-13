@@ -63,7 +63,7 @@ Agents may be separate processes/services or isolated roles implemented within f
 6. **Execute atomically:** Persist checkpoints; run an action, collect evidence, then invoke independent verification.
 7. **Classify outcome:** PASS, UI_MISMATCH, FUNCTIONAL_FAIL, ENV_BLOCKED, AUTH_BLOCKED, NEEDS_REVIEW, or NOT_RUN.
 8. **Repair/retry:** For UI mismatches, discover a candidate route, propose the exact correction, test it, and rerun verification. For transient failures, apply bounded exponential backoff and retry after a reasonable cooldown.
-9. **Respect dependencies:** Never continue into steps that depend on an unresolved prerequisite. Independent branches may continue if the selected policy allows it.
+9. **Respect dependencies — approved Option A (2026-10-13):** Continue eligible independent steps when a step is blocked, but never execute or pass any step whose prerequisites are unmet. Keep blocked and downstream dependent steps unverified until they can be independently tested.
 10. **Regression:** Re-test the modified path from a reproducible starting state, and run a clean end-to-end pass when possible.
 11. **Report:** Generate sanitized HTML with private evidence links, statuses, confidence, proposed edits, blocked reasons, and actionable next steps.
 12. **Human review:** Review guide changes and remaining ambiguous/blocked steps before any updated PDF is published.
@@ -125,7 +125,7 @@ Some guide steps require actual generative AI output. Trial or sandbox gateway q
 - Honor rate-limit guidance; use bounded backoff, jitter, a retry budget, and durable re-queueing. **Do not attempt to evade limits.**
 - If a step merely opens a builder page, verify its UI independently of the blocked AI generation.
 - If generating an AI response is essential, **do not mark that step PASS** until it succeeds and is independently verified.
-- Prevent dependent steps from passing; handling of *independent* steps after a persistent 429 remains an open product decision below.
+- **Approved Option A (2026-10-13):** A persistent HTTP 429 does not halt the entire guide. Continue independent steps with satisfied prerequisites; keep the affected step and its dependent steps blocked or not run, never passed. Enqueue blocked steps for durable, rate-limit-aware, bounded retries. After a successful retry, independently verify the step before revalidating dependent steps from a reproducible baseline. If retries exhaust, report the run as incomplete and flag it for review.
 
 ## 7. Robustness, safety, and operations
 
@@ -152,7 +152,7 @@ Pilot success is measured by **step inventory coverage**, required-assertion pas
 
 ## 9. Open decisions for review
 
-1. **Persistent 429 (next decision):** Recommended: continue *independent* steps, keep affected/dependent steps blocked, and retry later. Alternative: pause the entire exercise.
+1. **Resolved — Option A (2026-10-13):** Continue independent steps after HTTP 429, respect prerequisites, retry blocked steps later with bounded backoff and cooldown, and keep the overall result incomplete until all required steps can be independently verified. See `docs/decisions/2026-10-13-option-a.md`.
 2. Evidence retention: where and for how long to store guides, screenshots, traces, and reports privately?
 3. Guide corrections: who approves proposed text changes before an annotated PDF is distributed?
 4. Baseline reset: what mechanism recreates a correctly provisioned workshop org between runs?
