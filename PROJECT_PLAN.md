@@ -194,3 +194,18 @@ This file is a **living, version-controlled draft**. Update it when decisions ch
 - **Guide extraction prototype:** `workshop_validator/guide_inventory.py` parses page-linked candidate steps and flags uncertainty. A private local scan of the user-provided 32-page pilot document identified candidate instructions, but **no source completeness or actual UI steps are verified**.
 - **Private HTML report prototype:** `workshop_validator/report.py` renders escaped step-level statuses and refuses all-green claims unless required evidence and source reconciliation are present. Real private storage/links remain unimplemented.
 - **Next gates:** Complete the guide inventory visual audit, introduce a replayable trusted step manifest and private execution workflow with rotated credentials, run one real Salesforce instruction and independently verify it, then expand to all steps. All live tests and confidential artifacts must be outside this public CI pipeline.
+
+## 13. Implementation progress / live pilot gates (2026-10-13)
+
+The zero-cost implementation has progressed beyond a planning draft. **Public CI has verified a synthetic Chromium browser path**, with Python modules for PDF candidate extraction, fail-closed guide source reconciliation, evidence assertions, dependencies, transactional local checkpoints, bounded HTTP 429 retries, source-bound private plan parsing, HTML reports, vector-PDF instructor review sheets and conservative UI locator suggestions.
+
+The new HTML quick summary is a **required companion artifact** alongside the annotated PDF. Both must be retained in the future end-to-end private pilot; a passing workflow must link the quick report to privately controlled evidence and the review copy.
+
+**Outstanding live/production gates (not yet achieved):**
+- Reconcile every one of the actual AGT503 exercise PDF's pages and all source instructional actions. Source extraction alone is not complete coverage; the current extracted candidate manifest is not an approved authored executable plan.
+- Configure an approved **private execution environment**, private guide/plan storage and rotated org credentials as secrets. The current public GitHub connector cannot do these administrative actions.
+- Execute a real login and a single real Salesforce instruction with independently verified evidence before attempting the complete exercise.
+- Complete baseline reset, source-to-Playwright planning, independent replay, durable cross-job checkpoints and controlled private evidence retention. Browser locator suggestions alone are not autonomous verified UI repairs.
+- Demonstrate a scheduled private workflow actually running successfully while the operator's laptop is closed and under the agreed $0 budget.
+
+See [Go-live checklist](docs/GO_LIVE_CHECKLIST.md), [public README](README.md), and [private runner template](templates/private-runner/README.md). Do not label the project complete on the basis of synthetic CI.
