@@ -63,3 +63,11 @@ Scope: Local SQLite persistence and state-transition tests only; no Salesforce o
 Blockers: No configured approved secret manager, private pilot PDF in the runner, browser worker, or cloud durable workflow. Authenticated evidence provenance, worker leases/crash reconciliation, and 429 cooldown/retry queues remain unimplemented.
 
 Next: Implement a bounded, rate-limit-aware retry state machine with persisted Retry-After cooldowns and stale-worker recovery, without ever turning blocked steps into PASS.
+
+## 2026-10-13 12:28 PDT — Run 4
+
+G1 milestone: Verified existing public CI workflow. Run 38455037627 completed successfully on commit 8b5595b8bf8b93e968ce2489866386952a4b06e3. The GitHub Actions job completed both commands: `python -m unittest discover -s tests -v` and `python -m compileall -q workshop_validator tests`.
+
+Local commands: `python3 --version` returned Python 3.13.5; `git --version` returned git 2.47.3; `git ls-remote` failed due to DNS resolution. No local tests were run. The CI workflow was already committed before this execution, so no duplicate workflow was created.
+
+Limitations: No PDF or browser integration or live-org validation occurred. Next milestone: G2 synthetic PDF and Playwright end-to-end integration. No private execution environment is deployed.
