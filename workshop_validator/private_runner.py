@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from .browser_worker import UIAction, UIAssertion, BrowserActionError, perform_actions, collect_observations
+from .discovery import propose_locators, proposals_to_private_dict
 from .evidence import AssertionSpec
 from .guide_inventory import extract_inventory
 from .reconciliation import (CandidateReview, AddedAction, PageReview,
@@ -201,6 +202,20 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                 except RateLimitDetected:
                     raise
                 except BrowserActionError:
+                    # Save only private, unverified label candidates for later
+                    # re-execution; do not silently adopt them as guide edits.
+                    proposals = []
+                    for action in step.actions:
+                        try:
+                            proposals += proposals_to_private_dict(
+                                propose_locators(page, action.role, action.accessible_name))
+                        except (ValueError, BrowserActionError):
+                            continue
+                    if proposals:
+                        target = out / ("suggestions-" + step.step_id.replace(":", "_") + ".json")
+                        with target.open("x", encoding="utf-8") as sink:
+                            json.dump(proposals, sink, indent=2)
+                        target.chmod(0o600)
                     raise
                 except Exception:
                     raise BrowserActionError("Browser operation/evidence capture failed") from None
