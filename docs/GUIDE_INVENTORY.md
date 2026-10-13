@@ -13,3 +13,5 @@ The JSON result includes source-specific text; it must be stored privately and i
 Warnings cover numbering anomalies, text extraction damage, and steps referring to field/value tables. Steps crossing pages and nested lettered steps are tracked conservatively. Screenshots, tables, non-numbered instructions, and source omissions remain unverified. Human review of every rendered page is required before using this inventory for automated guide validation.
 
 Never commit original exercise guides, PDF-derived manifests, screenshots, traces, source text, or org details to this public repository or its Actions artifacts.
+
+A separate **human-attested, fail-closed** page reconciliation interface is available in `workshop_validator/reconciliation.py`; see [SOURCE_RECONCILIATION.md](SOURCE_RECONCILIATION.md). This does not change the extractor's unconditional `verified_complete: false` flag or prove the real guide was audited. Reviews and source-specific manifests remain private.
