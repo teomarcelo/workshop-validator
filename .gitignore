@@ -16,3 +16,9 @@ playwright-report/
 test-results/
 artifacts/
 secrets/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
