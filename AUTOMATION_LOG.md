@@ -71,3 +71,17 @@ G1 milestone: Verified existing public CI workflow. Run 38455037627 completed su
 Local commands: `python3 --version` returned Python 3.13.5; `git --version` returned git 2.47.3; `git ls-remote` failed due to DNS resolution. No local tests were run. The CI workflow was already committed before this execution, so no duplicate workflow was created.
 
 Limitations: No PDF or browser integration or live-org validation occurred. Next milestone: G2 synthetic PDF and Playwright end-to-end integration. No private execution environment is deployed.
+
+## 2026-10-13 12:42 PDT — Interactive build sprint
+
+Milestones completed:
+- Created and verified the first public GitHub Actions Python unit/compile workflow: commit 8b5595b8bf8b93e968ce2489866386952a4b06e3; green cloud run https://github.com/teomarcelo/workshop-validator/actions/runs/38455037627.
+- Added a conservative, license-conscious, page-linked PDF instruction inventory with synthetic PDF fixture tests: commit a517be421b4c113494d6b61e05b9a57242bfb506; green cloud run https://github.com/teomarcelo/workshop-validator/actions/runs/38456016853.
+- Added typed Playwright Chromium fill/click actions, DOM observation collection and independent evidence verification, including synthetic PDF-to-UI and negative tests: commit cfc3353f0c2a25abe03c953007e9e2f963f87f22; green GitHub Actions browser + unit run https://github.com/teomarcelo/workshop-validator/actions/runs/38456494568.
+- Added escaped private HTML report generator with no-false-green gates, unit tests, and updated PROJECT_PLAN.md: commit ea006c86708fcbb74d41997c5c12f034d660ef0e; green GitHub Actions browser + unit run https://github.com/teomarcelo/workshop-validator/actions/runs/38456836225.
+
+Actual local tests: synthetic PDF parser 7 tests passed; synthetic Playwright smoke 6 tests passed with system Chromium. The local browser smoke used a temporary shape-compatible evidence shim, because the full connected GitHub repository was not locally cloned (network DNS unavailable); authoritative GitHub Actions success above used the actual committed independent evidence module. The report module's 6 local tests passed. Git blob SHA comparison verified that tested new module/test bytes matched the uploaded code. A privately supplied PDF was scanned in the local container but its contents, artifacts, credentials and source-derived manifests were not committed to this public repository.
+
+Current scope: **No live Salesforce login or instruction was attempted.** The source inventory is candidate-only and explicitly unverified. Public CI tests are safe synthetic jobs; they are not the private cloud validation runner. No paid cloud resources or external LLM APIs were provisioned.
+
+Next: Add deterministic source reconciliation and trusted action-manifest interface; integrate browser observations with durable checkpoint transitions and private HTML reporting. Actual org validation is blocked on a separately approved PRIVATE execution workflow, company-approved source PDF access, and new operator-entered rotated org secrets. Preserve the $0 budget and prohibit confidential artifacts in public GitHub Actions.
