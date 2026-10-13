@@ -163,7 +163,7 @@ Pilot success is measured by **step inventory coverage**, required-assertion pas
 
 This file is a **living, version-controlled draft**. Update it when decisions change, using descriptive commits and, once multiple contributors are involved, pull requests. Keep decisions separate from implementation status; do not label a proposed agent or capability as deployed until independently demonstrated.
 
-**Current state (2026-10-13):** The public repo contains prototype Python dependency scheduling, independent evidence verification, and SQLite checkpointing with unit tests recorded in `AUTOMATION_LOG.md`. No GitHub Actions cloud workflow, browser runner, private storage integration, actual Salesforce execution, PDF annotation pipeline, or durable cloud orchestrator has been deployed.
+**Current state (2026-10-13):** Public GitHub Actions CI is deployed and has successfully run Python unit checks and a synthetic Chromium/Playwright smoke test. Prototype modules now cover dependency scheduling, independent assertion verification, SQLite checkpoints, candidate PDF step inventory (unreconciled), authored Playwright actions, and private HTML report rendering. The real exercise guide was processed only in a private local environment; no public guide files or private manifests were committed. **Not yet deployed:** private secrets/document access, actual Salesforce org login/exercise validation, source completeness audit, durable cloud runner with cross-run recovery, or PDF annotations.
 
 
 ## 11. First-run credentials and unattended execution (confirmed requirements)
@@ -186,3 +186,11 @@ This file is a **living, version-controlled draft**. Update it when decisions ch
 - **No always-on service:** Actions workflows are bounded, ephemeral cloud jobs, manually triggered first and scheduled later. Implement encrypted private cross-run checkpoints before claiming durable automatic resume. Scheduled events can be delayed/dropped; record and inspect actual run history.
 - **Exit gates:** verified public CI on the combined unit suite, one synthetic Playwright end-to-end demonstration, approved private runner/doc/secret access, one real Salesforce step independently verified, full-guide coverage, then a confirmed scheduled run that succeeds with the laptop closed.
 - **No cloud deployment authorized yet.** This is an architecture selection, not an implementation claim; approvals for private execution and secure input storage are still needed.
+
+### Implementation status: confirmed cloud milestones (2026-10-13)
+
+- **G1 PASSED:** Public GitHub Actions runs the Python test suite and compile checks on push/PR; first run verified green: https://github.com/teomarcelo/workshop-validator/actions/runs/38455037627.
+- **G2 synthetic proof PASSED:** A later public Actions run successfully executed a real Chromium/Playwright browser smoke with authored fill/click actions and independent evidence assertions: https://github.com/teomarcelo/workshop-validator/actions/runs/38456494568. No real Salesforce data was involved.
+- **Guide extraction prototype:** `workshop_validator/guide_inventory.py` parses page-linked candidate steps and flags uncertainty. A private local scan of the user-provided 32-page pilot document identified candidate instructions, but **no source completeness or actual UI steps are verified**.
+- **Private HTML report prototype:** `workshop_validator/report.py` renders escaped step-level statuses and refuses all-green claims unless required evidence and source reconciliation are present. Real private storage/links remain unimplemented.
+- **Next gates:** Complete the guide inventory visual audit, introduce a replayable trusted step manifest and private execution workflow with rotated credentials, run one real Salesforce instruction and independently verify it, then expand to all steps. All live tests and confidential artifacts must be outside this public CI pipeline.
