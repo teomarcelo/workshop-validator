@@ -15,3 +15,6 @@ Synthetic usage:
 The output must be saved to an approved private store and offered to instructors through appropriately authorized access. For temporary files, `write_private_report(path, html)` writes with mode `0600` and refuses to overwrite.
 
 **Remaining:** Connect real step records to report generation, approved private evidence links, per-step screenshot/DOM integrity, calibrated confidence, instructor review UI, and reviewed annotated PDF.
+
+
+The quick HTML report now includes top-level step counts (pass/blocked/needs review/not run), an explicit source-inventory completeness indicator and per-step **relative links to screenshots in the private output directory**, when actually captured. All screenshot references are constrained to `screenshots/<safe-filename>.png`; arbitrary external URLs/traversal are rejected. Reports remain private, never public Actions artifacts.

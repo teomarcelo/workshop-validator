@@ -1,12 +1,15 @@
-"""Private, escaped HTML evidence report; deliberately never claims false PASS."""
+"""Quick, escaped HTML instructor report; never claims an unsupported PASS."""
 
 from collections import Counter
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
+import re
+
 
 VALID = frozenset({"PASS", "UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED",
                    "AUTH_BLOCKED", "NEEDS_REVIEW", "NOT_RUN", "RUNNING", "RETRY_WAIT"})
+SCREENSHOT = re.compile(r"^screenshots/[A-Za-z0-9_.-]+\.png$")
 
 
 @dataclass(frozen=True)
@@ -18,58 +21,95 @@ class ReportStep:
     evidence_ids: tuple[str, ...] = ()
     note: str = ""
     required: bool = True
+    screenshot_href: str | None = None
 
 
 def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: bool = False) -> str:
-    """Create HTML for private storage, escaping every potentially private field.
+    """Private HTML with accurate counts, evidence IDs and safe relative links.
 
-    Full verification requires a complete, independently reviewed source
-    inventory and PASS for all required steps. No numeric confidence is invented.
+    A run is VERIFIED only when a source audit is complete, at least one
+    required step exists and every required step has independently proven PASS.
+    Never mistake textual resemblance, screenshots or model confidence for
+    assertion-grade evidence.
     """
-    if not run_id.strip() or not steps:
+    if not isinstance(run_id, str) or not run_id.strip() or not steps:
         raise ValueError("Run ID and step inventory are required")
     if len({s.step_id for s in steps}) != len(steps):
         raise ValueError("Duplicate step identifiers")
-    if any(s.status not in VALID or s.page < 1 for s in steps):
+    if any(s.status not in VALID or type(s.page) is not int or s.page < 1 for s in steps):
         raise ValueError("Invalid step status or page")
     if any(s.status == "PASS" and not s.evidence_ids for s in steps):
-        raise ValueError("PASS requires evidence IDs")
-    verified = bool(inventory_verified) and all(
-        s.status == "PASS" for s in steps if s.required
-    ) and any(s.required for s in steps)
+        raise ValueError("PASS requires independently verified evidence IDs")
+    if any(s.screenshot_href is not None and
+           (not isinstance(s.screenshot_href, str) or not SCREENSHOT.fullmatch(s.screenshot_href))
+           for s in steps):
+        raise ValueError("Invalid private screenshot reference")
+
     counts = Counter(s.status for s in steps)
+    required = [s for s in steps if s.required]
+    verified = bool(inventory_verified) and bool(required) and all(s.status == "PASS" for s in required)
     result = "VERIFIED" if verified else "INCOMPLETE"
-    total = len(steps)
-    summary = f"{counts['PASS']}/{total} candidate steps passed; inventory {'reconciled' if inventory_verified else 'not reconciled'}"
+    n = len(steps)
+    blocked = sum(counts[name] for name in ("ENV_BLOCKED", "AUTH_BLOCKED", "RETRY_WAIT"))
+    failed = sum(counts[name] for name in ("UI_MISMATCH", "FUNCTIONAL_FAIL", "NEEDS_REVIEW"))
+    pending = counts["NOT_RUN"] + counts["RUNNING"]
+    cards = (("Steps", n), ("Passed", counts["PASS"]), ("Blocked", blocked),
+             ("Need review", failed), ("Not run", pending))
+    metric_html = "".join(
+        f"<div class='metric'><strong>{value}</strong><span>{escape(label)}</span></div>"
+        for label, value in cards
+    )
     rows = []
     for s in steps:
-        evidence = ", ".join(escape(e) for e in s.evidence_ids) or "No evidence"
-        rows.append(
-            "<tr>" + "".join(
-                f"<td>{escape(v)}</td>" for v in (
-                    s.step_id, str(s.page), s.title, s.status, s.note
-                )
-            ) + f"<td>{evidence}</td></tr>"
-        )
-    return ("<!doctype html><html lang='en'><head><meta charset='utf-8'>"
-            "<meta name='viewport' content='width=device-width, initial-scale=1'>"
-            "<title>Workshop validation evidence</title>"
-            "<style>body{font:15px system-ui;margin:2rem auto;max-width:1100px;padding:0 1rem;color:#162331;}"
-            "table{border-collapse:collapse;width:100%;}th,td{padding:.7rem;border-bottom:1px solid #ddd;text-align:left;}"
-            "th{background:#edf3f9;}td{vertical-align:top;word-break:break-word}.muted{color:#5b6673}</style>"
-            "</head><body><h1>Workshop validator report</h1>"
-            f"<p>Run: {escape(run_id)} | Result: <strong>{result}</strong></p>"
-            f"<p class='muted'>{escape(summary)}</p>"
-            "<p>Step status is evidence-dependent. Missing, blocked and unverified steps are not passed.</p>"
-            "<table><thead><tr><th>Step ID</th><th>Page</th><th>Instruction</th>"
-            "<th>Status</th><th>Finding</th><th>Evidence IDs</th></tr></thead><tbody>"
-            + "".join(rows) + "</tbody></table></body></html>")
+        ev = ", ".join(escape(e) for e in s.evidence_ids) or "<span class='muted'>No evidence</span>"
+        screenshot = (f"<a href='{escape(s.screenshot_href, quote=True)}'>View screenshot</a>"
+                      if s.screenshot_href else "<span class='muted'>Not captured</span>")
+        cells = [
+            escape(s.step_id), str(s.page), escape(s.title),
+            f"<span class='status'>{escape(s.status)}</span>",
+            escape(s.note), ev, screenshot,
+        ]
+        rows.append("<tr>" + "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
+
+    safe_run = escape(run_id)
+    return (
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+        "<title>Workshop Validator - Instructor Summary</title>"
+        "<style>"
+        "*{box-sizing:border-box}body{font:15px system-ui,-apple-system,Segoe UI,sans-serif;margin:0;"
+        "color:#1a3040;background:#f4f7fa}header{background:#086676;color:white;padding:32px max(5vw,24px)}"
+        "h1{margin:0 0 6px;font-size:27px}main{max-width:1220px;margin:30px auto;padding:0 24px}"
+        ".metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}"
+        ".metric,.panel{background:white;border:1px solid #dce6ed;border-radius:10px;padding:20px;"
+        "box-shadow:0 1px 6px #132f4810}.metric strong{display:block;font-size:30px;color:#056876}"
+        ".metric span,.muted{color:#617581}.warning{background:#fff6e6;border-left:4px solid #a87510;"
+        "padding:18px;margin:22px 0;border-radius:6px}table{border-collapse:collapse;width:100%;}"
+        "th,td{padding:13px;border-bottom:1px solid #e0e7ed;text-align:left;vertical-align:top;"
+        "overflow-wrap:anywhere}th{background:#eef4f8;white-space:nowrap}"
+        ".panel{overflow-x:auto;margin-top:20px}.status{font-weight:700;font-size:12px}"
+        "a{color:#075d85}.meta{color:#e0edf1;margin-top:6px}</style></head><body>"
+        "<header><h1>Workshop validation summary</h1>"
+        f"<p class='meta'>Run: {safe_run}</p></header>"
+        "<main><p class='meta' style='color:#45616e'>"
+        f"Result: <strong>{result}</strong> | "
+        f"Source inventory: {'RECONCILED' if inventory_verified else 'NOT RECONCILED'}"
+        "</p><section class='metrics'>" + metric_html + "</section>"
+        "<div class='warning'><strong>Evidence policy:</strong> A step is PASS only after all "
+        "required assertions match independent recorded observations. Blocked, ambiguous "
+        "and unreviewed steps remain unverified. This report and its links are PRIVATE.</div>"
+        "<section class='panel'><h2>Step-by-step findings</h2>"
+        "<table><thead><tr><th>Step ID</th><th>PDF page</th><th>Instruction</th>"
+        "<th>Status</th><th>Finding</th><th>Evidence IDs</th><th>Screenshot</th>"
+        "</tr></thead><tbody>" + "".join(rows) +
+        "</tbody></table></section></main></body></html>"
+    )
 
 
 def write_private_report(path: str | Path, html: str) -> None:
-    """Write a new report with restrictive permissions; never overwrite."""
+    """Write a new report with owner-only permissions and no overwrite."""
     dest = Path(path)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with dest.open('x', encoding='utf-8') as f:
+    with dest.open("x", encoding="utf-8") as f:
         f.write(html)
     dest.chmod(0o600)

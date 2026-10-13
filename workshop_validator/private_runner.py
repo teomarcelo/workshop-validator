@@ -174,6 +174,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
     _protected_dir(evidence)
     run_id = "run-" + uuid4().hex[:14]
     org_id = "disposable-org"
+    screenshot_refs: dict[str, str] = {}
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -189,12 +190,18 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                         if host.endswith(".salesforce.com") or host.endswith(".force.com"):
                             responses.append(response)
                 page.on("response", on_response)
+                screenshot = evidence / (step.step_id.replace(":", "_") + ".png")
+                def capture_screenshot():
+                    try:
+                        page.screenshot(path=str(screenshot), full_page=False, animations="disabled")
+                        screenshot.chmod(0o600)
+                        screenshot_refs[step.step_id] = "screenshots/" + screenshot.name
+                    except Exception:
+                        raise BrowserActionError("Required private screenshot capture failed") from None
                 try:
                     perform_actions(page, step.actions)
                     observed = collect_observations(page, context, step.assertions)
-                    screenshot = evidence / (step.step_id.replace(":", "_") + ".png")
-                    page.screenshot(path=str(screenshot), full_page=False, animations="disabled")
-                    screenshot.chmod(0o600)
+                    capture_screenshot()
                     if responses:
                         raise RateLimitDetected("Observed Salesforce HTTP 429",
                             retry_after=responses[0].headers.get("retry-after"))
@@ -202,6 +209,8 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                 except RateLimitDetected:
                     raise
                 except BrowserActionError:
+                    if not screenshot.exists():
+                        capture_screenshot()
                     # Save only private, unverified label candidates for later
                     # re-execution; do not silently adopt them as guide edits.
                     proposals = []
@@ -229,6 +238,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                 retry_policy=RetryPolicy(max_attempts=3,base_seconds=60,
                                          max_backoff_seconds=3600),
                 max_wait_seconds=600,
+                screenshot_refs=screenshot_refs,
             )
         finally:
             browser.close()

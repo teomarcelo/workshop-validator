@@ -41,4 +41,17 @@ class ReportTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):
                 write_private_report(path,'changed')
 
+    def test_private_screenshot_link_is_relative_and_escaped(self):
+        item=ReportStep('1',1,'Open page','PASS',('evidence-1',),
+                        screenshot_href='screenshots/step-1.png')
+        html=render_report('run',[item],inventory_verified=True)
+        self.assertIn("href='screenshots/step-1.png'",html)
+        self.assertIn('View screenshot',html)
+        with self.assertRaises(ValueError):
+            render_report('run',[ReportStep('1',1,'Step','PASS',('e1',),
+                          screenshot_href='https://evil.example/secret')])
+        with self.assertRaises(ValueError):
+            render_report('run',[ReportStep('1',1,'Step','PASS',('e1',),
+                          screenshot_href='screenshots/../../secret.png')])
+
 if __name__=='__main__':unittest.main()

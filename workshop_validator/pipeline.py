@@ -87,7 +87,8 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
                   retry_policy: RetryPolicy | None = None,
                   max_wait_seconds: int = 0,
                   clock: Callable[[], float] = time.time,
-                  sleeper: Callable[[float], None] = time.sleep) -> PipelineOutcome:
+                  sleeper: Callable[[float], None] = time.sleep,
+                  screenshot_refs: dict[str, str] | None = None) -> PipelineOutcome:
     """Run each eligible step once, then produce a fail-closed private HTML report.
 
     A reconciled source MUST supply the exact same set of action IDs as plans.
@@ -117,6 +118,8 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
         raise PlanMismatch("Executor and verifier identities must be distinct")
     if any(not s.assertions for s in plans):
         raise PlanMismatch("All steps need independently verifiable assertions")
+    if not any(s.required for s in plans):
+        raise PlanMismatch("At least one required source instruction is needed")
 
     executor = execute_step or _default_execute
     store = CheckpointStore(db_path)
@@ -180,6 +183,7 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
             ids_by_step.get(s.step_id, ()),
             findings.get(status, ""),
             s.required,
+            (screenshot_refs or {}).get(s.step_id),
         ))
     html = render_report(run_id, report_items,
                          inventory_verified=source_reconciled)
