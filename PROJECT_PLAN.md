@@ -157,13 +157,13 @@ Pilot success is measured by **step inventory coverage**, required-assertion pas
 3. Guide corrections: who approves proposed text changes before an annotated PDF is distributed?
 4. Baseline reset: what mechanism recreates a correctly provisioned workshop org between runs?
 5. Confidence calibration: what empirical benchmarks and threshold must be met before production use?
-6. Infrastructure choice and budget for a durable cloud runner.
+6. **Resolved for the $0 pilot (2026-10-13):** Use standard GitHub-hosted Actions runners: public, secret-free CI in this repository and real-org validation only in a separately approved **private workflow** within the GitHub Free monthly quota. No paid LLM inference or always-on server. See [the $0-first cloud architecture](docs/ZERO_COST_CLOUD_ARCHITECTURE.md). Production-grade durable orchestration remains a later decision.
 
 ## 10. Change management
 
 This file is a **living, version-controlled draft**. Update it when decisions change, using descriptive commits and, once multiple contributors are involved, pull requests. Keep decisions separate from implementation status; do not label a proposed agent or capability as deployed until independently demonstrated.
 
-**Current state:** Plan drafted. No cloud orchestrator, agents, Playwright tests, or PDF annotation pipeline have been deployed.
+**Current state (2026-10-13):** The public repo contains prototype Python dependency scheduling, independent evidence verification, and SQLite checkpointing with unit tests recorded in `AUTOMATION_LOG.md`. No GitHub Actions cloud workflow, browser runner, private storage integration, actual Salesforce execution, PDF annotation pipeline, or durable cloud orchestrator has been deployed.
 
 
 ## 11. First-run credentials and unattended execution (confirmed requirements)
@@ -174,3 +174,15 @@ This file is a **living, version-controlled draft**. Update it when decisions ch
 - **Current limitation:** This ChatGPT conversation cannot persistently build and run agents after the user disconnects, and credentials pasted into the chat are not a durable credentials handoff to future cloud processes. Do not promise unattended testing until the cloud runner is deployed and verified.
 - The intended handoff is an encrypted secret or equivalent secure deployment credential channel, consumed by the running cloud worker. Never commit credentials, private exercise PDFs, or unredacted screenshots to this public repository.
 - The first unattended milestone is complete only when a real job can authenticate to the disposable org using its configured credential, resume after worker restart, save per-step evidence, and finish independently of the user's computer.
+
+## 12. $0-first cloud execution decision (approved 2026-10-13)
+
+**Target:** $0 incremental monthly spend during the single-guide pilot, with no paid LLM inference. See the detailed [Cloud Architecture and Cost Guardrails](docs/ZERO_COST_CLOUD_ARCHITECTURE.md).
+
+- **Public repository stays public** for code, architecture, sanitized fixtures and synthetic CI. Standard GitHub-hosted Actions runners are free for public repos.
+- **Live tests run privately**: use a separate, approved private GitHub Actions workflow for credentials, PDFs and private evidence. GitHub Free's private-run allowance is currently 2,000 shared runner-minutes/month and 500 MB shared artifact/package storage. An illustrative cap is one 30-minute run daily (up to ~900 minutes per 30-day month), leaving headroom for other jobs; track usage and stop before paid thresholds. Free allowances are shared across other private repos and may change.
+- **No live-org data in public Actions logs or artifacts.** Source PDFs stay in company-approved private storage outside this code repo; actual access integration is a prerequisite. Store rotated credentials only in private Actions secrets (never Git or chat-driven prompts).
+- **No external AI charges** in this phase. Automated checks use Playwright, explicit assertions and deterministic rule-based candidate detection; ambiguous UI repairs require review until an optional AI budget is approved.
+- **No always-on service:** Actions workflows are bounded, ephemeral cloud jobs, manually triggered first and scheduled later. Implement encrypted private cross-run checkpoints before claiming durable automatic resume. Scheduled events can be delayed/dropped; record and inspect actual run history.
+- **Exit gates:** verified public CI on the combined unit suite, one synthetic Playwright end-to-end demonstration, approved private runner/doc/secret access, one real Salesforce step independently verified, full-guide coverage, then a confirmed scheduled run that succeeds with the laptop closed.
+- **No cloud deployment authorized yet.** This is an architecture selection, not an implementation claim; approvals for private execution and secure input storage are still needed.
