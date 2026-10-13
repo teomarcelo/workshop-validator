@@ -93,3 +93,23 @@ Implemented a fail-closed, page-by-page PDF reconciliation review gate, with 17 
 Local commands: git clone --depth 1 (failed: DNS unavailable); python3 -W error::ResourceWarning -m unittest discover -s tests -v (17 new tests passed using a minimal GuideInventory stand-in); python3 -m compileall -q workshop_validator tests (passed); git hash-object (new source/test bytes matched GitHub blobs). Full repository tests were not run locally. Prior green public CI: 38457059197, before this change.
 
 Blockers: No approved private runner, guide audit, rotated secrets, or real Salesforce run. Next: trusted manifest-to-action planning interface, followed by browser-to-checkpoint integration. Reviewer attestations do not independently prove completeness.
+
+## 2026-10-13 14:07-14:27 PDT — Interactive implementation sprint (user-requested)
+
+Implemented/committed public-safe code with companion synthetic tests and documentation:
+- 64636e25000f6cb9aa83a278ee319494549a16e8: Layout-preserving PDF instructor review sheets. GitHub Actions confirmed success: https://github.com/teomarcelo/workshop-validator/actions/runs/38468660126.
+- 30b660585bb74960e12f84796198f7de3014f89b: End-to-end authored browser > independent evidence > dependency checkpoint > private HTML report pipeline. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38469003618.
+- 9e2f1f2004bdca278dd48dd7e53e7d3f81272810: Persistent bounded HTTP 429 retry tickets. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38469166597.
+- 3d9e3716293587619b9dd50fc0c34423c796c0bd: Private-only Salesforce login/guide-bound authored plan adapter. Its CI run was superseded/cancelled by a subsequent push; newer green runs include this code.
+- e8ddea15a116565829f337fbe292f6c3fd0ae2bb: Private HTTPS input handoff and separately approved private GitHub Actions workflow TEMPLATE (not deployed). Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38469630541.
+- 67d6c32edbce1eb923fc62238404384eaf1dbaeb: Bounded same-job Option A 429 retries integrated in the pipeline and private runner. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38469857498.
+- 0ab0cde11bf38f9958e6fbba0542be62a5f93c23: Fail-closed private page-review checklist generator. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38470033121.
+- 7471db1ca4f383bf080cefaddf53dedc224bff23: Conservative UI locator proposal discovery; no automatic approval. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38470205338.
+- 495085d126c6f45642954387d1518b843f1c7a1f: Public README, live pilot go-live checklist and living plan updates. Confirmed green: https://github.com/teomarcelo/workshop-validator/actions/runs/38470343620.
+- c29f3a1fc5291094f76643926bdca8946ed10bcd: Rich quick HTML metrics and private screenshot evidence links. CI result was still running when this log was drafted; do not call it passing until GitHub reports success.
+
+Private artifacts generated for the operator in the conversation (NOT in the public repo): A 36-page instructor sample comprising all 32 original AGT503 pages plus four marked instructor-note sheets about possible numbering inconsistencies, and a companion quick HTML summary. Original pages were checked rendered pixel-identical across the entire 32-page source. These source-page findings are NOT live Salesforce UI discrepancies, the edits are NOT approved, and no Salesforce test was performed. The actual source PDF and reports were not committed.
+
+Limits/blockers: No real Salesforce login or Guide step has been executed. No private Actions runner, enterprise-approved PDF/plan storage, rotated trial-org secrets or full page-by-page reviewed executable AGT503 manifest is configured. The public GitHub integration cannot create a private repo or set its secrets. No paid cloud resources or model API calls were used. Autonomous arbitrary Salesforce UI repair and durable cross-job private execution remain outstanding.
+
+Next safe milestone: confirm latest CI is green; add synthetic cross-run checkpoint/crash recovery and secure source-to-manifest authoring scaffolding. Real-org validation must wait for operator-authorized private infrastructure/secrets; do not falsely claim 100% step coverage.
