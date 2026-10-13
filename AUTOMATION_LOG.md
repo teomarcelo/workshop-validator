@@ -39,3 +39,27 @@ Commands actually executed in local container:
 Scope: Existing scheduler tests were not rerun; no Salesforce login, PDF extraction, browser test, or cloud deployment occurred.
 Blockers: Pilot PDF, approved cloud credential store, browser worker, and durable runtime are not configured. Collector identity is not cryptographically verified.
 Next: Add a durable status transition gate connecting verified outcomes to dependency planning.
+
+
+## 2026-10-13 11:26 PDT — Run 3
+
+Milestone: Transactional, evidence-gated SQLite checkpoint prototype.
+
+Implementation commit: be459a9b956d4e7c2d084c95561f625732110eba.
+
+Changes: Added workshop_validator/checkpoints.py, tests/test_checkpoints.py, and docs/CHECKPOINTS.md. Run manifests and expected assertions are frozen at creation; atomic claims use attempt-version checks. A step can become PASS only through the independent verifier using stored assertions. Blocked branches preserve Option A continuation of independent steps. Added SQLite database patterns to .gitignore.
+
+Commands actually executed in a local container:
+- git clone --depth 1: failed because github.com DNS resolution was unavailable; fetched the existing source/tests through the GitHub connector and recreated them locally for validation.
+- python3 -m unittest discover -s /tmp/wv_run3/repo/tests -v: initially failed because the command ran outside the package root; corrected working directory.
+- python3 -m unittest discover -s tests -v: 15 new checkpoint tests passed.
+- python3 -W error::ResourceWarning -m unittest discover -s tests -v: 15 checkpoint tests passed after fixing a test connection warning.
+- python3 -W error::ResourceWarning -m unittest discover -s tests -q: 45 tests passed (15 new + 12 scheduler + 18 evidence tests).
+- python3 -m compileall -q workshop_validator tests: succeeded.
+- git hash-object on new files: hashes matched the blobs committed through GitHub; post-commit fetch verified all four implementation file SHA values.
+
+Scope: Local SQLite persistence and state-transition tests only; no Salesforce org login, private PDF processing, Playwright execution, actual HTTP 429 request, deployed cloud runner, or durable cloud workflow. A local checkpoint database is not a cloud orchestrator.
+
+Blockers: No configured approved secret manager, private pilot PDF in the runner, browser worker, or cloud durable workflow. Authenticated evidence provenance, worker leases/crash reconciliation, and 429 cooldown/retry queues remain unimplemented.
+
+Next: Implement a bounded, rate-limit-aware retry state machine with persisted Retry-After cooldowns and stale-worker recovery, without ever turning blocked steps into PASS.
