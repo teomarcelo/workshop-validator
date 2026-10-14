@@ -58,3 +58,16 @@ removal recommendation: the runner does not auto-skip, reset, inject faults,
 or claim a redundancy candidate. Those controlled replay stages remain
 separate, private, authorized work. Synthetic unit tests prove that a
 deliberately wrong value is independently rejected.
+
+
+## Live form-value assertions (synthetic support)
+
+Use `DOM_VALUE` with the `eq` operator for generated input and textarea
+values. `DOM_TEXT` observes rendered text and may not reflect a form control's
+current value after editing. `DOM_VALUE` reads Playwright's live `input_value()`
+property, rejects ambiguous/missing controls, and independently compares the
+observed string with the exact authored expected value. Weak substring
+operators are deliberately unsupported for `DOM_VALUE`. Synthetic Chromium
+fault injection changes an initially correct textarea to a wrong value and
+requires `FUNCTIONAL_FAIL`, including through the pre/post necessity probe.
+This is not evidence of any current Salesforce behavior.

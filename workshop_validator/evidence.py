@@ -14,7 +14,7 @@ FUNCTIONAL_FAIL = "FUNCTIONAL_FAIL"
 NEEDS_REVIEW = "NEEDS_REVIEW"
 
 # Screenshots and model opinions are deliberately not assertion-grade evidence.
-VALUE_TYPES = {"DOM_TEXT": str, "DOM_VISIBLE": bool, "API_STATUS": int}
+VALUE_TYPES = {"DOM_TEXT": str, "DOM_VALUE": str, "DOM_VISIBLE": bool, "API_STATUS": int}
 OPERATORS = frozenset({"eq", "contains", "not_contains"})
 
 

@@ -72,6 +72,9 @@ def collect_observations(page, context: StepContext,
                 actual = target.is_visible()
             elif spec.kind == "DOM_TEXT":
                 actual = target.inner_text()
+            elif spec.kind == "DOM_VALUE":
+                # Form values can differ from rendered text after user edits.
+                actual = target.input_value()
             else:
                 raise BrowserActionError(f"Unsupported browser assertion at index {index}")
         except PlaywrightError:

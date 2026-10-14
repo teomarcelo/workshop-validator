@@ -95,5 +95,46 @@ class BrowserWorkerTests(unittest.TestCase):
         with self.assertRaises(BrowserActionError):
             perform_actions(self.page,[UIAction('javascript','button','Save')])
 
+
+    def test_live_textarea_value_detects_wrong_generated_default(self):
+        self.page.set_content(
+            '<label for="script">Generated script</label>'
+            '<textarea id="script">list[object]</textarea>'
+        )
+        expected = [UIAssertion(
+            AssertionSpec("generated", "DOM_VALUE", "list[object]"),
+            "textbox", "Generated script")]
+        self.assertEqual(check_authored_step(
+            self.page, self.context, (), expected).status, "PASS")
+        self.page.get_by_role("textbox", name="Generated script").fill("string")
+        self.assertEqual(check_authored_step(
+            self.page, self.context, (), expected).status, "FUNCTIONAL_FAIL")
+
+    def test_necessity_probe_reads_before_and_after_form_value(self):
+        from workshop_validator.behavioral_probe import execute_with_necessity_probe
+        from workshop_validator.pipeline import PlannedStep
+        from workshop_validator.evidence import verify_step
+        self.page.set_content(
+            '<label for="script">Generated script</label>'
+            '<textarea id="script">list[object]</textarea>'
+        )
+        expected = UIAssertion(
+            AssertionSpec("generated", "DOM_VALUE", "list[object]"),
+            "textbox", "Generated script")
+        step = PlannedStep(
+            "step-1", 1, "Synthetic manual edit",
+            (UIAction("fill", "textbox", "Generated script", "string"),),
+            (expected,), (), True, (expected,))
+        observations, probe = execute_with_necessity_probe(
+            self.page, step, self.context)
+        self.assertEqual(probe.before.status, "PASS")
+        self.assertEqual(probe.after.status, "FUNCTIONAL_FAIL")
+        self.assertEqual(probe.necessity.classification,
+                         "ACTION_REGRESSED_EXPECTED_STATE")
+        self.assertFalse(probe.necessity.propose_guide_removal)
+        self.assertEqual(verify_step(
+            self.context, (expected.spec,), observations).status, "FUNCTIONAL_FAIL")
+
+
 if __name__ == '__main__':
     unittest.main()

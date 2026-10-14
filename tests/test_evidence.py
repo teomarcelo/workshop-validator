@@ -108,6 +108,27 @@ class EvidenceGateTests(unittest.TestCase):
         result = self.check(FUNCTIONAL_FAIL, observations=bad)
         self.assertNotIn(actual, repr(result))
 
+
+    def test_dom_value_exact_match_and_fault_injection(self):
+        spec = [AssertionSpec("generated", "DOM_VALUE", "list[object]")]
+        good = [Observation("e-value", "generated", "DOM_VALUE", "list[object]",
+                            "run-1", "org-1", "S-1", "executor")]
+        self.check(PASS, specs=spec, observations=good)
+        self.check(FUNCTIONAL_FAIL, specs=spec,
+                   observations=[self.replace(good[0], actual="string")])
+        self.check(NEEDS_REVIEW, specs=spec,
+                   observations=[self.replace(good[0], actual=None)])
+
+    def test_dom_value_rejects_weak_substring_or_wrong_kind(self):
+        spec = [AssertionSpec("generated", "DOM_VALUE", "list[object]", "contains")]
+        obs = [Observation("e-value", "generated", "DOM_VALUE", "list[object]",
+                           "run-1", "org-1", "S-1", "executor")]
+        self.check(NEEDS_REVIEW, specs=spec, observations=obs)
+        self.check(NEEDS_REVIEW,
+                   specs=[AssertionSpec("generated", "DOM_VALUE", "list[object]")],
+                   observations=[self.replace(obs[0], kind="DOM_TEXT")])
+
+
     @staticmethod
     def replace(instance, **changes):
         from dataclasses import replace
