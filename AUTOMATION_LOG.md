@@ -221,3 +221,22 @@ GitHub write constraints: moving an existing branch ref and opening a PR to main
 Blockers: Approved private runner, reviewed complete guide plan, encrypted private document/evidence storage, operator-rotated credentials, authenticated reset/evidence chain and safe disposable baseline remain unavailable. No live omission, fault injection, or full guide validation occurred.
 
 Next milestone: Verify the final public Chromium CI result, merge this tested branch through an authorized review path, then integrate authenticated reset and literal action/skip/fault event provenance with private checkpointing and both required private outputs (quick HTML and pixel-preserving annotated PDF).
+
+## 2026-10-13 22:27 PDT / 2026-10-14 05:27 UTC — Synthetic controlled replay browser proof
+
+Milestone: Fast-forwarded `main` from `0fd5f4a61ef17ba7d38cd1038d7036a67fb45cad` to previously tested replay provenance commit `d4c3ed029932fad6fe5626e9e62a25844bd7a2da`. GitHub Actions run https://github.com/teomarcelo/workshop-validator/actions/runs/38516328132 completed SUCCESS on that main revision.
+
+New implementation commit: `dedc137965b758055b5e98d49381fef1c0cb052f` on `automation/replay-browser-20261013`. Added `tests/test_replay_browser.py` with three actual synthetic Chromium scenarios: independent fresh-page execute/omit/fault paths, a deliberately insensitive oracle that incorrectly PASSes the broken value and must block removal, and a wrong literal edit that fails both target and downstream assertions. The existing public browser smoke suite imports the new cases; `docs/CONTROLLED_REPLAY.md` records the limitations. No private data was used.
+
+Actually executed locally:
+- `git ls-remote https://github.com/teomarcelo/workshop-validator.git HEAD`: FAILED because local DNS could not resolve github.com.
+- `RUN_BROWSER_SMOKE=1 CHROMIUM_PATH=/usr/bin/chromium python3 -m unittest discover -s tests -p test_replay_browser.py -v`: 3 PASS on real local Chromium with API-compatible stand-ins for repository modules, NOT the complete repository.
+- `RUN_BROWSER_SMOKE=1 CHROMIUM_PATH=/usr/bin/chromium python3 -m unittest discover -s tests -p test_necessity_browser.py -v`: 3 PASS in a minimal local import-wrapper workspace.
+- `python3 -m compileall -q tests/test_replay_browser.py`: PASS.
+- `git hash-object tests/test_replay_browser.py`: `f67f74e0dc2c0621ad49398b9c1a6a83bb25c483`, matching the GitHub test blob.
+
+Verified GitHub Actions: https://github.com/teomarcelo/workshop-validator/actions/runs/38516655102 on implementation commit `dedc137` completed SUCCESS. Both public jobs passed: tracked-file safety, full Python unit tests, compile, and actual synthetic Chromium browser smoke. These are synthetic tests, NOT live Salesforce validation.
+
+GitHub write blockers: updating `main` to `dedc137` and opening a PR were rejected by connector safety checks. The verified implementation remains on the feature branch. No approved private runner, authenticated reset provenance, secure guide/manifest storage, rotated operator-managed credentials, or real org execution is available. No live omission/fault trial, private PDF validation, or paid resource was used.
+
+Next: integrate the verified feature branch through an authorized path; then bind authenticated literal-action/omission/fault events to reset attestations and private checkpoint transitions, retaining both private quick HTML and pixel-preserving annotated instructor PDF outputs.
