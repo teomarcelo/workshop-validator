@@ -155,3 +155,20 @@ Verification performed:
 Limitations: No authenticated Salesforce browser run, no live no-op/omission test, no manual test of all guide instructions, no production environment, and no proof of a current UI change. Source page-numbering alone is no longer considered an actionable validation defect.
 
 Next high-priority work: integrate pre/post state and omission/negative-control probes into an approved, resettable PRIVATE Salesforce run; obtain authorized private guide/plan storage and rotated secrets; verify one real end-to-end step before expanding to complete guide coverage.
+
+## 2026-10-13 18:27 PDT — Behavioral necessity pre/post probe integration
+
+Milestone: public-safe optional authored `necessity_assertions` in the private plan. They are checked BEFORE the literal action, then enforced as independent postconditions along with normal step assertions. An ambiguous before-state blocks mutation; a deliberately wrong post-state is classified FUNCTIONAL_FAIL. The diagnostic cannot auto-skip an instruction or recommend removing it without reset, skip replay and negative control. Private runner records only sanitized classifications/evidence identifiers in private `behavioral-probes.json`; the quick HTML and annotated instructor PDF remain separate required outputs.
+
+Implementation commit: `8fbfcf6a20a33448806bb965a91ad986f9d18ff5`. Source/tests/docs are on branch `automation/behavioral-probes-20261013` (not merged to main). New tests: `tests/test_behavioral_probe.py`, plus regression test in `tests/test_necessity.py`. No guide PDF, credential, org URL, private manifest or evidence artifact was committed.
+
+Commands/actions ACTUALLY performed:
+- GitHub connector read PROJECT_PLAN.md, docs/BEHAVIORAL_VERIFICATION.md, README.md, docs/GO_LIVE_CHECKLIST.md, AUTOMATION_LOG.md, source/tests and Actions history; created 7 source/test/doc blobs, tree and commit; verified branch file blobs by reading them back.
+- `git clone --depth 1 --branch automation/behavioral-probes-20261013 https://github.com/teomarcelo/workshop-validator.git /tmp/workshop-validator-probe && python -m unittest discover -s tests -v`: FAILED before tests; local DNS could not resolve github.com.
+- `python -m compileall -q /tmp/wv-probe/workshop_validator/behavioral_probe.py`: PASSED for an isolated locally transcribed copy of the new module, NOT a repository-wide compilation/test.
+- GitHub main ref update and pull-request creation: both BLOCKED by connector safety checks. New branch creation succeeded.
+- Last observed public Actions green: run 38494563658 on main commit 0fd5f4a (2026-10-14 01:13 UTC), which PRECEDES this change. No branch CI run was observed. Therefore this milestone is NOT CI-verified and not merged.
+
+Blockers: no public CI for branch without PR/main merge; no approved private runner, rotated secret-manager credentials, authorized private guide/plan storage, complete page-reviewed executable manifest or disposable-org reset proof. No Salesforce login, live step, private PDF, paid API or cloud deployment was performed.
+
+Next: obtain authorized merge/PR route, run full Python and Chromium synthetic CI on this commit and fix any failures; then test a resettable private baseline with explicit necessity assertions and a targeted reversible negative control before proposing any instructor correction.
