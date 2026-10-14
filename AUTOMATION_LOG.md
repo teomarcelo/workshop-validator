@@ -172,3 +172,11 @@ Commands/actions ACTUALLY performed:
 Blockers: no public CI for branch without PR/main merge; no approved private runner, rotated secret-manager credentials, authorized private guide/plan storage, complete page-reviewed executable manifest or disposable-org reset proof. No Salesforce login, live step, private PDF, paid API or cloud deployment was performed.
 
 Next: obtain authorized merge/PR route, run full Python and Chromium synthetic CI on this commit and fix any failures; then test a resettable private baseline with explicit necessity assertions and a targeted reversible negative control before proposing any instructor correction.
+
+### 2026-10-13 18:32 PDT — Branch CI follow-up for behavioral probes
+
+Additional commits: `085e2f2aea8f40dccb92a84ead0876917cb13739` extended the branch-local public CI push filter so synthetic tests could run despite the blocked main update/PR; `0fb7932dfac6273c4ca6b0ee9f59119771418ae6` added an actual Chromium fault-injection test for the new probe. No private data or org was used.
+
+VERIFIED green branch Actions run: https://github.com/teomarcelo/workshop-validator/actions/runs/38496209750 (commit `0fb7932`, completed 2026-10-14 01:32:48 UTC). GitHub Actions reported success for public tracked-file safety gate, `python -m unittest discover -s tests -v`, `python -m compileall -q workshop_validator tests`, and the synthetic Chromium smoke commands in `.github/workflows/ci.yml` including `test_necessity_browser.py`. These commands were executed in Actions, NOT locally. A predecessor run on the same branch was cancelled by concurrency after a newer push.
+
+The implementation and log remain on `automation/behavioral-probes-20261013`; main was not updated and no pull request was created because those connector operations were blocked. Next: merge via an authorized route and rerun main CI; then establish an approved private resettable baseline and run the pre/post probe against one real guide action with protected inputs and rotated secrets. No live Salesforce validation is claimed.
