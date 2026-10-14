@@ -2,7 +2,7 @@ name: Public Python CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, automation/behavioral-probes-20261013]
   pull_request:
   workflow_dispatch:
 
