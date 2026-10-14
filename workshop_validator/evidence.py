@@ -15,7 +15,7 @@ NEEDS_REVIEW = "NEEDS_REVIEW"
 
 # Screenshots and model opinions are deliberately not assertion-grade evidence.
 VALUE_TYPES = {"DOM_TEXT": str, "DOM_VISIBLE": bool, "API_STATUS": int}
-OPERATORS = frozenset({"eq", "contains"})
+OPERATORS = frozenset({"eq", "contains", "not_contains"})
 
 
 @dataclass(frozen=True)
@@ -91,7 +91,7 @@ def verify_step(
         if value_type is None or type(spec.expected) is not value_type:
             problems.append(f"Invalid expected value type for {spec.assertion_id}")
         if spec.operator not in OPERATORS or (
-            spec.operator == "contains" and
+            spec.operator in {"contains", "not_contains"} and
             (spec.kind != "DOM_TEXT" or not spec.expected)
         ):
             problems.append(f"Invalid operator for {spec.assertion_id}")
@@ -127,10 +127,18 @@ def verify_step(
         # Skip comparison if the specification is malformed.
         if (type(spec.expected) is not VALUE_TYPES.get(spec.kind) or
             spec.operator not in OPERATORS or
-            (spec.operator == "contains" and (spec.kind != "DOM_TEXT" or not spec.expected))):
+            (spec.operator in {"contains", "not_contains"} and
+             (spec.kind != "DOM_TEXT" or not spec.expected))):
             continue
-        matched = (observation.actual == spec.expected if spec.operator == "eq"
-                   else spec.expected in observation.actual)
+        if spec.operator == "not_contains" and not observation.actual.strip():
+            problems.append(f"Empty text cannot prove absence: {assertion_id}")
+            continue
+        if spec.operator == "eq":
+            matched = observation.actual == spec.expected
+        elif spec.operator == "contains":
+            matched = spec.expected in observation.actual
+        else:
+            matched = spec.expected not in observation.actual
         if not matched:
             failures.append(f"Assertion mismatch: {assertion_id}")
 

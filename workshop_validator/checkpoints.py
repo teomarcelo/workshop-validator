@@ -36,7 +36,7 @@ def _validate_specs(specs: Sequence[AssertionSpec]) -> None:
         if expected_type is None or type(spec.expected) is not expected_type:
             raise ValueError("Invalid assertion expected type")
         if spec.operator not in OPERATORS or (
-            spec.operator == "contains" and
+            spec.operator in {"contains", "not_contains"} and
             (spec.kind != "DOM_TEXT" or not spec.expected)
         ):
             raise ValueError("Invalid assertion operator")

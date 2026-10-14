@@ -80,6 +80,25 @@ class EvidenceGateTests(unittest.TestCase):
         self.check(NEEDS_REVIEW, specs=[AssertionSpec("title", "DOM_VISIBLE", True, "contains"), self.specs[1]])
         self.check(NEEDS_REVIEW, specs=[AssertionSpec("title", "DOM_TEXT", "", "contains"), self.specs[1]])
 
+    def test_not_contains_verifies_absent_text_and_rejects_presence(self):
+        specs = [AssertionSpec("deprecated", "DOM_TEXT", "unused_setting:", "not_contains")]
+        good = [Observation("e-safe", "deprecated", "DOM_TEXT",
+                            "agent: configured\noutputs: enabled",
+                            "run-1", "org-1", "S-1", "executor")]
+        self.check(PASS, specs=specs, observations=good)
+        self.check(FUNCTIONAL_FAIL, specs=specs,
+                   observations=[self.replace(good[0], actual="unused_setting: old")])
+
+    def test_negative_text_assertion_refuses_empty_editor_and_wrong_kind(self):
+        spec = [AssertionSpec("deprecated", "DOM_TEXT", "old_field:", "not_contains")]
+        empty = [Observation("e-empty", "deprecated", "DOM_TEXT", "",
+                             "run-1", "org-1", "S-1", "executor")]
+        self.check(NEEDS_REVIEW, specs=spec, observations=empty)
+        self.check(NEEDS_REVIEW,
+                   specs=[AssertionSpec("visible", "DOM_VISIBLE", True, "not_contains")])
+        self.check(NEEDS_REVIEW,
+                   specs=[AssertionSpec("empty", "DOM_TEXT", "", "not_contains")])
+
     def test_duplicate_spec_is_rejected(self):
         self.check(NEEDS_REVIEW, specs=self.specs + [self.specs[0]])
 
