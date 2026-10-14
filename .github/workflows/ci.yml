@@ -57,3 +57,4 @@ jobs:
           python -m unittest discover -s tests -p test_browser_worker.py -v
           python -m unittest discover -s tests -p test_pipeline.py -v
           python -m unittest discover -s tests -p test_discovery.py -v
+          python -m unittest discover -s tests -p test_necessity_browser.py -v
