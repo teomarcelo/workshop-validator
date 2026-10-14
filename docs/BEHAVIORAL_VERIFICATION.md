@@ -35,6 +35,13 @@ The quick HTML report and the annotated PDF are BOTH required outputs. Each subs
 
 The public Python module workshop_validator.necessity analyzes independent verifier outcomes for before-state, skip-path, executed-path and negative-control checks. The browser negative tests deliberately inject incorrect synthetic script data and verify the checks reject it. This is test-harness behavior, not current Salesforce product validation.
 
+## Run-bound report behavior
+
+Private outputs now carry per-step before/after classifications and evidence
+identifiers. A pre-existing correct value is a review question, not proof that
+the manual edit can be omitted. An inconclusive executed path blocks removal
+recommendations. The annotated review copy preserves all original pages.
+
 ## Live-test blocker
 
 A real Salesforce run requires a separately approved private runtime; the actual PDF and approved executable manifest outside the public repository; rotated trial-org credentials in protected secrets; safe reset/baseline mechanisms; and a step-by-step browser replay. Neither the public GitHub tests nor the corrected sample review PDF establishes a live Salesforce PASS.

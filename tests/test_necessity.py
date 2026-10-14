@@ -63,6 +63,14 @@ class NecessityDecisionTests(unittest.TestCase):
         self.assertEqual(r.classification, "ACTION_REGRESSED_EXPECTED_STATE")
         self.assertFalse(r.propose_guide_removal)
 
+    def test_inconclusive_executed_path_blocks_removal_even_with_skip_proof(self):
+        r = assess_necessity(verified(PASS), after_executing=verified(NEEDS_REVIEW),
+                             after_skipping=verified(PASS),
+                             negative_control=verified(FUNCTIONAL_FAIL),
+                             baseline_reproduced=True, prerequisites_verified=True)
+        self.assertEqual(r.classification, "EXECUTED_PATH_INCONCLUSIVE")
+        self.assertFalse(r.propose_guide_removal)
+
     def test_guide_step_numbering_has_no_role_in_behavioral_decision(self):
         r = assess_necessity(verified(PASS), after_skipping=verified(PASS),
                              baseline_reproduced=True, prerequisites_verified=True,

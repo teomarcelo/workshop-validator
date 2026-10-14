@@ -79,8 +79,8 @@ def annotate_pdf(source_pdf: str | Path, notes: list[ReviewNote],
         raise FileExistsError("Refusing to overwrite an existing annotated PDF")
     if not source.is_file():
         raise FileNotFoundError(source)
-    if not notes:
-        raise ValueError("At least one review note is required")
+    # A zero-note review copy preserves the original pages without implying
+    # that untested instructions are correct or unnecessary.
     with fitz.open(source) as original:
         total_pages = original.page_count
         if total_pages < 1:

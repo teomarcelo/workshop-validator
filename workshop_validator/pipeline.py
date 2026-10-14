@@ -17,6 +17,7 @@ from .retries import RetryPolicy, RetryQueue
 
 from .browser_worker import (UIAction, UIAssertion, BrowserActionError,
                              perform_actions, collect_observations)
+from .behavioral_probe import ActionProbe
 from .checkpoints import CheckpointStore
 from .dependencies import Step
 from .evidence import StepContext, Observation
@@ -90,7 +91,8 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
                   max_wait_seconds: int = 0,
                   clock: Callable[[], float] = time.time,
                   sleeper: Callable[[float], None] = time.sleep,
-                  screenshot_refs: dict[str, str] | None = None) -> PipelineOutcome:
+                  screenshot_refs: dict[str, str] | None = None,
+                  behavioral_probes: dict[str, ActionProbe] | None = None) -> PipelineOutcome:
     """Run each eligible step once, then produce a fail-closed private HTML report.
 
     A reconciled source MUST supply the exact same set of action IDs as plans.
@@ -180,12 +182,20 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
             "NEEDS_REVIEW": "Required observation missing, ambiguous or invalid.",
             "FUNCTIONAL_FAIL": "Observed UI did not satisfy a required assertion.",
         }
+        probe = (behavioral_probes or {}).get(s.step_id)
+        if probe is not None and status == "PASS" and probe.after.status != "PASS":
+            raise PlanMismatch("A PASS checkpoint contradicts its behavioral postcondition probe")
+        probe_ids = tuple(dict.fromkeys(
+            probe.before.evidence_ids + probe.after.evidence_ids
+        )) if probe is not None else ()
         report_items.append(ReportStep(
             s.step_id, s.page, s.title, status,
             ids_by_step.get(s.step_id, ()),
             findings.get(status, ""),
             s.required,
             (screenshot_refs or {}).get(s.step_id),
+            probe.necessity.classification if probe is not None else None,
+            probe_ids,
         ))
     html = render_report(run_id, report_items,
                          inventory_verified=source_reconciled)

@@ -10,6 +10,14 @@ import re
 VALID = frozenset({"PASS", "UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED",
                    "AUTH_BLOCKED", "NEEDS_REVIEW", "NOT_RUN", "RUNNING", "RETRY_WAIT"})
 SCREENSHOT = re.compile(r"^screenshots/[A-Za-z0-9_.-]+\.png$")
+BEHAVIORAL = frozenset({
+    "TEST_ORACLE_INSENSITIVE", "INSUFFICIENT_PRECONDITION_EVIDENCE",
+    "EXECUTED_PATH_INCONCLUSIVE", "ACTION_REGRESSED_EXPECTED_STATE",
+    "ACTION_HELPED_ON_TESTED_BASELINE", "ACTION_DID_NOT_FIX_RESULT",
+    "ACTION_NECESSITY_UNTESTED", "PRECONDITION_ALREADY_MET_UNPROVEN",
+    "SKIP_PATH_NOT_TESTED", "SKIP_PATH_INCONCLUSIVE", "SKIP_PATH_FAILED",
+    "NEEDS_NEGATIVE_CONTROL", "REDUNDANCY_CANDIDATE",
+})
 
 
 @dataclass(frozen=True)
@@ -22,6 +30,8 @@ class ReportStep:
     note: str = ""
     required: bool = True
     screenshot_href: str | None = None
+    behavioral_classification: str | None = None
+    behavioral_evidence_ids: tuple[str, ...] = ()
 
 
 def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: bool = False) -> str:
@@ -45,6 +55,13 @@ def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: b
            for s in steps):
         raise ValueError("Invalid private screenshot reference")
 
+    if any(s.behavioral_classification is not None and
+           (s.behavioral_classification not in BEHAVIORAL or
+            not s.behavioral_evidence_ids) for s in steps):
+        raise ValueError("Behavioral diagnostics require known classification and evidence IDs")
+    if any(s.behavioral_classification is None and s.behavioral_evidence_ids for s in steps):
+        raise ValueError("Behavioral evidence cannot be presented without a classification")
+
     counts = Counter(s.status for s in steps)
     required = [s for s in steps if s.required]
     verified = bool(inventory_verified) and bool(required) and all(s.status == "PASS" for s in required)
@@ -64,10 +81,16 @@ def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: b
         ev = ", ".join(escape(e) for e in s.evidence_ids) or "<span class='muted'>No evidence</span>"
         screenshot = (f"<a href='{escape(s.screenshot_href, quote=True)}'>View screenshot</a>"
                       if s.screenshot_href else "<span class='muted'>Not captured</span>")
+        behavior = (
+            f"<strong>{escape(s.behavioral_classification)}</strong><br>"
+            "<span class='muted'>Diagnostic only; no guide edit approved.</span><br>"
+            + ", ".join(escape(e) for e in s.behavioral_evidence_ids)
+            if s.behavioral_classification else "<span class='muted'>Not probed</span>"
+        )
         cells = [
             escape(s.step_id), str(s.page), escape(s.title),
             f"<span class='status'>{escape(s.status)}</span>",
-            escape(s.note), ev, screenshot,
+            escape(s.note), behavior, ev, screenshot,
         ]
         rows.append("<tr>" + "".join(f"<td>{value}</td>" for value in cells) + "</tr>")
 
@@ -96,11 +119,12 @@ def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: b
         f"Source inventory: {'RECONCILED' if inventory_verified else 'NOT RECONCILED'}"
         "</p><section class='metrics'>" + metric_html + "</section>"
         "<div class='warning'><strong>Evidence policy:</strong> A step is PASS only after all "
-        "required assertions match independent recorded observations. Blocked, ambiguous "
+        "required assertions match independent recorded observations. A step PASS does not prove "
+        "its manual action was necessary or that a guide edit is safe. Blocked, ambiguous "
         "and unreviewed steps remain unverified. This report and its links are PRIVATE.</div>"
         "<section class='panel'><h2>Step-by-step findings</h2>"
         "<table><thead><tr><th>Step ID</th><th>PDF page</th><th>Instruction</th>"
-        "<th>Status</th><th>Finding</th><th>Evidence IDs</th><th>Screenshot</th>"
+        "<th>Status</th><th>Finding</th><th>Behavioral probe</th><th>Evidence IDs</th><th>Screenshot</th>"
         "</tr></thead><tbody>" + "".join(rows) +
         "</tbody></table></section></main></body></html>"
     )

@@ -57,6 +57,9 @@ def assess_necessity(
     if before.status == NEEDS_REVIEW:
         return result("INSUFFICIENT_PRECONDITION_EVIDENCE",
                       "Missing or invalid before-state evidence.")
+    if after_executing is not None and after_executing.status == NEEDS_REVIEW:
+        return result("EXECUTED_PATH_INCONCLUSIVE",
+                      "Post-action evidence is invalid or missing; no removal recommendation is safe.")
 
     if after_executing is not None and after_executing.status == FUNCTIONAL_FAIL and before.status == PASS:
         return result("ACTION_REGRESSED_EXPECTED_STATE",

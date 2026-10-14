@@ -68,6 +68,20 @@ class AnnotationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 annotate_pdf(src, [ReviewNote(1, "a", "NEEDS_REVIEW", "Original", "Finding")], src)
 
+    def test_zero_note_review_copy_preserves_original_pages(self):
+        with tempfile.TemporaryDirectory() as folder:
+            src = self.make_source(folder)
+            out = os.path.join(folder, "review.pdf")
+            result = annotate_pdf(src, [], out)
+            self.assertEqual(result["review_sheets"], 0)
+            self.assertEqual(result["total_pages"], 2)
+            with fitz.open(src) as before, fitz.open(out) as after:
+                for index in range(2):
+                    a = before[index].get_pixmap(alpha=False)
+                    b = after[index].get_pixmap(alpha=False)
+                    self.assertEqual(hashlib.sha256(a.samples).digest(),
+                                     hashlib.sha256(b.samples).digest())
+
     def test_private_file_permissions_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as folder:
             src = self.make_source(folder)

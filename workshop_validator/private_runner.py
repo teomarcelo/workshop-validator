@@ -18,6 +18,7 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 from .browser_worker import UIAction, UIAssertion, BrowserActionError
+from .behavioral_probe import ActionProbe
 from .behavioral_probe import execute_with_necessity_probe
 from .discovery import propose_locators, proposals_to_private_dict
 from .evidence import AssertionSpec
@@ -152,6 +153,40 @@ def _protected_dir(path: Path):
     path.chmod(0o700)
 
 
+def build_review_notes(plans, statuses: dict[str, str],
+                       probes: dict[str, ActionProbe]) -> list[ReviewNote]:
+    """Create evidence-bound instructor notes, never untested guide edits."""
+    notes = []
+    for step in plans:
+        status = statuses[step.step_id]
+        probe = probes.get(step.step_id)
+        probe_ids = tuple(dict.fromkeys(
+            probe.before.evidence_ids + probe.after.evidence_ids
+        )) if probe is not None else ()
+        diagnostic = (
+            f" Behavioral diagnostic: {probe.necessity.classification}; "
+            f"before {probe.before.status}, after {probe.after.status}."
+            if probe is not None else ""
+        )
+        if status != "PASS":
+            note_status = status if status != "RUNNING" else "NEEDS_REVIEW"
+            notes.append(ReviewNote(
+                step.page, step.step_id, note_status, step.title,
+                "Step blocked, unverified or failed an independent assertion." + diagnostic,
+                "Investigate the live UI and independently verify any proposed change.",
+                probe_ids,
+            ))
+        elif probe is not None and probe.before.status == "PASS":
+            notes.append(ReviewNote(
+                step.page, step.step_id, "NEEDS_REVIEW", step.title,
+                "Desired state already existed before the literal action." + diagnostic +
+                " No clean-baseline omission or negative-control replay was performed by this runner.",
+                "Do not remove or rewrite this instruction without controlled replay and instructor approval.",
+                probe_ids,
+            ))
+    return notes
+
+
 def run_private(guide_path: str | Path, plan_path: str | Path,
                 output_dir: str | Path, *,
                 source_review_path: str | Path | None = None,
@@ -188,6 +223,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
     org_id = "disposable-org"
     screenshot_refs: dict[str, str] = {}
     probe_records: dict[str, dict] = {}
+    probe_objects: dict[str, ActionProbe] = {}
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -219,6 +255,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                             retry_after=responses[0].headers.get("retry-after"))
                     if probe is not None:
                         # Only classifications and evidence IDs; never raw DOM values.
+                        probe_objects[step.step_id] = probe
                         probe_records[step.step_id] = asdict(probe)
                     return observed
                 except RateLimitDetected:
@@ -254,6 +291,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                                          max_backoff_seconds=3600),
                 max_wait_seconds=600,
                 screenshot_refs=screenshot_refs,
+                behavioral_probes=probe_objects,
             )
         finally:
             browser.close()
@@ -266,19 +304,10 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
 
     html_path = out / "validation-summary.html"
     write_private_report(html_path, outcome.html)
-    flagged = [
-        ReviewNote(
-            step.page, step.step_id, outcome.statuses[step.step_id],
-            step.title,
-            "Step is blocked, unverified, or did not meet required assertions.",
-            "Investigate the live UI and independently verify any proposed change.",
-        )
-        for step in plans if outcome.statuses[step.step_id] != "PASS"
-    ]
-    annotated = None
-    if flagged:
-        annotated = out / "annotated-instructor-review.pdf"
-        annotate_pdf(guide, flagged, annotated)
+    flagged = build_review_notes(plans, outcome.statuses, probe_objects)
+    annotated = out / "annotated-instructor-review.pdf"
+    # A zero-note copy still preserves all original pages; both outputs exist.
+    annotate_pdf(guide, flagged, annotated)
     summary = {
         "run_id": run_id, "source_reconciled": reconciled,
         "fully_verified": outcome.fully_verified,
@@ -286,7 +315,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
         "planned_steps": len(plans),
         "status_counts": dict(Counter(outcome.statuses.values())),
         "report": str(html_path.name),
-        "annotated_review": annotated.name if annotated else None,
+        "annotated_review": annotated.name,
         "behavioral_probes": "behavioral-probes.json" if probe_records else None,
     }
     with (out / "status.json").open("x", encoding="utf-8") as f:
