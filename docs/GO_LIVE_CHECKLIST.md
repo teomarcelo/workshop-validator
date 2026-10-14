@@ -23,3 +23,16 @@
 The GitHub connector can commit public-safe code but **cannot create a private repository, set repository/environment secrets, upload approved confidential PDFs, or provision corporate private storage**. An authorized operator must arrange that private boundary before we can execute AGT503 with live credentials. See [private-runner template](../templates/private-runner/README.md).
 
 No new paid infrastructure or external AI API has been authorized. Stop before a subscription or metered charge.
+
+## Behavioral QA acceptance
+
+Before claiming a full-guide PASS:
+1. Establish the exact current disposable-org baseline and record successful execution of prerequisite guide steps.
+2. For each guide instruction/substep, capture required state BEFORE applying the edit; distinguish user-necessary work from already-generated defaults.
+3. Attempt the literal guide instruction, verify its actual effect, and run downstream assertions rather than relying on screenshots.
+4. For suspected redundant actions, run a clean-baseline skip-only-that-action replay and verify downstream behavior. Propose removals only after sensitive negative controls also fail as expected.
+5. Deliberately break a safe reversible synthetic/disposable-org property and confirm the same independent assertions reject it. Restore the baseline.
+6. Keep cosmetic numbering comments in a separate editorial appendix, never as the principal UI-defect finding.
+7. Keep both quick HTML summary and annotated instructor PDF as evidence-bound outputs. Any unresolved action prevents a fully green report.
+
+Current status: only synthetic sensitivity checks are implemented. Private real-org workflows and full coverage review remain outstanding.

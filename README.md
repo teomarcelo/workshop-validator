@@ -26,6 +26,8 @@
 
 ## Not yet complete
 
+- **Real behavioral correctness is unverified**: synthetic Playwright checks cannot establish whether current workshop instructions are necessary, obsolete or automatically satisfied. Source numbering is editorial, not a UI defect. Live testing must examine before-state, literal action, downstream result and safe omission/negative-control checks for every actionable step.
+
 - Private cloud runner has **not** been deployed; its [template](templates/private-runner/README.md) needs an approved private repo and protected secrets.
 - The first pilot's 32-page AGT503 PDF needs a trustworthy page-by-page coverage review and an exact authored executable plan.
 - No real Salesforce login, Salesforce UI step, Agentforce LLM response or full exercise flow has been independently verified.
@@ -59,6 +61,7 @@ For the pilot's standard Salesforce username/password login, source-bound author
 - [Zero-cost cloud architecture](docs/ZERO_COST_CLOUD_ARCHITECTURE.md)
 - [Source guide reconciliation](docs/SOURCE_RECONCILIATION.md)
 - [Evidence gate](docs/EVIDENCE_GATE.md)
+- [Behavioral step verification](docs/BEHAVIORAL_VERIFICATION.md)
 - [Bounded 429 recovery](docs/RETRIES.md)
 - [Pipeline](docs/PIPELINE.md)
 - [HTML report](docs/HTML_REPORT.md)

@@ -17,3 +17,7 @@ The expected assertions **must originate in a trusted guide manifest** rather th
 Do not put raw observations containing private data in public logs or reports. Returned failure reasons deliberately omit observed values. The current identity checks are **structural, not cryptographic**; a compromised worker can forge IDs and values. Production must authenticate collector identities and evidence storage, bind assertions to the immutable manifest, ensure the verifier cannot silently reuse the executor's conclusion, and enforce dependency prerequisites through `plan_steps` before starting execution. This prototype does not address 429 retry policy or durable state.
 
 Run the unit tests from the repository root with `python3 -m unittest discover -s tests -v`.
+
+## Detecting automatically satisfied steps
+
+The independent verifier supports the DOM_TEXT operator not_contains to check for truly absent generated text. It refuses to accept an EMPTY editor as proof of absence; loading and completeness must be asserted separately. Checkpoint assertion-spec validation recognizes this operator. Before claiming a guide-directed manual step is unnecessary, use the before/skip/negative-control policy in [Behavioral verification](BEHAVIORAL_VERIFICATION.md). A good-looking screenshot or text similarity score is not proof that a step's omission is safe.

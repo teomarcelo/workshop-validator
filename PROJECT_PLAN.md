@@ -209,3 +209,14 @@ The new HTML quick summary is a **required companion artifact** alongside the an
 - Demonstrate a scheduled private workflow actually running successfully while the operator's laptop is closed and under the agreed $0 budget.
 
 See [Go-live checklist](docs/GO_LIVE_CHECKLIST.md), [public README](README.md), and [private runner template](templates/private-runner/README.md). Do not label the project complete on the basis of synthetic CI.
+
+
+## 14. Behavioral step verification and corrected defect priority
+
+**Correction to prior review approach:** Flagging PDF numbering while ignoring no-longer-needed user instructions is not validation. The previous sample annotations were editorial observations, not verified Salesforce UI defects. The quick HTML report must remain a concise companion to the annotated instructor PDF.
+
+Going forward, every source action/substep must be checked against what actually happens: before-state, literal UI operation, after-state, and downstream behavior. Actions already satisfied by generated defaults are candidates for an omission experiment, not automatic passes. Safely skip only the individual action on a fresh, reproduced disposable-org baseline, confirm downstream behavior, and deliberately inject a wrong value to prove that the independent test rejects incorrect state. Never publish an automatic edit without verified evidence and instructor approval.
+
+**Severity:** False PASS and broken learner outcomes are critical; unnecessary manual edits, changed defaults and invalid UI navigation are high; editorial step numbers and cosmetics are low and should not dominate the behavioral report.
+
+The public repository now includes prototype deterministic no-op/necessity classification and synthetic negative-control browser tests. **No real Salesforce browser execution or comprehensive guide walkthrough has been performed.** See [behavioral verification policy](docs/BEHAVIORAL_VERIFICATION.md). Before the real pilot can be called successful, the secure private environment must execute every source action, intentionally test its assertion sensitivity, and record the resulting behavioral evidence.
