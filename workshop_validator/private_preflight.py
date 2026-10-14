@@ -3,6 +3,7 @@
 This is a structural attestation check, not proof of Salesforce success.
 """
 
+from .dependencies import Step, plan_steps
 from .reconciliation import reconcile_inventory
 
 
@@ -37,6 +38,21 @@ def require_executable_source_review(inventory, review, pdf_digest, plans):
             if (type(step.page) is not int or step.page != expected_pages[step.step_id]
                     or not step.actions or not step.assertions):
                 raise SourcePreflightError("Action lacks page-bound executable verification")
+        # Reuse the production Option A graph validator before login.
+        # Every dependency must point to a reviewed source action, and cycles
+        # cannot be left to fail after an authenticated browser session starts.
+        graph = []
+        for step in plans:
+            dependencies = getattr(step, "dependencies", ())
+            if (not isinstance(dependencies, (tuple, list)) or
+                    not all(isinstance(dep, str) and dep for dep in dependencies)):
+                raise SourcePreflightError("Invalid source dependency graph")
+            graph.append(Step(step.step_id, tuple(dependencies),
+                              getattr(step, "required", True)))
+        try:
+            plan_steps(tuple(graph), {})
+        except (ValueError, TypeError, RecursionError):
+            raise SourcePreflightError("Invalid source dependency graph") from None
         return ids
     except SourcePreflightError:
         raise
