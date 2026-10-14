@@ -9,7 +9,9 @@ corresponding **exact** `DOM_VALUE eq` postcondition with the same accessible
 role/name and expected value equal to the literal authored input. This is
 checked against the same `step.assertions` frozen by the independent
 checkpoint verifier. A Save-only, unrelated-control, `DOM_TEXT`, or substring
-oracle does not qualify. A multi-field action needs one exact oracle per field.
+oracle does not qualify. A multi-field action needs one exact oracle per field. If Save/navigation
+removes a field, split the fill and Save/navigation into separate atomic
+source-bound steps so the field is checked before it disappears.
 
 The synthetic Chromium negative control intentionally saves a wrong value:
 the Save-only assertion PASSes, while the exact field-value assertion returns
