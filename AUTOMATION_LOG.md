@@ -133,3 +133,25 @@ CI status: Existing public GitHub Actions run 38470713483 on predecessor 645f7ed
 Blockers: No approved private runner or source storage, no rotated org secrets, no complete page-reviewed executable manifest, no real Salesforce login. No live org steps or private PDF were executed. No paid infrastructure or API was used.
 
 Next: Verify public Actions for cb022d, then add a fail-closed reviewed-source preflight before any real-org mutation and synthetic tests for missing/incomplete review.
+
+## 2026-10-14 UTC - Corrective behavioral QA milestone
+
+Why this corrective milestone was necessary:
+- A prior instructor-review PDF emphasized step numbering without actually running the workshop in Salesforce. It was not a behavioral validation report and did not surface unnecessary manual configuration edits.
+- Source-document visual inspection and synthetic unit tests were previously conflated with step-by-step real-org testing. No Salesforce step had been independently executed.
+
+Public-safe implementation changes:
+- Evidence assertions now support strict nonempty DOM_TEXT absence checks (not_contains), refusing to interpret an empty script editor as proof that a block is missing.
+- Added a fail-closed necessity decision engine. If the desired state was already present, it requires baseline reproduction, prerequisite verification, a skip-path downstream test and a failed targeted negative control before producing only a REDUNDANCY_CANDIDATE.
+- Added synthetic Chromium negative tests which deliberately corrupt a generated script type/insert an obsolete block and confirm that independent assertions reject the wrong state.
+- Updated the project plan and behavioral QA policy so actual broken instructions/unnecessary edits outrank numbering or typography. Both quick HTML summary and annotated instructor PDF remain required.
+
+Verification performed:
+- Commit ca177b33cfa24145504830fc609f9fe0407b310d: public GitHub Actions run 38494124027 SUCCESS.
+- Commit 44684fbdef7519c556464a93ca22902eb091cdef: public GitHub Actions run 38494220746 SUCCESS (unit tests and actual headless Chromium synthetic smoke).
+- Commit 0e44925190e07d4737e445fe10e2eed82b4ab618: public GitHub Actions run 38494363760 SUCCESS.
+- Separately, a corrected PRIVATE instructor review example was rendered, the original PDF pages were compared pixel-for-pixel, and behavioral findings were explicitly labeled unverified. Neither the source guide nor any source-derived review artifact was committed here.
+
+Limitations: No authenticated Salesforce browser run, no live no-op/omission test, no manual test of all guide instructions, no production environment, and no proof of a current UI change. Source page-numbering alone is no longer considered an actionable validation defect.
+
+Next high-priority work: integrate pre/post state and omission/negative-control probes into an approved, resettable PRIVATE Salesforce run; obtain authorized private guide/plan storage and rotated secrets; verify one real end-to-end step before expanding to complete guide coverage.
