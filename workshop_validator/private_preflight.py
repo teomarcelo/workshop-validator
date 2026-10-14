@@ -4,6 +4,7 @@ This is a structural attestation check, not proof of Salesforce success.
 """
 
 from .dependencies import Step, plan_steps
+from .fill_oracle import FillOracleError, require_literal_fill_oracles
 from .reconciliation import reconcile_inventory
 
 
@@ -38,6 +39,13 @@ def require_executable_source_review(inventory, review, pdf_digest, plans):
             if (type(step.page) is not int or step.page != expected_pages[step.step_id]
                     or not step.actions or not step.assertions):
                 raise SourcePreflightError("Action lacks page-bound executable verification")
+        # A Save-only oracle can PASS even when a literal fill wrote a wrong value.
+        # Require exact live DOM_VALUE equality on the same field before login.
+        try:
+            for step in plans:
+                require_literal_fill_oracles(step)
+        except (FillOracleError, AttributeError, TypeError):
+            raise SourcePreflightError("Missing exact literal-fill postcondition") from None
         # Reuse the production Option A graph validator before login.
         # Every dependency must point to a reviewed source action, and cycles
         # cannot be left to fail after an authenticated browser session starts.
