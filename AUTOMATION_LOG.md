@@ -201,3 +201,23 @@ Implementation commit: `aff5d1ba18b1d8583a9c6600deadd54402eed3bf` on `automation
 Actually executed: local `git ls-remote https://github.com/teomarcelo/workshop-validator.git HEAD` failed (DNS resolution unavailable), so no local repository tests ran. GitHub Actions run https://github.com/teomarcelo/workshop-validator/actions/runs/38506504652 completed SUCCESS on implementation commit: public safety gate, `python -m unittest discover -s tests -v`, `python -m compileall -q workshop_validator tests`, Chromium installation and the four synthetic browser test commands in `.github/workflows/ci.yml`. The GitHub connector confirmed both jobs and their test steps succeeded. A pull-request creation attempt was blocked by tool safety checks; no PR was created. Main remains at its prior revision as of this entry.
 
 Blockers: no approved private runner, secure guide/manifest handoff, operator-rotated credentials, resettable baseline or live Salesforce verification. The public CI proves only synthetic behavior; no private PDF, real org, paid API or cloud deployment was used. Next: merge the tested feature ancestry through an authorized route, then design and test controlled omission/replay with negative controls and private baseline provenance before any guide-removal proposal.
+
+## 2026-10-13 21:24-21:27 PDT — Controlled omission replay provenance gate (scheduled)
+
+Milestone: Added `workshop_validator/replay_provenance.py`, 14 public-safe synthetic unit tests in `tests/test_replay_provenance.py`, and `docs/CONTROLLED_REPLAY.md`. The gate requires separately recorded execute/skip/negative-control phases from three distinct resets, matching guide/org/baseline/step, stable target and downstream oracle IDs, unique evidence IDs, verified prerequisites, and passing downstream behavior. A deliberately broken target that still PASSes returns TEST_ORACLE_INSENSITIVE and blocks guide-removal suggestions. Even a valid omission result is only an instructor-review REDUNDANCY_CANDIDATE. This does NOT execute a real omission or prove reset attestations are authentic.
+
+Implementation commit: 840cecd9acc8647505514d1412ef387c3ca4dcef (branch automation/replay-provenance-verified-20261013). Source/test Git blob SHAs matched the locally tested bytes: 2eca7ad4ba81835958db7934770ec49387345e09 and c4b260a1c7e84f17c995c7c9c7b3252ab44701bf.
+
+Actual local commands/results:
+- `git clone --depth 1 --branch automation/behavioral-report-20261013 https://github.com/teomarcelo/workshop-validator.git /tmp/workshop-validator-turn11`: FAILED, DNS resolution unavailable.
+- `python3 -m unittest discover -s tests -p 'test_replay_provenance.py' -v`: 14 tests PASS in a minimal workspace with API-compatible evidence/necessity stand-ins; not the full repo suite.
+- `python3 -m compileall -q workshop_validator/replay_provenance.py tests/test_replay_provenance.py`: PASS.
+- `git hash-object` on the two new local files: hashes matched GitHub tree blobs.
+- Initial local test rerun after an edit hit a Python SyntaxError; corrected and reran 14 tests successfully.
+- GitHub Actions run https://github.com/teomarcelo/workshop-validator/actions/runs/38511383947 on 840cecd: public tracked-file safety, Python unit tests and compile steps passed; Chromium synthetic job was still in progress when this entry was prepared. Do not call the entire workflow green until completion.
+
+GitHub write constraints: moving an existing branch ref and opening a PR to main were blocked by connector safety checks. The tested implementation is preserved on a new feature branch; this log entry is committed separately. No paid resources, private artifacts, live Salesforce login, private guide, org-specific URLs or secrets were used.
+
+Blockers: Approved private runner, reviewed complete guide plan, encrypted private document/evidence storage, operator-rotated credentials, authenticated reset/evidence chain and safe disposable baseline remain unavailable. No live omission, fault injection, or full guide validation occurred.
+
+Next milestone: Verify the final public Chromium CI result, merge this tested branch through an authorized review path, then integrate authenticated reset and literal action/skip/fault event provenance with private checkpointing and both required private outputs (quick HTML and pixel-preserving annotated PDF).
