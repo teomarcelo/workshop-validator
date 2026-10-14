@@ -221,3 +221,19 @@ GitHub write constraints: moving an existing branch ref and opening a PR to main
 Blockers: Approved private runner, reviewed complete guide plan, encrypted private document/evidence storage, operator-rotated credentials, authenticated reset/evidence chain and safe disposable baseline remain unavailable. No live omission, fault injection, or full guide validation occurred.
 
 Next milestone: Verify the final public Chromium CI result, merge this tested branch through an authorized review path, then integrate authenticated reset and literal action/skip/fault event provenance with private checkpointing and both required private outputs (quick HTML and pixel-preserving annotated PDF).
+
+## 2026-10-14 00:29 PDT — Controlled replay event-order gate (scheduled)
+
+Milestone: Added `workshop_validator/replay_events.py`, `tests/test_replay_events.py` (14 synthetic tests), and `docs/REPLAY_EVENT_GATE.md`. The new fail-closed structural gate requires ordered, run/reset/step-bound events for literal execution, single-action omission, targeted reversible fault, and independent restoration verification. It binds phase evidence IDs to event evidence, checks distinct executor/verifier identities, and blocks a guide-removal suggestion when an intentionally broken target still passes. A valid result remains an instructor-review candidate only. It does not execute Salesforce, authenticate event collectors, or establish actual baseline resets.
+
+Implementation commit: `dbaba8d7a7243ad9a5c06cbd43749daa56da7ba1` on `automation/replay-events-20261014`.
+Actual validation:
+- Local `python3 -W error::ResourceWarning -m unittest discover -s tests -p test_replay_events.py -v`: 14 passed in a minimal workspace with API-compatible stand-ins, **not** the full repository.
+- Local `python3 -m compileall -q workshop_validator tests`: passed in that minimal workspace.
+- Local `git ls-remote https://github.com/teomarcelo/workshop-validator.git HEAD`: failed because local DNS could not resolve github.com.
+- GitHub blob SHAs for all three files matched the locally prepared `git hash-object` values.
+- **Full public GitHub Actions verified green** on implementation commit: https://github.com/teomarcelo/workshop-validator/actions/runs/38528517227 (2026-10-14 07:28 UTC). Both jobs passed: tracked-file safety gate, Python unit suite, compileall, Chromium installation, and the actual synthetic browser smoke commands. These are synthetic results, not a live Salesforce pass.
+
+Blockers: No approved PRIVATE runner, authorized encrypted guide/manifest/evidence storage, operator-rotated secrets, complete page-reviewed AGT503 plan, authenticated append-only replay ledger, or proven disposable-org reset. No real omission, fault injection, private PDF execution, live Salesforce login, paid API, or cloud deployment occurred. Both private outputs (quick HTML and pixel-preserving annotated PDF) remain mandatory for a future authorized run.
+
+Next: Integrate this branch into `main` via an authorized review route, rerun main CI, then connect independently authenticated reset/action/omission/fault/restore records to private checkpoints and run-bound HTML/PDF reports. Preserve Option A dependencies and bounded 429 cooldowns.
