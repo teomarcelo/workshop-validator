@@ -3,7 +3,9 @@
 import os
 import unittest
 
-from workshop_validator.browser_worker import UIAssertion, collect_observations
+from workshop_validator.browser_worker import UIAction, UIAssertion, collect_observations
+from workshop_validator.behavioral_probe import execute_with_necessity_probe
+from workshop_validator.pipeline import PlannedStep
 from workshop_validator.evidence import AssertionSpec, StepContext, verify_step
 from workshop_validator.necessity import assess_necessity
 
@@ -68,6 +70,23 @@ mode: generated</div>
             baseline_reproduced=True, prerequisites_verified=True)
         self.assertEqual(decision.classification, "REDUNDANCY_CANDIDATE")
         self.assertTrue(decision.requires_instructor_review)
+
+    def test_private_runner_probe_rejects_wrong_literal_value(self):
+        # Fault injected through an actual Chromium authored fill, not a mock.
+        desired = UIAssertion(AssertionSpec("generated_type", "DOM_TEXT",
+                                  "items: list[object]", "contains"),
+                              "textbox", "Generated script")
+        step = PlannedStep("step", 1, "Synthetic generated default",
+            (UIAction("fill", "textbox", "Generated script",
+                      "items: string\\nmode: generated"),),
+            (desired,), (), True, (desired,))
+        observations, probe = execute_with_necessity_probe(self.page, step, self.ctx)
+        self.assertEqual(probe.before.status, "PASS")
+        self.assertEqual(probe.after.status, "FUNCTIONAL_FAIL")
+        self.assertEqual(probe.necessity.classification, "ACTION_REGRESSED_EXPECTED_STATE")
+        self.assertFalse(probe.necessity.propose_guide_removal)
+        self.assertEqual(verify_step(self.ctx, (desired.spec,), observations).status,
+                         "FUNCTIONAL_FAIL")
 
     def test_legacy_block_absence_check_catches_deliberate_presence(self):
         self.assertEqual(self.check_script().status, "PASS")
