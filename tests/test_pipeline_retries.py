@@ -1,8 +1,9 @@
 import os
 import tempfile
 import unittest
+from dataclasses import replace
 
-from workshop_validator.browser_worker import UIAssertion
+from workshop_validator.browser_worker import UIAction, UIAssertion
 from workshop_validator.evidence import AssertionSpec, Observation
 from workshop_validator.pipeline import PlannedStep, validate_plan, RateLimitDetected
 from workshop_validator.retries import RetryPolicy, RetryQueue
@@ -73,6 +74,35 @@ class PipelineRetryIntegrationTests(unittest.TestCase):
             self.assertEqual(result.statuses['rate_limited'],'ENV_BLOCKED')
             self.assertEqual(result.statuses['independent'],'PASS')
             self.assertEqual(result.statuses['after_ai'],'NOT_RUN')
+
+    def test_429_after_mutating_action_never_replays_without_reconciliation(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state=os.path.join(folder,'run.sqlite')
+            steps=tuple(replace(s, actions=(UIAction('click','button','Generate'),))
+                        if s.step_id=='rate_limited' else s for s in self.fixture())
+            calls=[]
+            def execute(page,step,context):
+                calls.append(step.step_id)
+                if step.step_id=='rate_limited':
+                    raise RateLimitDetected(retry_after='0')
+                return [Observation('ev-'+step.step_id,'ready','DOM_VISIBLE',True,
+                    context.run_id,context.org_id,context.step_id,context.executor_id)]
+            result=validate_plan(None,state,'demo','synthetic',steps,
+                source_action_ids=tuple(s.step_id for s in steps),
+                source_reconciled=True,execute_step=execute,
+                retry_policy=RetryPolicy(max_attempts=3),
+                max_wait_seconds=600,clock=lambda:1000.,
+                sleeper=lambda seconds:self.fail('Unsafe automatic retry wait'))
+            self.assertFalse(result.fully_verified)
+            self.assertEqual(calls.count('rate_limited'),1)
+            self.assertEqual(result.statuses['rate_limited'],'ENV_BLOCKED')
+            self.assertEqual(result.statuses['after_ai'],'NOT_RUN')
+            self.assertEqual(result.statuses['independent'],'PASS')
+            ticket=RetryQueue(state).tickets('demo')[0]
+            self.assertEqual(ticket.step_id,'rate_limited')
+            self.assertIsNone(ticket.retry_at)
+            self.assertFalse(ticket.exhausted)
+
 
 if __name__=='__main__':
     unittest.main()

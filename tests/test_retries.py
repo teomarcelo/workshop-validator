@@ -68,6 +68,18 @@ class RetryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.queue.record_429('demo','ai',now=float('nan'))
 
+    def test_mutation_uncertainty_disables_timed_replay_but_keeps_ticket(self):
+        self.block()
+        ticket=self.queue.record_429('demo','ai',now=1000,
+                                     retry_after='0',auto_retry=False)
+        self.assertEqual(ticket.failed_attempts,1)
+        self.assertIsNone(ticket.retry_at)
+        self.assertFalse(ticket.exhausted)
+        self.assertEqual(self.queue.wake_due(now=999999),())
+        self.assertEqual(self.store.status('demo','ai')[0],'ENV_BLOCKED')
+        with self.assertRaises(ValueError):
+            self.queue.record_429('demo','ai',now=1000,auto_retry='yes')
+
     def test_header_parsing(self):
         now=datetime(2026,10,13,12,0,tzinfo=timezone.utc).timestamp()
         self.assertEqual(parse_retry_after('120',now=now),120)

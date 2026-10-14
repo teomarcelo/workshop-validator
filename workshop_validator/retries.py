@@ -86,14 +86,19 @@ class RetryQueue:
 
     def record_429(self, run_id: str, step_id: str, *,
                    now: float, retry_after: str | None = None,
-                   jitter_seconds: int = 0) -> RetryTicket:
+                   jitter_seconds: int = 0,
+                   auto_retry: bool = True) -> RetryTicket:
         """Queue an observed 429 after the execution worker sets ENV_BLOCKED.
 
         retry_after must come from an actual response header, not the executor's
         unsupported estimate. Caller may add jitter within policy limits.
+        auto_retry=False records the 429 but deliberately leaves no due time:
+        a possibly mutated step requires private side-effect reconciliation
+        before any operator-authorized re-execution.
         """
-        if not math.isfinite(now) or type(jitter_seconds) is not int or not 0 <= jitter_seconds <= 120:
-            raise ValueError("Invalid clock or jitter")
+        if (not math.isfinite(now) or type(jitter_seconds) is not int or
+                not 0 <= jitter_seconds <= 120 or type(auto_retry) is not bool):
+            raise ValueError("Invalid clock, jitter or retry safety flag")
         wait_header = parse_retry_after(retry_after, now=now)
         with closing(self._connect()) as db, db:
             db.execute("BEGIN IMMEDIATE")
@@ -108,7 +113,7 @@ class RetryQueue:
             failures = (previous[0] if previous else 0) + 1
             exhausted = failures >= self.policy.max_attempts
             due = None
-            if not exhausted:
+            if not exhausted and auto_retry:
                 wait = min(self.policy.max_backoff_seconds,
                            self.policy.base_seconds * 2 ** (failures - 1))
                 wait = max(wait + jitter_seconds, wait_header or 0)

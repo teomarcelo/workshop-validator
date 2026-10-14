@@ -162,8 +162,13 @@ def validate_plan(page, db_path: str | Path, run_id: str, org_id: str,
             except RateLimitDetected as exc:
                 store.block_step(run_id, step_id, attempt, "ENV_BLOCKED")
                 if retries is not None:
+                    # A 429 may arrive AFTER a literal browser mutation.
+                    # Never automatically replay that action: it could create
+                    # duplicate records or overwrite a generated default.
+                    # Only actionless/read-only steps may enter timed retries.
                     retries.record_429(run_id, step_id, now=clock(),
-                                       retry_after=exc.retry_after)
+                                       retry_after=exc.retry_after,
+                                       auto_retry=not bool(step.actions))
             except BrowserActionError:
                 # A missing target/failed browser action has no trusted
                 # supporting observations; verifier must refuse PASS.
