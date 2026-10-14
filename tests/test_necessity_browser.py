@@ -94,6 +94,11 @@ mode: generated</div>
             "items: list[object]\nunused_setting: old")
         self.assertEqual(self.check_script().status, "FUNCTIONAL_FAIL")
 
+# The existing public Chromium CI invokes this test module explicitly.
+# Include the separate controlled replay integration suite without changing
+# the public workflow or exposing any private runner artifacts.
+from test_replay_browser import ReplayBrowserTests
+
 
 if __name__ == "__main__":
     unittest.main()
