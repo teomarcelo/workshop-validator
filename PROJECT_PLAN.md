@@ -220,3 +220,12 @@ Going forward, every source action/substep must be checked against what actually
 **Severity:** False PASS and broken learner outcomes are critical; unnecessary manual edits, changed defaults and invalid UI navigation are high; editorial step numbers and cosmetics are low and should not dominate the behavioral report.
 
 The public repository now includes prototype deterministic no-op/necessity classification and synthetic negative-control browser tests. **No real Salesforce browser execution or comprehensive guide walkthrough has been performed.** See [behavioral verification policy](docs/BEHAVIORAL_VERIFICATION.md). Before the real pilot can be called successful, the secure private environment must execute every source action, intentionally test its assertion sensitivity, and record the resulting behavioral evidence.
+
+
+## 15. Inline PDF placement and quick-summary preference (2026-10-14)
+
+The approved instructor PDF design now has a **one-page quick findings summary** followed by the original guide with **brief review notes directly beneath the affected instructions**, instead of detached addendum sheets. The renderer shifts all subsequent content down and preserves the underlying PDF vector artwork; the modified source pages become slightly taller while other pages retain their original dimensions.
+
+Implementation: \`workshop_validator/pdf_inline.py\`, synthetic tests and \`docs/PDF_INLINE.md\` are in the public repo. The private runner uses that format by default, provided its private reviewed plan supplies valid \`inline_after_y\` coordinates for flagged steps. An unanchored finding fails closed instead of being placed on an unrelated page. The companion quick HTML report remains required.
+
+Only substantive behavioral findings should be featured. Suspected redundant manual edits or auto-generated defaults must be labeled **pending live Salesforce verification** until the step is executed/safely skipped on a disposable baseline and downstream independent assertions pass. The original pilot exercise guide and review PDFs stay private; this PDF layout improvement is not evidence of a real org execution.
