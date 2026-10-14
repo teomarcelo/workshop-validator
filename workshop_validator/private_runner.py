@@ -11,6 +11,7 @@ from hashlib import sha256
 from pathlib import Path
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -26,7 +27,8 @@ from .guide_inventory import extract_inventory
 from .reconciliation import (CandidateReview, AddedAction, PageReview,
                               SourceReview, file_sha256)
 from .private_preflight import SourcePreflightError, require_executable_source_review
-from .pdf_annotations import ReviewNote, annotate_pdf
+from .pdf_annotations import ReviewNote
+from .pdf_inline import InlineNote, annotate_pdf_inline
 from .pipeline import PlannedStep, RateLimitDetected, validate_plan
 from .retries import RetryPolicy
 from .report import write_private_report
@@ -62,6 +64,12 @@ def load_plan(path: str | Path, *, pdf_digest: str, page_count: int) -> tuple[Pl
                 or type(page) is not int or not 1 <= page <= page_count
                 or not isinstance(title, str) or not title.strip()):
             raise PrivateRunnerError("Invalid private plan source anchor")
+        note_anchor = item.get("inline_after_y")
+        if note_anchor is not None and (
+            type(note_anchor) not in (int, float) or
+            not math.isfinite(note_anchor) or note_anchor <= 36
+        ):
+            raise PrivateRunnerError("Invalid reviewed inline PDF anchor")
         actions = []
         for a in item.get("actions", []):
             if (not isinstance(a, dict) or a.get("kind") not in {"click", "fill"} or
@@ -187,6 +195,58 @@ def build_review_notes(plans, statuses: dict[str, str],
     return notes
 
 
+def build_inline_note_placements(
+    plan_path: str | Path, notes: list[ReviewNote],
+    probes: dict[str, ActionProbe] | None = None,
+) -> list[InlineNote]:
+    """Use explicit, reviewed PDF source anchors for short inline findings.
+
+    An unanchored finding must never be placed on an unrelated page. Private
+    plans keep source-specific page coordinates outside the public repository.
+    """
+    content = _json(plan_path)
+    if not isinstance(content, dict) or not isinstance(content.get("steps"), list):
+        raise PrivateRunnerError("Invalid private plan for PDF placement")
+    anchors = {}
+    for item in content["steps"]:
+        if not isinstance(item, dict):
+            raise PrivateRunnerError("Malformed PDF source placement")
+        step_id = item.get("step_id")
+        if step_id in anchors:
+            raise PrivateRunnerError("Duplicate step source anchor")
+        anchors[step_id] = item.get("inline_after_y")
+    probes = probes or {}
+    output = []
+    labels = {
+        "UI_MISMATCH": "The guide's UI target did not match the observed interface.",
+        "FUNCTIONAL_FAIL": "The result did not meet its required assertion.",
+        "NEEDS_REVIEW": "This instruction still needs independent behavioral verification.",
+        "ENV_BLOCKED": "Environment blocked; not evidence that the guide is wrong.",
+        "AUTH_BLOCKED": "Authentication or permissions blocked this instruction.",
+        "NOT_RUN": "Prerequisite unverified; this instruction was not executed.",
+        "RETRY_WAIT": "The step is waiting for the rate-limit retry cooldown.",
+    }
+    for note in notes:
+        anchor = anchors.get(note.step_id)
+        if (type(anchor) not in (int, float) or not math.isfinite(anchor)):
+            raise PrivateRunnerError(
+                "Each affected guide step needs a reviewed inline_after_y anchor"
+            )
+        probe = probes.get(note.step_id)
+        if probe is not None and probe.before.status == "PASS":
+            summary = "The expected state was already correct before this manual edit."
+            check = "Test skipping only this edit and verify downstream behavior."
+        elif note.status in {"ENV_BLOCKED", "RETRY_WAIT"}:
+            summary = labels.get(note.status, "Environment blocked.")
+            check = "Respect cooldowns and retry; do not call the guide outdated."
+        else:
+            summary = labels.get(note.status, "Instruction requires instructor review.")
+            check = "Inspect private evidence and verify the corrected UI path."
+        output.append(InlineNote(note.source_page, note.step_id, anchor,
+                                 summary, check, note.status))
+    return output
+
+
 def run_private(guide_path: str | Path, plan_path: str | Path,
                 output_dir: str | Path, *,
                 source_review_path: str | Path | None = None,
@@ -306,8 +366,10 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
     write_private_report(html_path, outcome.html)
     flagged = build_review_notes(plans, outcome.statuses, probe_objects)
     annotated = out / "annotated-instructor-review.pdf"
-    # A zero-note copy still preserves all original pages; both outputs exist.
-    annotate_pdf(guide, flagged, annotated)
+    # Source-reviewed coordinates make brief notes appear directly below the
+    # affected instructions, never in disconnected afterthought sheets.
+    placements = build_inline_note_placements(plan_path, flagged, probe_objects)
+    annotate_pdf_inline(guide, placements, annotated, quick_summary=True)
     summary = {
         "run_id": run_id, "source_reconciled": reconciled,
         "fully_verified": outcome.fully_verified,
@@ -316,6 +378,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
         "status_counts": dict(Counter(outcome.statuses.values())),
         "report": str(html_path.name),
         "annotated_review": annotated.name,
+        "annotated_layout": "compact_inline_after_step",
         "behavioral_probes": "behavioral-probes.json" if probe_records else None,
     }
     with (out / "status.json").open("x", encoding="utf-8") as f:

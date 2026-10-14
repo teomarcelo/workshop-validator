@@ -48,5 +48,34 @@ class PrivatePlanTests(unittest.TestCase):
             load_plan(self.path,pdf_digest='a'*64,page_count=4)
 
 
+
+    def test_inline_note_placement_uses_private_explicit_anchors(self):
+        from workshop_validator.private_runner import build_inline_note_placements
+        from workshop_validator.pdf_annotations import ReviewNote
+        self.write(steps=[{"step_id":"S001","page":1,
+            "title":"Synthetic instruction", "inline_after_y":140,
+            "actions":[{"kind":"click","role":"button","accessible_name":"Save"}],
+            "assertions":[{"assertion_id":"ok","kind":"DOM_VISIBLE","expected":True,
+                           "role":"status","accessible_name":"Status"}]}])
+        note=ReviewNote(1,"S001","NEEDS_REVIEW","Synthetic step","Needs testing")
+        placements=build_inline_note_placements(self.path,[note])
+        self.assertEqual(len(placements),1)
+        self.assertEqual(placements[0].insert_after_y,140)
+        self.assertIn("behavioral verification",placements[0].summary)
+
+    def test_missing_inline_anchor_is_rejected_not_placed_elsewhere(self):
+        from workshop_validator.private_runner import build_inline_note_placements
+        from workshop_validator.pdf_annotations import ReviewNote
+        self.write()
+        note=ReviewNote(1,"S001","NEEDS_REVIEW","Step","Missing evidence")
+        with self.assertRaises(PrivateRunnerError):
+            build_inline_note_placements(self.path,[note])
+
+    def test_malformed_numeric_source_anchor_is_rejected(self):
+        self.write(steps=[{"step_id":"S001","page":1,"title":"Step",
+            "inline_after_y":"not-a-coordinate", "actions":[], "assertions":[]}])
+        with self.assertRaises(PrivateRunnerError):
+            load_plan(self.path,pdf_digest="a"*64,page_count=4)
+
 if __name__ == "__main__":
     unittest.main()

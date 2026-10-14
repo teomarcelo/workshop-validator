@@ -29,3 +29,6 @@ Example **synthetic** notes JSON (do not commit real PDF-derived text or screens
 ```
 
 All source text, note details and generated PDF reports are confidential. Never upload them to the public repository or its public Actions artifacts. The output is a *review copy*, not a silently corrected or authorized student edition. Even a page with no flagged UI changes remains unverified until guide completeness and evidence gates pass.
+
+
+**Updated preferred output:** The newer [inline review PDF](PDF_INLINE.md) places brief notes directly under their affected instructions instead of on separate sheets. The separate-sheet renderer documented above remains a legacy option. The private runner defaults to inline output when reviewed source coordinates are provided in the private executable plan.

@@ -11,7 +11,7 @@
 | Output | Audience | Behavior |
 | --- | --- | --- |
 | Quick HTML validation report | Instructor / QA reviewer | Status of every planned step, evidence references and findings. An incomplete/unreconciled guide is never labeled fully verified. |
-| Annotated PDF review copy | Guide owner / instructor | Original pages are preserved visually; separate instructor-note sheets are placed immediately after affected pages. No silent source-guide rewrite. |
+| Annotated PDF review copy | Guide owner / instructor | Original vector content is retained, while concise instructor-check notes appear directly under affected instructions; content below moves down without overlap. Includes a one-page quick summary. No silent source-guide rewrite. |
 | Private run artifacts | QA engineering | Screenshot per executed step where successful, local SQLite checkpoint, evidence and sanitized JSON status. **Private environment only.** |
 
 ## What works today
@@ -65,7 +65,8 @@ For the pilot's standard Salesforce username/password login, source-bound author
 - [Bounded 429 recovery](docs/RETRIES.md)
 - [Pipeline](docs/PIPELINE.md)
 - [HTML report](docs/HTML_REPORT.md)
-- [Annotated PDF](docs/PDF_ANNOTATIONS.md)
+- [Inline annotated PDF](docs/PDF_INLINE.md)
+- [Legacy separate-sheet PDF](docs/PDF_ANNOTATIONS.md)
 - [UI discrepancy discovery](docs/UI_DISCOVERY.md)
 - [Private-runner template](templates/private-runner/README.md)
 - [Automation log](AUTOMATION_LOG.md)
