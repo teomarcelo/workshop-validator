@@ -58,6 +58,11 @@ def assess_necessity(
         return result("INSUFFICIENT_PRECONDITION_EVIDENCE",
                       "Missing or invalid before-state evidence.")
 
+    if after_executing is not None and after_executing.status == FUNCTIONAL_FAIL and before.status == PASS:
+        return result("ACTION_REGRESSED_EXPECTED_STATE",
+                      "The desired state was present before the action but absent afterward.",
+                      "Block guide-removal recommendations and investigate the action.")
+
     if before.status == FUNCTIONAL_FAIL:
         if after_executing is not None and after_executing.status == PASS:
             return result("ACTION_HELPED_ON_TESTED_BASELINE",

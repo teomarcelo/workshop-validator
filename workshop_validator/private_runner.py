@@ -17,7 +17,8 @@ import sys
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from .browser_worker import UIAction, UIAssertion, BrowserActionError, perform_actions, collect_observations
+from .browser_worker import UIAction, UIAssertion, BrowserActionError
+from .behavioral_probe import execute_with_necessity_probe
 from .discovery import propose_locators, proposals_to_private_dict
 from .evidence import AssertionSpec
 from .guide_inventory import extract_inventory
@@ -66,21 +67,32 @@ def load_plan(path: str | Path, *, pdf_digest: str, page_count: int) -> tuple[Pl
                     not isinstance(a.get("role"), str) or not isinstance(a.get("accessible_name"), str)):
                 raise PrivateRunnerError("Invalid or unsupported UI action")
             actions.append(UIAction(a["kind"], a["role"], a["accessible_name"], a.get("value")))
-        assertions = []
-        for a in item.get("assertions", []):
-            try:
-                spec = AssertionSpec(a["assertion_id"], a["kind"], a["expected"], a.get("operator", "eq"))
-                assertion = UIAssertion(spec, a["role"], a["accessible_name"])
-            except (TypeError, KeyError):
-                raise PrivateRunnerError("Malformed expected assertion") from None
-            assertions.append(assertion)
+        def parse_assertions(key):
+            raw_assertions = item.get(key, [])
+            if not isinstance(raw_assertions, list):
+                raise PrivateRunnerError("Invalid assertion list")
+            parsed = []
+            for a in raw_assertions:
+                try:
+                    spec = AssertionSpec(a["assertion_id"], a["kind"], a["expected"], a.get("operator", "eq"))
+                    parsed.append(UIAssertion(spec, a["role"], a["accessible_name"]))
+                except (TypeError, KeyError):
+                    raise PrivateRunnerError("Malformed expected assertion") from None
+            return tuple(parsed)
+        assertions = parse_assertions("assertions")
+        necessity_assertions = parse_assertions("necessity_assertions")
+        all_assertions = assertions + necessity_assertions
+        assertion_ids = [a.spec.assertion_id for a in all_assertions]
+        if len(assertion_ids) != len(set(assertion_ids)):
+            raise PrivateRunnerError("Duplicate postcondition assertion IDs")
         dependencies = item.get("dependencies", [])
         if (not isinstance(dependencies, list) or
                 not all(isinstance(s, str) for s in dependencies)):
             raise PrivateRunnerError("Invalid dependency IDs")
         plans.append(PlannedStep(step_id, page, title, tuple(actions),
-                                 tuple(assertions), tuple(dependencies),
-                                 item.get("required", True) is True))
+                                 all_assertions, tuple(dependencies),
+                                 item.get("required", True) is True,
+                                 necessity_assertions))
     return tuple(plans)
 
 
@@ -175,6 +187,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
     run_id = "run-" + uuid4().hex[:14]
     org_id = "disposable-org"
     screenshot_refs: dict[str, str] = {}
+    probe_records: dict[str, dict] = {}
     from playwright.sync_api import sync_playwright
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -199,12 +212,14 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
                     except Exception:
                         raise BrowserActionError("Required private screenshot capture failed") from None
                 try:
-                    perform_actions(page, step.actions)
-                    observed = collect_observations(page, context, step.assertions)
+                    observed, probe = execute_with_necessity_probe(page, step, context)
                     capture_screenshot()
                     if responses:
                         raise RateLimitDetected("Observed Salesforce HTTP 429",
                             retry_after=responses[0].headers.get("retry-after"))
+                    if probe is not None:
+                        # Only classifications and evidence IDs; never raw DOM values.
+                        probe_records[step.step_id] = asdict(probe)
                     return observed
                 except RateLimitDetected:
                     raise
@@ -243,6 +258,12 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
         finally:
             browser.close()
 
+    if probe_records:
+        probe_path = out / "behavioral-probes.json"
+        with probe_path.open("x", encoding="utf-8") as sink:
+            json.dump(probe_records, sink, indent=2)
+        probe_path.chmod(0o600)
+
     html_path = out / "validation-summary.html"
     write_private_report(html_path, outcome.html)
     flagged = [
@@ -266,6 +287,7 @@ def run_private(guide_path: str | Path, plan_path: str | Path,
         "status_counts": dict(Counter(outcome.statuses.values())),
         "report": str(html_path.name),
         "annotated_review": annotated.name if annotated else None,
+        "behavioral_probes": "behavioral-probes.json" if probe_records else None,
     }
     with (out / "status.json").open("x", encoding="utf-8") as f:
         json.dump(summary, f, indent=2)

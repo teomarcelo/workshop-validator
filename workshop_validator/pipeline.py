@@ -45,6 +45,8 @@ class PlannedStep:
     assertions: tuple[UIAssertion, ...]
     dependencies: tuple[str, ...] = ()
     required: bool = True
+    # Optional authored desired-state assertions; also enforced as postconditions.
+    necessity_assertions: tuple[UIAssertion, ...] = ()
 
 
 @dataclass(frozen=True)

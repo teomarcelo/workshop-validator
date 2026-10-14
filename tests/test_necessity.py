@@ -55,6 +55,14 @@ class NecessityDecisionTests(unittest.TestCase):
         self.assertEqual(r.classification, "INSUFFICIENT_PRECONDITION_EVIDENCE")
         self.assertFalse(r.propose_guide_removal)
 
+    def test_action_that_breaks_correct_state_blocks_removal(self):
+        r = assess_necessity(verified(PASS), after_executing=verified(FUNCTIONAL_FAIL),
+                             after_skipping=verified(PASS),
+                             negative_control=verified(FUNCTIONAL_FAIL),
+                             baseline_reproduced=True, prerequisites_verified=True)
+        self.assertEqual(r.classification, "ACTION_REGRESSED_EXPECTED_STATE")
+        self.assertFalse(r.propose_guide_removal)
+
     def test_guide_step_numbering_has_no_role_in_behavioral_decision(self):
         r = assess_necessity(verified(PASS), after_skipping=verified(PASS),
                              baseline_reproduced=True, prerequisites_verified=True,

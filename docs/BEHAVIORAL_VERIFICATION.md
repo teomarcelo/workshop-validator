@@ -38,3 +38,23 @@ The public Python module workshop_validator.necessity analyzes independent verif
 ## Live-test blocker
 
 A real Salesforce run requires a separately approved private runtime; the actual PDF and approved executable manifest outside the public repository; rotated trial-org credentials in protected secrets; safe reset/baseline mechanisms; and a step-by-step browser replay. Neither the public GitHub tests nor the corrected sample review PDF establishes a live Salesforce PASS.
+
+## Private runner pre/post necessity probe (public-safe scaffold)
+
+An operator-reviewed private plan may include `necessity_assertions` on a
+specific manual-edit step, using the same role/name, assertion_id, kind,
+expected and operator fields as normal `assertions`. These describe the
+**desired generated/default value**, not merely a visible button. The runner
+collects these observations before the literal action, then executes the
+authored action and collects all postconditions. Necessity assertions are
+automatically added to the independent postcondition gate: a wrong value
+cannot PASS merely because an unrelated Save button is visible.
+
+If the before-state evidence is missing/ambiguous, the runner refuses to
+mutate that step. Its private `behavioral-probes.json` contains only
+classifications, reasons and evidence identifiers (no raw DOM values);
+`status.json` points to it. An already-correct pre-state is **not** a
+removal recommendation: the runner does not auto-skip, reset, inject faults,
+or claim a redundancy candidate. Those controlled replay stages remain
+separate, private, authorized work. Synthetic unit tests prove that a
+deliberately wrong value is independently rejected.
