@@ -259,3 +259,11 @@ Actual tests: `python -m unittest discover -s tests -p test_resume_reconciliatio
 GitHub constraints: updating the existing feature ref was blocked by connector safety checks, so the tested implementation was preserved on a newly created branch; main was not changed. The encrypted handoff implementation prepared in prior runs remains uncommitted and unverified by CI. No real Salesforce login, reset, omission/fault trial, confidential PDF, private deployment, paid API or cloud spend occurred.
 
 Blockers: approved private runner and encrypted storage, operator-rotated credentials, complete page-reviewed AGT503 plan, authenticated reset/evidence collectors and disposable-org baseline. Next: integrate this gate with a tested encrypted handoff and private checkpoint restore, require fresh live evidence immediately before each action, and preserve both quick HTML and pixel-preserving annotated PDF outputs.
+
+## 2026-10-15 — Private AGT503 login and baseline (local only)
+
+The supplied Summer '26 v2 exercise guide was inventoried privately: 32 pages, 156 candidate steps, `verified_complete: false`. No guide text, credentials, org hostname, or screenshots were committed.
+
+`login.salesforce.com` now shows the username first and the password after Log In. The private runner filled both fields on the first screen and timed out. The adapter now clicks through when the password field is absent, and still fills a combined form in one submit. Synthetic tests cover both. A private local login to the disposable trial org then reached Lightning Experience.
+
+Observed before any guide edits: Agentforce is already on; the Agentforce Studio app and the EinsteinServiceAgent user exist; the Agentforce Action Access permission set is still only in the available list; New Agent has a More options menu whose item is New from Script. The script short link resolves. One setup action was then checked outside the runner: Agentforce Action Access was available, was added, and after Save appeared on the agent user's permission-set list. The page review is still unattested, so the private runner correctly will not claim a verified guide.

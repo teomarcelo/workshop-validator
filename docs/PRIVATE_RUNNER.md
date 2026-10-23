@@ -8,9 +8,13 @@ The guide is read as a local private file. A required human-reviewed JSON execut
 
 **Output in the private working directory**: sanitized `status.json`, step-by-step `validation-summary.html`, `checkpoint.sqlite`, a screenshot per executed step that permits it, and an `annotated-instructor-review.pdf` with short notes directly under flagged steps. Screenshots and report may contain confidential content and require approved private retention and access controls.
 
-The login adapter supports the standard username/password form on `login.salesforce.com` only. It does not bypass SSO/MFA. Actual Salesforce flows and selectors may vary. The pipeline uses pre-authored role/name locators only; autonomous LLM-assisted exact UI path recovery remains unimplemented at $0 AI budget. A classified HTTP 429 blocks the current step and permits truly independent steps to continue, but this CLI currently records the blocker only; a production runner must integrate the existing SQLite retry queue and durable restart semantics.
+The login adapter supports the standard username/password form on `login.salesforce.com` only. It follows the current username-first screen and still accepts an older form that shows both fields at once. It does not bypass SSO/MFA. Actual Salesforce flows and selectors may vary. The pipeline uses pre-authored role/name locators only; autonomous LLM-assisted exact UI path recovery remains unimplemented at $0 AI budget. A classified HTTP 429 blocks the current step and permits truly independent steps to continue, but this CLI currently records the blocker only; a production runner must integrate the existing SQLite retry queue and durable restart semantics.
 
-**Exit codes**: 0 only for independently verified required steps with a complete source review; 2 for incomplete/blocked/invalid. Live Salesforce authentication and full guide execution have NOT been tested or deployed at the time this code was written.
+Run the guide in printed order. Finish Setup, then each exercise and each task inside it, before starting the next. A step is finished only when it passes, fails for a real mismatch, or is explicitly blocked. If a later exercise was already touched, return to the earliest unfinished step.
+
+Report every step as PASS or FAIL under its exercise and task. A task is PASS only when every step in it passed. Keep a failed step visible when later steps still ran, and mark steps that were not run as NOT RUN. Do not record a UI failure while the page is still loading.
+
+**Exit codes**: 0 only for independently verified required steps with a complete source review; 2 for incomplete/blocked/invalid. A private local login to one disposable trial org has succeeded with the username-first form. Full guide execution, page attestation, and an authored executable plan are still not done.
 
 Example private plan format is shown below using synthetic content only:
 

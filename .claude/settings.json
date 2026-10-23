@@ -1,0 +1,47 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.workshop-validator/verification-orgs.json)",
+      "Read(//**/browser-state.json)",
+      "Read(./**/*.pdf)",
+      "Bash(git push origin main*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(cat ~/.workshop-validator/verification-orgs.json*)"
+    ],
+    "allow": [
+      "Bash(.venv/bin/python -m unittest*)",
+      "Bash(.venv/bin/python -m workshop_validator.public_safety*)",
+      "Bash(.venv/bin/python -m workshop_validator.automate*)",
+      "Bash(.venv/bin/python -m workshop_validator.lessons*)",
+      "Bash(.venv/bin/python -m workshop_validator.step_board*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_state*)",
+      "Bash(.venv/bin/python -m workshop_validator.watchdog*)",
+      "Bash(.venv/bin/python -m compileall*)",
+      "Bash(ffmpeg*)",
+      "Bash(ffprobe*)",
+      "Bash(git add workshop_validator/*)",
+      "Bash(git add tests/*)",
+      "Bash(git add docs/*)",
+      "Bash(git add .claude/*)",
+      "Bash(git add .cursor/*)",
+      "Bash(git add scripts/*)",
+      "Bash(git add CLAUDE.md*)",
+      "Bash(git add README.md*)",
+      "Bash(git add AUTOMATION_LOG.md*)",
+      "Bash(git add PROJECT_PLAN.md*)",
+      "Bash(git add .gitignore*)",
+      "Bash(git add requirements-dev.txt*)",
+      "Bash(git commit*)",
+      "Bash(git push -u origin automation/*)",
+      "Bash(git checkout -b automation/*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh run view*)"
+    ]
+  }
+}

@@ -1,0 +1,22 @@
+---
+description: Report every guide step as pass or fail under its task
+alwaysApply: true
+---
+
+# Step pass or fail
+
+Report results by guide section. A reader must see the exact step that failed, including when later steps still ran.
+
+1. Group by Setup, then each exercise, then each task, in printed order.
+2. Give every step its own PASS or FAIL. A task is PASS only when every step in it is PASS. One failed step makes the task FAIL.
+3. Put the failure on that step, with the reason. Then list the following steps and their results. Do not hide a failure inside a later pass.
+4. A step that was not run is NOT RUN. Do not call it PASS, and do not call its task PASS.
+5. Use this shape:
+
+```text
+Exercise 1-2, Task 3: Test your agent: FAIL
+  1. Select Preview: PASS
+  2. Welcome message is shown: FAIL
+     Live Test shows Let's chat, not the saved welcome.
+  3. Reply with Hello there!: PASS
+```

@@ -10,6 +10,7 @@ __pycache__/
 *.jpg
 *.jpeg
 *.webp
+*.webm
 *.zip
 *.trace
 playwright-report/
@@ -24,3 +25,11 @@ secrets/
 *.db-shm
 *.sqlite-*
 *.sqlite3-*
+browser-state.json
+docs/WORKSHOP_LESSONS.md
+lessons.md
+lessons.json
+aliases.json
+verification-orgs.json
+gate.json
+history.json

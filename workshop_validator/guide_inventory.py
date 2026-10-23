@@ -14,8 +14,14 @@ import unicodedata
 
 NUMBER = re.compile(r"^(\d{1,2})\.\s*(.*)$")
 LETTER = re.compile(r"^([a-z])\.\s*(.*)$", re.I)
+ROMAN = re.compile(r"^(x{0,3}(?:ix|iv|v?i{1,3}|v))\.\s*(.*)$", re.I)
+# Roman substeps sit further right than the letter step they belong to.
+ROMAN_INDENT = 15
+# Headings print larger than step text. A guide without "Exercise N" lines
+# still names each exercise this way.
+HEADING_SIZE = 14.5
 TASK = re.compile(r"^Task\s+\d+\s*:.+", re.I)
-SECTION = re.compile(r"^(?:Exercise\s+\d+(?:-\d+)?|Set Up Your Instance)\b.*", re.I)
+SECTION = re.compile(r"^(?:Exercise\s+\d+(?:-\d+)?|Use Case\s+\d+(?:-\d+)?|Set Up Your Instance)\b.*", re.I)
 FOOTER = re.compile(r"^\d+\s*\|\s*.*(?:Guide|Workbook)\b", re.I)
 TABLE_CONTEXT = re.compile(r"\b(?:following values|following information|table below|using the table)\b", re.I)
 SUSPECT = re.compile(r"\bfi\b|\b(?:enter|update|select|click in the|once the)\s*$", re.I)
@@ -54,6 +60,11 @@ class GuideInventory:
                 "review_required": "Visually reconcile every page, step, table and screenshot."}
 
 
+def _heading_size(line: dict) -> float:
+    sizes = [float(char.get("size") or 0) for char in line.get("chars") or () if str(char.get("text", "")).strip()]
+    return max(sizes) if sizes else 0.0
+
+
 def extract_inventory(path: str | Path) -> GuideInventory:
     """Extract candidates, not a verified/actionable guide manifest.
 
@@ -72,6 +83,8 @@ def extract_inventory(path: str | Path) -> GuideInventory:
     task: str | None = None
     parent: str | None = None
     last_number: int | None = None
+    letter: tuple[str, float] | None = None
+    heading_bottom: float | None = None
     seen_tasks: set[tuple[str | None, str]] = set()
     with pdfplumber.open(str(path)) as pdf:
         for pnum, page in enumerate(pdf.pages, 1):
@@ -104,9 +117,16 @@ def extract_inventory(path: str | Path) -> GuideInventory:
                 x, top, right, bottom = (float(line[k]) for k in ("x0", "top", "x1", "bottom"))
                 if not text or top > page.height - 38 or FOOTER.match(text):
                     continue
-                if SECTION.match(text):
+                big = _heading_size(line) >= HEADING_SIZE
+                if big and heading_bottom is not None and 0 <= top - heading_bottom <= 10 and exercise:
+                    exercise = f"{exercise} {text}"
+                    heading_bottom = bottom
+                    continue
+                heading_bottom = None
+                if SECTION.match(text) or (big and not NUMBER.match(text)):
                     finish()
-                    exercise, task, last_number, parent = text, None, None, None
+                    exercise, task, last_number, parent, letter = text, None, None, None, None
+                    heading_bottom = bottom if big else None
                     continue
                 if TASK.match(text):
                     finish()
@@ -116,8 +136,10 @@ def extract_inventory(path: str | Path) -> GuideInventory:
                     seen_tasks.add((exercise, task))
                     continue
                 number = NUMBER.match(text) if x >= 78 else None
-                letter = LETTER.match(text) if x >= 102 else None
-                if number or letter:
+                roman = (ROMAN.match(text) if letter is not None and x >= letter[1] + ROMAN_INDENT
+                         else None)
+                lettered = LETTER.match(text) if x >= 102 and not roman else None
+                if number or lettered or roman:
                     finish()
                     ordinal += 1
                     step_id = f"P{pnum:03}N{ordinal:03}"
@@ -128,9 +150,12 @@ def extract_inventory(path: str | Path) -> GuideInventory:
                             flags.append("numbering_review_required")
                         last_number = n
                         kind_num, source_text, predecessor = str(n), number.group(2), None
-                        parent = step_id
+                        parent, letter = step_id, None
+                    elif roman:
+                        kind_num, source_text, predecessor = roman.group(1).lower(), roman.group(2), letter[0]
                     else:
-                        kind_num, source_text, predecessor = letter.group(1).lower(), letter.group(2), parent
+                        kind_num, source_text, predecessor = lettered.group(1).lower(), lettered.group(2), parent
+                        letter = (step_id, x)
                         if not parent:
                             flags.append("parent_review_required")
                     active = {"id": step_id, "number": kind_num, "parts": [source_text],

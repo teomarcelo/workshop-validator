@@ -1,0 +1,24 @@
+---
+description: Wait out page loading before marking a browser step failed
+alwaysApply: true
+---
+
+# Wait for load
+
+A browser step is FAIL only after loading signals are gone and the expected result is still missing. A slow Live Test is not a failure.
+
+Treat these as still loading:
+
+- a visible spinner
+- the text "Loading", "Loading assistant", or "Nothing here yet"
+- an empty reply bubble while Trace is empty
+- a preview panel that still says the agent is loading
+
+Before recording FAIL, poll about every 2 seconds. Do not mark FAIL on the first empty observation. After the last loading signal disappears, keep checking the expected result. Bound the wait at about 90 seconds so a real failure can still be recorded.
+
+```text
+Reply with Hello there!: PASS
+  The reply arrived after the preview finished loading.
+```
+
+If a loading signal is still on the page at the time limit, do not record FAIL.

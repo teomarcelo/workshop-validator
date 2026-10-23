@@ -1,0 +1,16 @@
+---
+description: Run workshop exercise guides in printed order
+alwaysApply: true
+---
+
+# Exercise order
+
+A guide is a sequence. Later exercises depend on earlier ones. Validate and execute steps in printed order.
+
+1. Setup, then Exercise 1, then Exercise 2, then Exercise 3, and so on.
+2. Inside an exercise, finish tasks and steps in the order they appear. Do not open a later exercise while an earlier one still has an unfinished step.
+3. A step is finished only when it is PASS, a real mismatch or failure, or explicitly blocked. Do not skip it to keep moving.
+4. If a later exercise was already touched, go back and finish the earliest unfinished step before treating later work as next.
+5. Write the pass/fail summary only after every step in the guide has a final status.
+
+Example: if Exercise 2-2 still has an unfinished action, do not continue Exercise 3 until 2-2 is finished.

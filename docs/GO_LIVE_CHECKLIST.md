@@ -5,11 +5,11 @@
 | Gate | Status | Requirement and acceptance evidence |
 | --- | --- | --- |
 | 1. Public CI unit + browser smoke | **Passed on synthetic data** | GitHub Actions must show green Python and Chromium jobs on current code revision. |
-| 2. PDF candidate inventory | **Prototype built** | One exact input PDF SHA-256, page count and candidate list; no silent skipping. |
+| 2. PDF candidate inventory | **Private draft extracted** | The supplied 32-page guide produced a private candidate list. It is not an attested inventory. |
 | 3. Guide completeness attestation | **Required / not complete** | All source pages, screenshots, tables and numbered/unnumbered actions reviewed; every candidate classified, missing actions manually added, reviewer attested and reconciliation gate passed. |
 | 4. Source-bound executable plan | **Required / not complete** | Exactly the reviewed action IDs; each action has safe authored locators, dependencies and independent DOM/API assertions. No high-confidence label substitutes for execution. |
 | 5. Private credential/document storage | **Required / not configured** | Company-approved input service, permitted private runner, rotated Salesforce credentials in restricted secrets, no private content in public Actions. |
-| 6. Manual real Salesforce smoke | **Required / not performed** | One trial-org login; one exercise action executes and meets an independently checked assertion, with private evidence. |
+| 6. Manual real Salesforce smoke | **One setup action checked** | Username-first login succeeded. Adding Agentforce Action Access to the agent user was saved and showed on the user record. The rest of the guide is not executed. |
 | 7. Real instruction coverage | **Required / not performed** | Every required source action PASS or explicitly BLOCKED/NEEDS_REVIEW; no silent omissions. |
 | 8. HTTP 429 and browser recovery | **Partly implemented** | Tested bounded same-job retries/Option A in synthetic tests. Test actual response classification, cooldown and dependency revalidation privately. |
 | 9. Secure quick HTML report | **Prototype built** | Real private report captures each status, evidence references, and reproducible run ID; no public data leak. |
