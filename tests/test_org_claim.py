@@ -344,6 +344,33 @@ def _to_details(url):
     return hook
 
 
+class HttpsOriginTests(unittest.TestCase):
+    """_https_origin rejects URLs that browsers and urlparse parse differently."""
+
+    def test_rejects_url_with_backslash(self):
+        self.assertIsNone(org_claim._https_origin("https://example.test\\x/path"))
+        self.assertIsNone(org_claim._https_origin("https://example.test/path\\x"))
+
+    def test_rejects_url_with_userinfo(self):
+        self.assertIsNone(org_claim._https_origin("https://user@example.test/path"))
+        self.assertIsNone(org_claim._https_origin("https://user:pass@example.test/path"))
+
+    def test_rejects_explicit_port_zero(self):
+        self.assertIsNone(org_claim._https_origin("https://example.test:0/path"))
+
+    def test_rejects_explicit_non_443_port(self):
+        self.assertIsNone(org_claim._https_origin("https://example.test:8443/path"))
+        self.assertIsNone(org_claim._https_origin("https://example.test:80/path"))
+        self.assertIsNone(org_claim._https_origin("https://example.test:8080/path"))
+
+    def test_accepts_plain_https_url(self):
+        self.assertEqual(org_claim._https_origin("https://example.test/path"), ("example.test", 443))
+        self.assertEqual(org_claim._https_origin("https://sub.example.test/path"), ("sub.example.test", 443))
+
+    def test_accepts_explicit_port_443(self):
+        self.assertEqual(org_claim._https_origin("https://example.test:443/path"), ("example.test", 443))
+
+
 class PortalBoundaryTests(unittest.TestCase):
     """The browser never leaves the https portal host, redirects included."""
 
@@ -432,7 +459,7 @@ class PortalBoundaryTests(unittest.TestCase):
         page = FakePage({PORTAL_URL: (PORTAL_URL, html)})
         fetched = []
 
-        def get(url):
+        def get(url, **kwargs):
             fetched.append(url)
             final = "https://elsewhere.example.test/m.pdf" if url.endswith("moved.pdf") else url
             return mock.Mock(ok=True, url=final, body=lambda: b"%PDF-1.4 synthetic")
@@ -443,6 +470,22 @@ class PortalBoundaryTests(unittest.TestCase):
         self.assertEqual(line, "org-claim: GUIDES 1 (skipped 3 off-portal links)")
         self.assertEqual(fetched, ["https://portal.example.test/files/synthetic-guide.pdf",
                                    "https://portal.example.test/files/moved.pdf"])
+
+    def test_guides_fetches_with_max_redirects_zero(self):
+        html = PORTAL + '<a href="/files/second.pdf">Second</a>'
+        page = FakePage({PORTAL_URL: (PORTAL_URL, html)})
+        kwargs_list = []
+
+        def get(url, **kwargs):
+            kwargs_list.append(kwargs)
+            return mock.Mock(ok=True, url=url, body=lambda: b"%PDF-1.4 synthetic")
+        context = mock.Mock(request=mock.Mock(get=get))
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(context, page)):
+            org_claim.guides(Path(folder), {"portal_url": PORTAL_URL})
+        self.assertEqual(len(kwargs_list), 2)
+        for kwargs in kwargs_list:
+            self.assertEqual(kwargs.get("max_redirects"), 0)
 
 
 class LockAndInboxTests(unittest.TestCase):
