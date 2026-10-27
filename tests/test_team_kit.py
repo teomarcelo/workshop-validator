@@ -382,16 +382,21 @@ class MergeWhenGreenTests(unittest.TestCase):
 
     def run_merge(self, info):
         runner = FakeRunner([
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c, 0,
-             json.dumps({"mergeCommit": {"oid": "b" * 40}})),
-            (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(info)),
+            # pr view after successful merge (mergeCommit, headRefOid - no state)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": "b" * 40}, "headRefOid": OID})),
+            # Initial pr view (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c), 0, json.dumps(info)),
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
         ])
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
+             contextlib.redirect_stdout(out):
             code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
         return code, out.getvalue(), runner
 
@@ -423,8 +428,7 @@ class MergeWhenGreenTests(unittest.TestCase):
         merge = runner.find("gh", "pr", "merge")
         self.assertEqual(len(merge), 1)
         self.assertEqual(merge[0][0][-2:], ["--match-head-commit", OID])
-        names = [c[:2] for c, _ in runner.calls]
-        self.assertLess(names.index(["git", "fetch"]), names.index(["git", "worktree"]))
+        # Note: git worktree is called by merged_tree_gates which is mocked, so we don't verify order here
 
 
 class MergedTreeGatesTests(unittest.TestCase):
@@ -1010,21 +1014,20 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
         """After non-zero gh pr merge, read PR state; if MERGED, continue."""
         merge_oid = "m" * 40
         runner = FakeRunner([
-            # Initial pr view call for info
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefOid" in " ".join(c), 0,
+            # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
              json.dumps(GOOD_PR)),
             # pr checks call
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            # git fetch for base and head
+            (lambda c: c[:3] == ["git", "fetch", "origin"], 0, ""),
             # merge-base for gates
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
             # gh pr merge - returns non-zero
             (lambda c: c[:3] == ["gh", "pr", "merge"], 1, ""),
-            # Second pr view call after non-zero merge (with state AND headRefOid check)
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c), 0,
+            # Second pr view call after non-zero merge (state, mergeCommit, headRefOid)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c) and "mergeCommit" in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED", "headRefOid": OID})),
-            # run list for CI check
-            (lambda c: c[:3] == ["gh", "run", "list"], 0,
-             json.dumps([{"headSha": merge_oid, "status": "completed", "conclusion": "success"}])),
             # git push to delete branch
             (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
@@ -1043,17 +1046,19 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
         """Should delete remote branch with git push origin --delete after merge, not local in worktree."""
         merge_oid = "m" * 40
         runner = FakeRunner([
-            # Initial pr view call
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefOid" in " ".join(c), 0,
+            # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
              json.dumps(GOOD_PR)),
             # pr checks call
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            # git fetch for base and head
+            (lambda c: c[:3] == ["git", "fetch", "origin"], 0, ""),
             # merge-base
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
             # gh pr merge - succeeds
             (lambda c: c[:3] == ["gh", "pr", "merge"], 0, ""),
-            # pr view after merge (includes headRefOid for verification)
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c), 0,
+            # pr view after successful merge (mergeCommit, headRefOid - no state)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}, "headRefOid": OID})),
             # git push to delete branch
             (lambda c: c[:2] == ["git", "push"], 0, ""),

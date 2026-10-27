@@ -123,11 +123,15 @@ class PublicSafetyAuthorEmailTests(unittest.TestCase):
             subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "commit", "-m", "test"], cwd=repo, check=True, capture_output=True)
 
-            # Check should fail
+            # Check should fail (without printing email/domain per F6-fix item 5)
             from workshop_validator.public_safety import check_commit_emails
             ok, msg = check_commit_emails(repo, "origin_main")
             self.assertFalse(ok)
-            self.assertIn("internal.example", msg)
+            # Should NOT print email or domain
+            self.assertNotIn("internal.example", msg)
+            self.assertNotIn("someone@", msg)
+            # Should print count only (case insensitive)
+            self.assertIn("non-github noreply email", msg.lower())
 
     def test_github_noreply_email_accepted(self):
         """Commits with GitHub noreply emails should be accepted."""
