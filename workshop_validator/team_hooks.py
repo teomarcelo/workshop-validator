@@ -161,14 +161,18 @@ def stop_decision(payload: dict, *, team: Path, repo: Path, status_fn=None) -> s
         return None
     # Check main checkout is on main branch
     from . import public_safety
-    clean_ok, clean_msg = public_safety.check_main_clean(repo)
+    main_hint = "Review in a temp worktree or with git show/diff; never check out anything in the main checkout."
+    clean_ok, clean_msg = public_safety.check_main_clean(repo, check_dirty=False)
     if not clean_ok:
-        return (f"Main checkout problem: {clean_msg}. "
-                "Review in a temp worktree or with git show/diff; never check out anything in the main checkout.")
+        return f"Main checkout problem: {clean_msg}. {main_hint}"
+    # Chain status comes before the dirty-file check, so a stray file never hides an IDLE/STALLED chain.
     state, reason = (status_fn or team_kit.status)(repo, team)
     if state in {"IDLE", "STALLED"}:
         return (f"Chain is {state}: {reason}. Start the next ready step (or fix the stall) "
                 "and mark it in now.json before ending the turn.")
+    clean_ok, clean_msg = public_safety.check_main_clean(repo)
+    if not clean_ok:
+        return f"Main checkout problem: {clean_msg}. {main_hint}"
     dashboard = team / "dashboard.html"
     sources = [team_kit.now_path(team), team / "DECISIONS.md"]
     newest = max((p.stat().st_mtime for p in sources if p.is_file()), default=0)

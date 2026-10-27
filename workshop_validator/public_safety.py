@@ -170,21 +170,28 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str
 
 
 def get_main_checkout(root: Path) -> Path | None:
-    """Get the main checkout path (first entry from git worktree list, or root if no worktrees)."""
+    """Return the main checkout path (first `git worktree list` entry), or None on any failure."""
     try:
         result = subprocess.run(
             ["git", "worktree", "list", "--porcelain"],
             cwd=root, capture_output=True, text=True, check=True
         )
-        # First worktree entry is the main checkout
-        for line in result.stdout.splitlines():
-            if line.startswith("worktree "):
-                return Path(line.split(" ", 1)[1])
-        # If no worktrees found, the root itself is the main checkout
-        return root
-    except subprocess.CalledProcessError:
-        # git worktree list fails in non-git repos, or the root is the main checkout
-        return root
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    # First worktree entry is the main checkout
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.split(" ", 1)[1])
+    return None
+
+
+def _short_reason(text: str, returncode: int) -> str:
+    """First non-empty line of git's error output, trimmed, or the exit code."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:120]
+    return f"git exited {returncode}"
 
 
 def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
@@ -203,13 +210,16 @@ def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
             cwd=root, capture_output=True, text=True
         )
         if git_check.returncode != 0:
-            # Not a git repo, skip check (test environments)
-            return True, "Not a git repo, check skipped"
+            error_text = (git_check.stderr or "") + (git_check.stdout or "")
+            if "not a git repository" in error_text.lower():
+                # Not a git repo, skip check (test environments)
+                return True, "Not a git repo, check skipped"
+            return False, f"Could not check main checkout status: {_short_reason(error_text, git_check.returncode)}"
 
         # Find the main checkout (first worktree entry)
         main_checkout = get_main_checkout(root)
         if main_checkout is None:
-            return False, "Could not find main checkout"
+            return False, "Could not check main checkout status: git worktree list failed"
 
         # Check if on branch main or detached
         head_result = subprocess.run(
@@ -242,8 +252,9 @@ def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
         return True, "Main checkout is clean"
     except FileNotFoundError:
         return False, "git binary not found"
-    except subprocess.CalledProcessError:
-        return False, "Could not check main checkout status"
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return False, f"Could not check main checkout status: {_short_reason(stderr, exc.returncode)}"
 
 
 def main(argv: list[str] | None = None) -> int:

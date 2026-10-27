@@ -302,5 +302,102 @@ class PublicSafetyCheckMainCleanTests(unittest.TestCase):
             self.assertIn("untracked or modified files", msg)
 
 
+def _make_repo(path: Path) -> None:
+    """Synthetic temp repo on branch main with one commit."""
+    path.mkdir(parents=True)
+    for cmd in (["git", "init", "-q", "-b", "main"],
+                ["git", "config", "user.name", "Test"],
+                ["git", "config", "user.email", "test@users.noreply.github.com"]):
+        subprocess.run(cmd, cwd=path, check=True, capture_output=True)
+    (path / "file.txt").write_text("content")
+    subprocess.run(["git", "add", "file.txt"], cwd=path, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=path, check=True, capture_output=True)
+
+
+class F9Fix2Tests(unittest.TestCase):
+    """F9 fix2: fail closed on git errors, no root fallback, chain status before dirty files."""
+
+    def test_check_main_clean_fails_when_rev_parse_errors_with_broken_global_config(self):
+        """A rev-parse failure that is not 'not a git repository' must fail, not skip."""
+        import os
+        from unittest import mock
+        from workshop_validator import public_safety
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _make_repo(repo)
+            subprocess.run(["git", "checkout", "-q", "--detach"], cwd=repo, check=True, capture_output=True)
+            broken = Path(tmp) / "broken.gitconfig"
+            broken.write_text("[core\n\tthis is = = not valid\n", encoding="utf-8")
+            with mock.patch.dict(os.environ, {"GIT_CONFIG_GLOBAL": str(broken)}):
+                ok, msg = public_safety.check_main_clean(repo)
+        self.assertFalse(ok)
+        self.assertIn("Could not check main checkout status:", msg)
+        self.assertNotIn("skipped", msg)
+
+    def test_check_main_clean_fails_when_rev_parse_exits_128_with_other_text(self):
+        from unittest import mock
+        from workshop_validator import public_safety
+        failed = subprocess.CompletedProcess(["git"], 128, stdout="", stderr="fatal: unsafe repository\n")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("workshop_validator.public_safety.subprocess.run", return_value=failed):
+            ok, msg = public_safety.check_main_clean(Path(tmp))
+        self.assertFalse(ok)
+        self.assertEqual(msg, "Could not check main checkout status: fatal: unsafe repository")
+
+    def test_check_main_clean_skips_only_outside_a_git_repository(self):
+        from workshop_validator import public_safety
+        with tempfile.TemporaryDirectory() as tmp:
+            ok, msg = public_safety.check_main_clean(Path(tmp))
+        self.assertTrue(ok)
+        self.assertIn("skipped", msg)
+
+    def test_get_main_checkout_returns_none_when_worktree_list_fails(self):
+        from unittest import mock
+        from workshop_validator import public_safety
+        err = subprocess.CalledProcessError(128, ["git"], stderr="fatal: boom")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            with mock.patch("workshop_validator.public_safety.subprocess.run", side_effect=err):
+                self.assertIsNone(public_safety.get_main_checkout(root))
+            # A real non-git folder also fails, and must not fall back to the root.
+            self.assertIsNone(public_safety.get_main_checkout(root))
+
+    def test_get_main_checkout_returns_first_worktree_in_a_real_repo(self):
+        from workshop_validator import public_safety
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            _make_repo(repo)
+            self.assertEqual(public_safety.get_main_checkout(repo).resolve(), repo.resolve())
+
+    def _stop(self, tmp: Path, state: str):
+        from workshop_validator.team_hooks import stop_decision
+        repo = tmp / "main"
+        _make_repo(repo)
+        (repo / "stray.txt").write_text("stray")
+        team = tmp / "team"
+        team.mkdir()
+        (team / "producer-live").write_text(json.dumps({"session_id": "s"}), encoding="utf-8")
+        (team / "producer-live").chmod(0o600)
+        return stop_decision({"session_id": "s"}, team=team, repo=repo,
+                             status_fn=lambda r, t: (state, "step x is ready"))
+
+    def test_stop_reports_idle_chain_even_with_stray_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reason = self._stop(Path(tmp), "IDLE")
+        self.assertIsNotNone(reason)
+        self.assertIn("Chain is IDLE", reason)
+
+    def test_stop_reports_stalled_chain_even_with_stray_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reason = self._stop(Path(tmp), "STALLED")
+        self.assertIn("Chain is STALLED", reason)
+
+    def test_stop_still_blocks_on_stray_file_when_chain_working(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            reason = self._stop(Path(tmp), "WORKING")
+        self.assertIsNotNone(reason)
+        self.assertIn("untracked or modified files", reason)
+
+
 if __name__ == "__main__":
     unittest.main()
