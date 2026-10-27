@@ -350,16 +350,14 @@ class StepBoardTests(unittest.TestCase):
         from unittest.mock import patch
         from workshop_validator import theme
 
-        # Patch theme colors with sentinel values
+        # Replace existing values only. patch.dict would silently add a
+        # missing key, so first require the keys to exist in theme.py.
         sentinel_bg = "#ff00ff"  # Magenta
         sentinel_fg = "#00ff00"  # Green
+        for key in ("chip_suspect_bg", "chip_suspect"):
+            self.assertIn(key, theme.COLORS_LIGHT, f"theme.COLORS_LIGHT must define {key}")
 
-        original_light = theme.COLORS_LIGHT.copy()
-        patched_light = original_light.copy()
-        patched_light["chip_suspect_bg"] = sentinel_bg
-        patched_light["chip_suspect"] = sentinel_fg
-
-        with patch.object(theme, "COLORS_LIGHT", patched_light):
+        with patch.dict(theme.COLORS_LIGHT, {"chip_suspect_bg": sentinel_bg, "chip_suspect": sentinel_fg}):
             page, _board = html_for(
                 (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
                 {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
