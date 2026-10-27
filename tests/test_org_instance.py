@@ -6,8 +6,8 @@ from workshop_validator import org_instance
 
 
 class _Response:
-    def __init__(self, ok, payload):
-        self.ok, self._payload = ok, payload
+    def __init__(self, ok, payload, status=200):
+        self.ok, self._payload, self.status = ok, payload, status
 
     def json(self):
         return self._payload
@@ -52,6 +52,7 @@ class SessionQueryTests(unittest.TestCase):
         self.assertTrue(url.startswith("https://demo.my.salesforce.com/services/data/"))
         self.assertIn("InstanceName", kwargs["params"]["q"])
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer token-1")
+        self.assertEqual(kwargs["max_redirects"], 0)
 
     def test_refused_query_missing_cookie_or_odd_value_is_none(self):
         refused = _Page(_Context(_SID, _Response(False, {})))
@@ -61,6 +62,11 @@ class SessionQueryTests(unittest.TestCase):
         odd = _Page(_Context(_SID, _Response(True, {"records": [{"InstanceName": "<b>x</b>"}]})))
         self.assertIsNone(org_instance.from_session(odd))
         self.assertIsNone(org_instance.from_session(object()))
+
+    def test_redirect_response_is_treated_as_not_found(self):
+        # 3xx response with max_redirects=0 is treated as not found
+        redirect = _Page(_Context(_SID, _Response(True, {"records": [{"InstanceName": "NA1"}]}, status=302)))
+        self.assertIsNone(org_instance.from_session(redirect))
 
     def test_company_information_text(self):
         self.assertEqual(org_instance.instance_from_text("Organization Edition\tDeveloper\nInstance\tAUS58\n"), "AUS58")

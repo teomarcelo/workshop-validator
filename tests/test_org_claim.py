@@ -462,7 +462,7 @@ class PortalBoundaryTests(unittest.TestCase):
         def get(url, **kwargs):
             fetched.append(url)
             final = "https://elsewhere.example.test/m.pdf" if url.endswith("moved.pdf") else url
-            return mock.Mock(ok=True, url=final, body=lambda: b"%PDF-1.4 synthetic")
+            return mock.Mock(ok=True, status=200, url=final, body=lambda: b"%PDF-1.4 synthetic")
         context = mock.Mock(request=mock.Mock(get=get))
         with tempfile.TemporaryDirectory() as folder, \
                 mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(context, page)):
@@ -478,7 +478,7 @@ class PortalBoundaryTests(unittest.TestCase):
 
         def get(url, **kwargs):
             kwargs_list.append(kwargs)
-            return mock.Mock(ok=True, url=url, body=lambda: b"%PDF-1.4 synthetic")
+            return mock.Mock(ok=True, status=200, url=url, body=lambda: b"%PDF-1.4 synthetic")
         context = mock.Mock(request=mock.Mock(get=get))
         with tempfile.TemporaryDirectory() as folder, \
                 mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(context, page)):
@@ -515,6 +515,77 @@ class LockAndInboxTests(unittest.TestCase):
             os.chmod(inbox, 0o755)
             org_claim.save_guides(Path(folder), [("https://x.test/a.pdf", b"%PDF-1.4 x")])
             self.assertEqual(stat.S_IMODE(inbox.stat().st_mode), 0o700)
+
+
+class GuidesResponseTests(unittest.TestCase):
+    """Test that --guides counts all non-OK responses (including refused redirects) as skipped."""
+
+    def test_redirect_and_error_responses_counted_as_skipped(self):
+        """3xx and 4xx responses with max_redirects=0 are counted in skipped total."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            config = {"portal_url": "https://portal.example.test"}
+
+            class _Response:
+                def __init__(self, ok, status, body_bytes=b"", url_str=""):
+                    self.ok, self.status, self._body, self.url = ok, status, body_bytes, url_str
+
+                def body(self):
+                    return self._body
+
+            class _Request:
+                def __init__(self):
+                    self.calls = []
+
+                def get(self, url, max_redirects=None):
+                    self.calls.append((url, max_redirects))
+                    # First link: 404 not found
+                    if "missing" in url:
+                        return _Response(False, 404, url_str=url)
+                    # Second link: 302 redirect (refused because max_redirects=0)
+                    if "redirect" in url:
+                        return _Response(True, 302, url_str=url)
+                    # Third link: OK
+                    return _Response(True, 200, b"%PDF-1.4\nfake", url_str=url)
+
+            class _Context:
+                def __init__(self):
+                    self.request = _Request()
+
+            class _Page:
+                def __init__(self, ctx):
+                    self.context, self.url = ctx, "https://portal.example.test/home"
+
+            html = """<html><body>
+            <a href="https://portal.example.test/missing.pdf">Missing</a>
+            <a href="https://portal.example.test/redirect.pdf">Redirect</a>
+            <a href="https://portal.example.test/good.pdf">Good</a>
+            </body></html>"""
+
+            context = _Context()
+            page = _Page(context)
+
+            # Mock the browser interactions
+            with mock.patch.object(org_claim, "_browser") as mock_browser:
+                def run_browser(func):
+                    return func(context, page)
+                mock_browser.side_effect = run_browser
+
+                with mock.patch.object(org_claim, "_goto"), \
+                     mock.patch.object(org_claim, "_poll", return_value=(
+                         ["https://portal.example.test/missing.pdf",
+                          "https://portal.example.test/redirect.pdf",
+                          "https://portal.example.test/good.pdf"], html)), \
+                     mock.patch.object(org_claim, "_require_portal"):
+                    result = org_claim.guides(root, config)
+
+            # Verify max_redirects=0 was used
+            for _, max_redir in context.request.calls:
+                self.assertEqual(max_redir, 0)
+
+            # Verify result: 1 saved, 2 skipped (404 and 302)
+            self.assertIn("GUIDES 1", result)
+            self.assertIn("skipped 2", result)
 
 
 if __name__ == "__main__":
