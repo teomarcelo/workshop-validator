@@ -2959,5 +2959,52 @@ class UnnamedModalTests(unittest.TestCase):
         self.assertEqual(page.events, [])
 
 
+
+    def test_row_dropdown_with_unnamed_modal_returns_env_blocked(self):
+        """Row dropdown step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # Add an unnamed modal covering the page
+        page.roles.add(("dialog", "Update Available\nNew version ready\nInstall Now"))
+        page.roles.add(("h2", "Update Available"))
+        page.children = {
+            ("dialog", "Update Available\nNew version ready\nInstall Now"): [
+                ("h2", "Update Available")
+            ]
+        }
+        # Row dropdown step that doesn't mention the modal
+        item = step(
+            "download-file", "Exercise 1: Files", "Task 2: Download", "1",
+            "Click the dropdown arrow to the far right of Example File and click Download.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["download-file"], "ENV_BLOCKED")
+        self.assertIn("Update Available", outcome.notes["download-file"])
+        self.assertIn("modal covered the page", outcome.notes["download-file"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
+    def test_row_dropdown_without_modal_returns_ui_mismatch_when_not_found(self):
+        """Row dropdown step without modal returns UI_MISMATCH when row not found."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # No row with the target name
+        page.roles.add(("row", "other-document-id"))
+        page.roles.add(("link", "Other File"))
+        page.children = {
+            ("row", "other-document-id"): [("link", "Other File")]
+        }
+        # Row dropdown step looking for a different file
+        item = step(
+            "download-file", "Exercise 1: Files", "Task 2: Download", "1",
+            "Click the dropdown arrow to the far right of Example File and click Download.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return UI_MISMATCH because row not found and no modal
+        self.assertEqual(outcome.statuses["download-file"], "UI_MISMATCH")
+        self.assertIn("Example File", outcome.notes["download-file"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
+
 if __name__ == "__main__":
     unittest.main()

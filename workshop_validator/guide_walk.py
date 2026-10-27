@@ -2025,9 +2025,26 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
         limit=state.page_wait_s,
     )
     if missed:
+        if missed.status == "UI_MISMATCH":
+            modal_title = _unnamed_modal_title(state.page, step.text or "")
+            if modal_title:
+                return CheckResult(
+                    "ENV_BLOCKED",
+                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                    (),
+                    freeze=True,
+                )
         return _stop_here(missed)
     button = _row_menu_button(state.page, row)
     if button is None or not _click_locator(button):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult(
             "UI_MISMATCH",
             f"The dropdown in the {row} row was not found, so {row} was not clicked.",
@@ -2040,9 +2057,26 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
         limit=state.page_wait_s,
     )
     if missed:
+        if missed.status == "UI_MISMATCH":
+            modal_title = _unnamed_modal_title(state.page, step.text or "")
+            if modal_title:
+                return CheckResult(
+                    "ENV_BLOCKED",
+                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                    (),
+                    freeze=True,
+                )
         return _stop_here(missed)
     menuitem = _exact_menuitem(state.page, item)
     if menuitem is None or not _click_locator(menuitem):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult(
             "UI_MISMATCH",
             f"Opened the dropdown in the {row} row, but {item} could not be clicked.",
