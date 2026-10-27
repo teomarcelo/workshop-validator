@@ -32,19 +32,23 @@ PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
-NOREPLY_PATTERN = re.compile(r"^[^@\s]+@users\.noreply\.github\.com$")
+NOREPLY_PATTERN = re.compile(r"[^@\s]+@users\.noreply\.github\.com\Z")
 EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,}")
 
 
 def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace")
 
 
 def _redact_stderr(stderr: str) -> str:
-    """Redact email addresses and tokens from stderr; return first 5 lines."""
-    redacted = EMAIL_PATTERN.sub("<email>", stderr)
+    """Redact email addresses and tokens from stderr; strip control chars; return first 5 lines."""
+    # Strip control characters (including ANSI escapes) before redacting
+    stripped = "".join(c for c in stderr if c >= " " or c in "\n\r\t")
+    redacted = EMAIL_PATTERN.sub("<email>", stripped)
     redacted = TOKEN_PATTERN.sub("<redacted>", redacted)
+    # Also redact runs of 40+ chars from [A-Za-z0-9+/=._-]
+    redacted = re.sub(r"[A-Za-z0-9+/=._-]{40,}", "<redacted>", redacted)
     lines = redacted.splitlines()[:5]
     return "\n".join(lines) if lines else ""
 
@@ -328,7 +332,7 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         return 1
     user_email = user_email_result.stdout.strip()
     # Full-match regex: non-empty local part, no spaces, @users.noreply.github.com
-    if not NOREPLY_PATTERN.match(user_email):
+    if not NOREPLY_PATTERN.fullmatch(user_email):
         print("merge-when-green: FAIL user.email must be a noreply address")
         return 1
     checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket",
@@ -387,19 +391,25 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     author_email = author_result.stdout.strip() if not author_result.returncode else ""
     if not author_email:
         author_problem = "cannot read merge commit author"
-    elif not NOREPLY_PATTERN.match(author_email):
+    elif not NOREPLY_PATTERN.fullmatch(author_email):
         author_problem = "merge commit has non-noreply author"
     else:
         author_problem = ""
     if author_problem:
-        print(f"merge-when-green: FAIL {author_problem}")
         # Still wait for main CI and revert when red (fail closed, still clean up)
         result = wait_main_ci(repo, sha, runner=runner)
         if result == "failure":
-            revert_by_pr(repo, pr, sha, runner=runner)
+            revert_code = revert_by_pr(repo, pr, sha, runner=runner)
+            # revert_by_pr prints its own summary line; report the author problem as the FAIL reason
+            if revert_code != 0:
+                print(f"merge-when-green: FAIL {author_problem} (revert also failed)")
+            else:
+                print(f"merge-when-green: FAIL {author_problem}")
         elif result == "timeout":
-            print(f"merge-when-green: MERGED PR #{pr}, main CI not finished; "
+            print(f"merge-when-green: FAIL {author_problem}; main CI not finished; "
                   "check `gh run list --branch main`")
+        else:
+            print(f"merge-when-green: FAIL {author_problem}")
         return 1
 
     result = wait_main_ci(repo, sha, runner=runner)

@@ -1884,16 +1884,31 @@ def _row_menu_button(page, row: str):
     rows = []
     for root in _roots(page):
         loc = _by_role(root, "row", row, exact=False)
-        if loc is None:
-            continue
-        nth = getattr(loc, "nth", None)
-        for i in range(min(_count(loc), 8)):
-            item = nth(i) if callable(nth) else _first(loc)
+        if loc is not None:
+            nth = getattr(loc, "nth", None)
+            for i in range(min(_count(loc), 8)):
+                item = nth(i) if callable(nth) else _first(loc)
+                try:
+                    if item.is_visible():
+                        rows.append(item)
+                except Exception:
+                    continue
+    # Fallback: find rows containing the text when accessible name doesn't match
+    # Run across ALL roots and only use if exactly one match total
+    if len(rows) == 0:
+        for root in _roots(page):
             try:
-                if item.is_visible():
-                    rows.append(item)
+                text_rows = root.get_by_role("row").filter(has_text=row)
+                nth = getattr(text_rows, "nth", None)
+                for i in range(min(_count(text_rows), 8)):
+                    item = nth(i) if callable(nth) else _first(text_rows)
+                    try:
+                        if item.is_visible():
+                            rows.append(item)
+                    except Exception:
+                        continue
             except Exception:
-                continue
+                pass
     if len(rows) != 1:
         return None
     try:
@@ -3844,7 +3859,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
-    # wait for a delayed banner. Other buttons: old behavior (can be pre-existing).
+    # wait for a delayed banner. Other buttons: also require NEW success messages (V11).
     is_save_submit = norm(name) in _SAVE_SUBMIT_NAMES
     if not evidence_desc:
         if is_save_submit:

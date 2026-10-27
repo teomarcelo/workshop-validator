@@ -204,22 +204,27 @@ def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
     Returns (True, msg) if not in a git repo (skip check for test environments).
     """
     try:
-        # Check if this is a git repo at all
+        # Check if this is a git repo at all (skip only when no .git entry at all)
         git_check = subprocess.run(
             ["git", "rev-parse", "--git-dir"],
             cwd=root, capture_output=True, text=True
         )
         if git_check.returncode != 0:
             error_text = (git_check.stderr or "") + (git_check.stdout or "")
-            if "not a git repository" in error_text.lower():
-                # Not a git repo, skip check (test environments)
+            if "not a git repository" in error_text.lower() and not (root / ".git").exists():
+                # Not a git repo at all (no .git entry), skip check (test environments)
                 return True, "Not a git repo, check skipped"
+            # .git exists but is invalid (linked worktree whose main repo moved, or GIT_DIR pointing at nothing): fail closed
             return False, f"Could not check main checkout status: {_short_reason(error_text, git_check.returncode)}"
 
         # Find the main checkout (first worktree entry)
         main_checkout = get_main_checkout(root)
         if main_checkout is None:
             return False, "Could not check main checkout status: git worktree list failed"
+
+        # Check if main checkout folder exists
+        if not main_checkout.exists():
+            return False, f"Main checkout folder does not exist: {main_checkout}"
 
         # Check if on branch main or detached
         head_result = subprocess.run(
