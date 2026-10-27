@@ -141,6 +141,28 @@ def _sleep(state: WalkState, seconds: float) -> None:
     time.sleep(max(seconds, 0))
 
 
+_SAVE_SUBMIT_NAMES = frozenset({"save", "submit"})
+
+
+def _page_waiter(state: WalkState):
+    waiter = getattr(state.page, "wait_for_timeout", None)
+    return waiter if callable(waiter) else None
+
+
+def _can_poll_wait(state: WalkState) -> bool:
+    """A Save poll runs only through the walk's sleeper or the page's own wait."""
+    return state.sleeper is not None or _page_waiter(state) is not None
+
+
+def _poll_wait(state: WalkState, seconds: float) -> None:
+    if state.sleeper is not None:
+        _sleep(state, seconds)
+        return
+    waiter = _page_waiter(state)
+    if waiter is not None:
+        waiter(int(max(seconds, 0) * 1000))
+
+
 def _frame_url(frame) -> str:
     raw = getattr(frame, "url", "")
     if callable(raw):
@@ -3764,8 +3786,9 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         evidence_desc = "after-state: dialog text read"
 
     # Check if success message appeared
-    # For Save/Submit buttons: must be NEW (V6). For other buttons: old behavior (can be pre-existing).
-    is_save_submit = norm(name) in {"save", "submit"} or "save" in norm(name) or "submit" in norm(name)
+    # For a control named exactly Save or Submit: must be NEW (V6), and only these
+    # wait for a delayed banner. Other buttons: old behavior (can be pre-existing).
+    is_save_submit = norm(name) in _SAVE_SUBMIT_NAMES
     if not evidence_desc:
         if is_save_submit:
             # V6: Save/Submit buttons require NEW success messages
@@ -3879,16 +3902,17 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 break
 
     # If no immediate evidence and this is a Save/Submit control, poll for delayed banner
-    if not evidence_desc and is_save_submit:
-        # Use safe defaults for old tests that don't provide clock/timeout/interval
-        clock = getattr(state, "clock", time.monotonic)
-        timeout_s = getattr(state, "timeout_s", 90.0)
-        interval_s = getattr(state, "interval_s", 2.0)
-        start_time = clock()
+    # The poll never reads a real clock: elapsed time is the sum of the walk's own
+    # waits. With no wait primitive (no sleeper, no page wait) it does not poll.
+    if not evidence_desc and is_save_submit and _can_poll_wait(state):
+        timeout_s = float(state.timeout_s)
+        interval_s = float(state.interval_s) if state.interval_s > 0 else 2.0
+        waited = 0.0
 
         while not evidence_desc:
             # Sleep before next check
-            _sleep(state, interval_s)
+            _poll_wait(state, interval_s)
+            waited += interval_s
 
             # Re-capture after-state
             after_names = _visible_names_snapshot(state.page)
@@ -3995,8 +4019,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 break
 
             # Check if timeout reached
-            elapsed = clock() - start_time
-            if elapsed >= timeout_s:
+            if waited >= timeout_s:
                 # Timeout reached, return NEEDS_REVIEW
                 note = f"Clicked {name}, but no change could be read from the page."
                 return CheckResult("NEEDS_REVIEW", note, (), freeze=True)

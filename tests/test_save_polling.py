@@ -198,7 +198,9 @@ class TestSavePolling(unittest.TestCase):
                 elem = FakeElement("Your changes have been successfully saved.")
                 page._status_elements.append(elem)
 
-        state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2, sleeper=None)
+        # The poll runs only through an injected sleeper (here routed to the patched _sleep).
+        state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2,
+                                sleeper=lambda seconds: None)
 
         from workshop_validator import guide_walk as g
         from unittest.mock import patch
@@ -235,3 +237,94 @@ class TestSavePolling(unittest.TestCase):
         self.assertIn("Clicked Save", result.note)
         # Should have slept once (polling happened)
         self.assertEqual(sleeps, [2])
+
+
+def _no_evidence_patches(g, patch, mock_loc, words_visible=False):
+    return [
+        patch.object(g, "_control_visible", return_value=True),
+        patch.object(g, "_locator_for_name", return_value=mock_loc),
+        patch.object(g, "_click_locator", return_value=True),
+        patch.object(g, "_in_setup", return_value=False),
+        patch.object(g, "_read_page_text", return_value=""),
+        patch.object(g, "_visible_names_snapshot", return_value=frozenset()),
+        patch.object(g, "_visible_match", return_value=mock_loc),
+        patch.object(g, "_count_visible_dialogs", return_value=0),
+        patch.object(g, "_read_status_messages", return_value=frozenset()),
+        patch.object(g, "_words_visible", return_value=words_visible),
+        patch.object(g, "_scoped_name_counts", return_value={}),
+    ]
+
+
+class TestSavePollingClock(unittest.TestCase):
+    """V10: the Save poll never falls back to the real clock or time.sleep."""
+
+    def run_click(self, state, name, words_visible=False):
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        from workshop_validator import guide_walk as g
+
+        mock_loc = SimpleNamespace(get_attribute=lambda attr: None)
+
+        def no_real_time(*args, **kwargs):
+            raise AssertionError("the Save poll used the real clock or time.sleep")
+
+        with ExitStack() as stack:
+            for item in _no_evidence_patches(g, patch, mock_loc, words_visible):
+                stack.enter_context(item)
+            stack.enter_context(patch.object(g.time, "sleep", side_effect=no_real_time))
+            stack.enter_context(patch.object(g.time, "monotonic", side_effect=no_real_time))
+            return g._act_click(state, step("a", "E1", "T1", "1", f"Click {name}."), name)
+
+    def test_save_without_sleeper_or_page_wait_does_not_use_real_time(self):
+        page = FakePage("https://example.lightning.force.com/lightning/page/home")
+        state = SimpleNamespace(page=page, clock=lambda: 0.0, timeout_s=90, interval_s=2, sleeper=None)
+        result = self.run_click(state, "Save")
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
+
+    def test_save_poll_uses_page_wait_not_real_clock(self):
+        page = FakePage("https://example.lightning.force.com/lightning/page/home")
+        waits = []
+        page.wait_for_timeout = lambda ms: waits.append(ms)
+        state = SimpleNamespace(page=page, clock=lambda: 0.0, timeout_s=6, interval_s=2, sleeper=None)
+        result = self.run_click(state, "Submit")
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertEqual(waits, [2000, 2000, 2000])
+
+    def test_save_poll_ends_by_waited_time_with_frozen_clock(self):
+        page = FakePage("https://example.lightning.force.com/lightning/page/home")
+        sleeps = []
+        reads = []
+
+        def frozen_clock():
+            reads.append(1)
+            if len(reads) > 50:
+                raise AssertionError("the Save poll is timed by a clock that never moves")
+            return 0.0
+
+        state = SimpleNamespace(page=page, clock=frozen_clock, timeout_s=4, interval_s=1,
+                                sleeper=sleeps.append)
+        result = self.run_click(state, "Save")
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertEqual(sleeps, [1, 1, 1, 1])
+
+    def test_names_containing_save_do_not_poll(self):
+        for name in ("Save to list view", "Saved items", "Submit for approval"):
+            with self.subTest(name=name):
+                sleeps = []
+                clock = FakeClock()
+
+                def sleeper(seconds):
+                    sleeps.append(seconds)
+                    clock.now += seconds
+
+                page = FakePage("https://example.lightning.force.com/lightning/page/home")
+                state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2,
+                                        sleeper=sleeper)
+                result = self.run_click(state, name)
+                self.assertEqual(result.status, "NEEDS_REVIEW")
+                self.assertEqual(sleeps, [])
+
+
+if __name__ == "__main__":
+    unittest.main()
