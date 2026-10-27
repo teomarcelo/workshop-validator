@@ -434,9 +434,12 @@ class MergedTreeGatesTests(unittest.TestCase):
             runner = FakeRunner()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(team_gates.merged_tree_gates(repo, OID, runner=runner))
-            merges = runner.find("git", "merge")
-            self.assertEqual(merges[0][0], ["git", "merge", "--no-edit", "--no-ff", OID])
-            self.assertNotEqual(merges[0][1], repo)
+            # Find git commands with merge (may include -c flags for noreply email)
+            merges = [c for c, _ in runner.calls if "merge" in c and "--no-ff" in c]
+            self.assertEqual(len(merges), 1)
+            self.assertIn("--no-edit", merges[0])
+            self.assertIn("--no-ff", merges[0])
+            self.assertIn(OID, merges[0])
             self.assertEqual(runner.find("git", "worktree", "add")[0][0][-1], "origin/main")
 
 
@@ -1016,9 +1019,9 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
             # gh pr merge - returns non-zero
             (lambda c: c[:3] == ["gh", "pr", "merge"], 1, ""),
-            # Second pr view call after non-zero merge (with state check)
+            # Second pr view call after non-zero merge (with state AND headRefOid check)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c), 0,
-             json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED"})),
+             json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED", "headRefOid": OID})),
             # run list for CI check
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": merge_oid, "status": "completed", "conclusion": "success"}])),
@@ -1028,10 +1031,11 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
         out = io.StringIO()
         with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
              mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
              contextlib.redirect_stdout(out):
             code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
 
-        # Should continue and succeed since PR is MERGED
+        # Should continue and succeed since PR is MERGED with correct headRefOid
         self.assertEqual(code, 0, f"Output: {out.getvalue()}")
         self.assertIn("MERGED", out.getvalue())
 
@@ -1048,18 +1052,16 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
             # gh pr merge - succeeds
             (lambda c: c[:3] == ["gh", "pr", "merge"], 0, ""),
-            # pr view after merge
+            # pr view after merge (includes headRefOid for verification)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c), 0,
-             json.dumps({"mergeCommit": {"oid": merge_oid}})),
-            # run list for CI
-            (lambda c: c[:3] == ["gh", "run", "list"], 0,
-             json.dumps([{"headSha": merge_oid, "status": "completed", "conclusion": "success"}])),
+             json.dumps({"mergeCommit": {"oid": merge_oid}, "headRefOid": OID})),
             # git push to delete branch
             (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
 
         with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
              mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
              contextlib.redirect_stdout(io.StringIO()):
             team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
 
