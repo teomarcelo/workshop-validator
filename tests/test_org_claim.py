@@ -432,7 +432,7 @@ class PortalBoundaryTests(unittest.TestCase):
         page = FakePage({PORTAL_URL: (PORTAL_URL, html)})
         fetched = []
 
-        def get(url):
+        def get(url, **kwargs):
             fetched.append(url)
             final = "https://elsewhere.example.test/m.pdf" if url.endswith("moved.pdf") else url
             return mock.Mock(ok=True, url=final, body=lambda: b"%PDF-1.4 synthetic")
