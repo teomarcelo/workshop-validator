@@ -277,7 +277,18 @@ def main(argv: list[str] | None = None) -> int:
             ["git", "ls-files", "--cached", "-z"], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
         ).stdout
-        tracked_names = [part.decode("utf-8", errors="replace") for part in tracked_listing.split(bytes([0])) if part]
+        # Decode tracked filenames strictly to prevent name collisions
+        tracked_names = []
+        for part in tracked_listing.split(bytes([0])):
+            if not part:
+                continue
+            try:
+                name = part.decode("utf-8")
+                tracked_names.append(name)
+            except UnicodeDecodeError:
+                # Non-UTF-8 path is a security issue
+                print("Public safety gate rejected file(s) with non-UTF-8 names; review locally", file=sys.stderr)
+                return 1
         if not tracked_names:
             raise ValueError("No tracked files")
 
@@ -286,7 +297,18 @@ def main(argv: list[str] | None = None) -> int:
             ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
         ).stdout
-        untracked_names = [part.decode("utf-8", errors="replace") for part in untracked_listing.split(bytes([0])) if part]
+        # Decode untracked filenames strictly
+        untracked_names = []
+        for part in untracked_listing.split(bytes([0])):
+            if not part:
+                continue
+            try:
+                name = part.decode("utf-8")
+                untracked_names.append(name)
+            except UnicodeDecodeError:
+                # Non-UTF-8 path is a security issue
+                print("Public safety gate rejected file(s) with non-UTF-8 names; review locally", file=sys.stderr)
+                return 1
 
         all_names = tracked_names + untracked_names
         problems = inspect_tracked(root, all_names)
