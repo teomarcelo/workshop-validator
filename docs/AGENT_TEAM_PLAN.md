@@ -199,9 +199,9 @@ Each commit gets the Co-Authored-By line. Then `public_safety`, push, and `gh pr
 ## 8. Report contents and persistence (added 2026-10-19)
 
 **Where results persist** (private, outside the public repo, survives reboots, never auto-deleted):
-- `~/.workshop-validator/runs/<run-id>/report.html` — the full report for one run, plus `status.json`, `team-log.json`, `screenshots/`, `results.pdf`, `walk.webm`.
-- `~/.workshop-validator/reports/index.html` — a history page regenerated after every run: one row per run (date, guide, org, verdict, pass/fail/not-run counts, PR link), newest first, linking each run's report.
-- `~/.workshop-validator/reports/history.json` — the machine-readable history the index is built from; append-only, de-duplicated by run ID.
+- `~/.workshop-validator/runs/<run-id>/report.html` - the full report for one run, plus `status.json`, `team-log.json`, `screenshots/`, `results.pdf`, `walk.webm`.
+- `~/.workshop-validator/reports/index.html` - a history page regenerated after every run: one row per run (date, guide, org, verdict, pass/fail/not-run counts, PR link), newest first, linking each run's report.
+- `~/.workshop-validator/reports/history.json` - the machine-readable history the index is built from; append-only, de-duplicated by run ID.
 - Reports are never committed: they contain guide text and screenshots.
 
 **Every report shows**

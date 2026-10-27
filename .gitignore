@@ -33,3 +33,4 @@ aliases.json
 verification-orgs.json
 gate.json
 history.json
+.claude/worktrees/

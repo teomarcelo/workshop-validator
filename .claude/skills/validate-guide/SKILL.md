@@ -1,6 +1,6 @@
 ---
 name: validate-guide
-description: Validate a Salesforce workshop guide PDF end to end — run it on the current verification org, triage the first failure, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
+description: Validate a Salesforce workshop guide PDF end to end - run it on the current verification org, triage the first failure, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
 model: sonnet
 ---
 

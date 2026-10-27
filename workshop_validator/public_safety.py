@@ -18,7 +18,15 @@ BLOCKED_DIRS = frozenset({
 })
 ALLOWED_SUFFIXES = frozenset({
     ".py", ".md", ".txt", ".yml", ".yaml", ".toml", ".ini",
-    ".cfg", ".json", ".mdc", ".plist",
+    ".cfg", ".json", ".mdc", ".plist", ".js",
+})
+# Producer-team memory is private (register, standups, plan, ledger, reviews).
+PRIVATE_TEAM_NAMES = frozenset({
+    "decisions.md", "now.json", "runs.jsonl", "producer-live", "dashboard.html",
+    "idle-since", "nudged-at", ".register-snapshot",
+})
+PRIVATE_TEAM_DIRS = frozenset({
+    "standups", "outbox", "guide-inbox", "inbox", "research", "reviews", "progress",
 })
 HOME_PATH_PATTERN = re.compile(  # public-safety: pattern
     r"(?:/Users/[^/\s]+/|/home/[^/\s]+/|C:\\Users\\)", re.IGNORECASE  # public-safety: pattern
@@ -41,6 +49,11 @@ def inspect_tracked(root: Path, names: list[str]) -> tuple[str, ...]:
                 filename == ".env" or filename.startswith(".env.") or
                 path.suffix.lower() in BLOCKED_SUFFIXES):
             issues.append("private_artifact_path")
+            continue
+        if (filename in PRIVATE_TEAM_NAMES or
+                any(part in PRIVATE_TEAM_DIRS for part in parts[:-1]) or
+                (parts[0] == "briefs" and filename != "template.md")):
+            issues.append("private_team_file")
             continue
         if path.suffix.lower() not in ALLOWED_SUFFIXES and filename != ".gitignore":
             issues.append("unexpected_file_type")

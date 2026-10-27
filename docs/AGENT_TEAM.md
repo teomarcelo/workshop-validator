@@ -101,3 +101,67 @@ before any change keep the org. See `automate.outcome_of` and `automate.org_chan
 `runs/<org-key>/<run-id>/` with `report.html`, `results.pdf`, `summary.json`,
 `status.json`, `walk.webm`, `verdicts.json`. Each org has its own session folder,
 so a saved session is never reused for another user.
+
+## Producer loop (v2 team, 2026-10-26)
+A producer session sits above `/validate-guide` and runs the whole product
+backlog. It never does hands-on work. Roles: `docs/ROLE-CHECKLIST.md`.
+Gates: `docs/MERGE-GATES.md`.
+
+1. Write a complete brief from `briefs/TEMPLATE.md` into the private `briefs/` folder.
+2. Start a fresh executor (Sonnet, effort high) in its own worktree, or the
+   `feature` workflow (`.claude/workflows/feature.js`: build, test, review, fix, re-review).
+3. Push, open a PR with the executor's report in the body.
+4. Fresh reviewers write `reviews/pr-<N>-<role>.md` with a `VERDICT:` line.
+5. Findings go to a new agent. Two failed rounds escalate to Opus.
+6. `team_gates merge-when-green <N>`: CI, verdicts, merged-tree gates,
+   squash merge, main CI, same-turn revert PR when red.
+7. Register row, ledger row, standup, plan step done, dashboard, worktree cleanup.
+
+### Private memory (`~/.workshop-validator/team/`, 0600, never in git)
+| File | What |
+| --- | --- |
+| `DECISIONS.md` | Append-only register, W- rows. Only the producer edits it; agents write `decisions/inbox/`. |
+| `progress/now.json` | Ordered plan. Each step: `id`, `title`, `state` (next, running, waiting, done), optional `blocker` ("Owner: ..."), `prereqs` (`step:<id>`, `file:<path>`), `branch`, `pr`. |
+| `runs/runs.jsonl` | Run ledger, one row per agent task (`team_kit ledger`). Transcripts are deleted after 30 days; this is the lasting record. |
+| `standups/YYYY-MM-DD.md` | Daily note, ending in a restart block and "What I need from you:". |
+| `briefs/`, `reviews/`, `research/notes/`, `outbox/`, `guide-inbox/` | Briefs, review verdicts, research, drafted messages (the owner sends them), PDFs to validate. |
+| `dashboard.html` | Status page (`team_dashboard`), refreshed at every state change. |
+| `producer-live` | Which session is the producer (`team_kit claim` / `release`). |
+
+`public_safety` rejects any of these names if they are ever added to the repo.
+
+### Standup template
+```
+# Standup YYYY-MM-DD
+Done: ...
+Running: ...
+Decided: W-nnn ...
+Escapes: ... (gate added: ...)
+
+## Restart block
+Next steps, in order: 1. ... 2. ...
+Rows that matter: W-nnn, W-nnn
+Chain status: <team_kit status line>
+
+What I need from you:
+- W-nnn (asked YYYY-MM-DD): <ask>; first undone step: <step>
+(or "Nothing right now")
+```
+
+### Never idle
+- `team_kit status` prints WORKING, STALLED (30 minutes quiet or under 15 GB
+  free), IDLE, WAITING or DONE from the plan, branch commits, the job
+  heartbeat and agent transcripts.
+- Hooks (`.claude/settings.json`): the write guard (PreToolUse) keeps every
+  agent inside its own checkout or worktree and fails closed. The Stop hook,
+  for the producer session only, blocks ending a turn while the chain is IDLE
+  or STALLED or the dashboard is older than the plan or register. A second stop
+  in a row always goes through.
+- Two desktop scheduled tasks, created by the owner: producer-wake (hourly,
+  9 AM to 6 PM) and the watchdog (every 20 minutes, at :07, :27 and :47). The watchdog runs
+  `team_kit watchdog`: `NUDGE` means message the live producer to resume,
+  `TAKEOVER` means run the producer-wake prompt now. The launchd `watchdog`
+  still resumes a dead `/validate-guide` job and runs worktree cleanup.
+- Scheduler traps: create tasks from a message the owner typed; never give a
+  task a one-time `fireAt`; a sleeping Mac skips runs; a task will not start
+  while its previous run is open; a timer armed before a clear never fires.

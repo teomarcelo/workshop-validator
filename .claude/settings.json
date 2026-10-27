@@ -41,7 +41,43 @@
       "Bash(gh pr create*)",
       "Bash(gh pr view*)",
       "Bash(gh pr checks*)",
-      "Bash(gh run view*)"
+      "Bash(gh run view*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_kit*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_gates*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_dashboard*)",
+      "Bash(gh pr merge*)",
+      "Bash(gh pr list*)",
+      "Bash(gh run list*)",
+      "Bash(git revert*)",
+      "Bash(git worktree*)",
+      "Bash(git fetch*)",
+      "Bash(git add briefs/*)",
+      "Bash(git add .github/*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && { [ -x .venv/bin/python ] && P=.venv/bin/python || P=python3; } && \"$P\" -m workshop_validator.team_hooks write-guard || exit 2",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && { [ -x .venv/bin/python ] && P=.venv/bin/python || P=python3; } && \"$P\" -m workshop_validator.team_hooks stop || exit 0",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }

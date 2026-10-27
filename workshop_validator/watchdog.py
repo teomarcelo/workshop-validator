@@ -161,6 +161,15 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) ->
     return 0
 
 
+def cleanup_worktrees(repo_root: Path) -> None:
+    """Remove merged, clean, idle agent worktrees; never fails the watchdog."""
+    from .team_gates import worktree_cleanup
+    try:
+        worktree_cleanup(repo_root)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        print(f"worktree-cleanup skipped: {exc}", file=sys.stderr)
+
+
 def install_plist(template: Path, home: Path, venv_python: Path, repo_root: Path, private_root: Path) -> str:
     """Generate the plist file and return the launchctl command."""
     content = template.read_text(encoding="utf-8")
@@ -209,7 +218,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.once:
-        return run_once(repo_root, private_root)
+        code = run_once(repo_root, private_root)
+        cleanup_worktrees(repo_root)
+        return code
 
     parser.error("Use --once, --install, or --uninstall")
 

@@ -1,6 +1,6 @@
 # Automation Log
 
-## 2026-10-13 09:27 PDT — Run 1
+## 2026-10-13 09:27 PDT - Run 1
 
 Milestone: Option A dependency-aware step scheduler.
 
@@ -21,7 +21,7 @@ Blockers: No private pilot PDF, configured secret store, browser worker, or clou
 
 Next: Implement and test an independent per-step evidence verifier before accepting PASS from execution.
 
-## 2026-10-13 10:27 PDT — Run 2
+## 2026-10-13 10:27 PDT - Run 2
 
 Milestone: Independent per-step evidence gate.
 Implementation commit: a7cf86567f01766b5f8065dd8f44de371f05892c.
@@ -41,7 +41,7 @@ Blockers: Pilot PDF, approved cloud credential store, browser worker, and durabl
 Next: Add a durable status transition gate connecting verified outcomes to dependency planning.
 
 
-## 2026-10-13 11:26 PDT — Run 3
+## 2026-10-13 11:26 PDT - Run 3
 
 Milestone: Transactional, evidence-gated SQLite checkpoint prototype.
 
@@ -64,7 +64,7 @@ Blockers: No configured approved secret manager, private pilot PDF in the runner
 
 Next: Implement a bounded, rate-limit-aware retry state machine with persisted Retry-After cooldowns and stale-worker recovery, without ever turning blocked steps into PASS.
 
-## 2026-10-13 12:28 PDT — Run 4
+## 2026-10-13 12:28 PDT - Run 4
 
 G1 milestone: Verified existing public CI workflow. Run 38455037627 completed successfully on commit 8b5595b8bf8b93e968ce2489866386952a4b06e3. The GitHub Actions job completed both commands: `python -m unittest discover -s tests -v` and `python -m compileall -q workshop_validator tests`.
 
@@ -72,7 +72,7 @@ Local commands: `python3 --version` returned Python 3.13.5; `git --version` retu
 
 Limitations: No PDF or browser integration or live-org validation occurred. Next milestone: G2 synthetic PDF and Playwright end-to-end integration. No private execution environment is deployed.
 
-## 2026-10-13 12:42 PDT — Interactive build sprint
+## 2026-10-13 12:42 PDT - Interactive build sprint
 
 Milestones completed:
 - Created and verified the first public GitHub Actions Python unit/compile workflow: commit 8b5595b8bf8b93e968ce2489866386952a4b06e3; green cloud run https://github.com/teomarcelo/workshop-validator/actions/runs/38455037627.
@@ -86,7 +86,7 @@ Current scope: **No live Salesforce login or instruction was attempted.** The so
 
 Next: Add deterministic source reconciliation and trusted action-manifest interface; integrate browser observations with durable checkpoint transitions and private HTML reporting. Actual org validation is blocked on a separately approved PRIVATE execution workflow, company-approved source PDF access, and new operator-entered rotated org secrets. Preserve the $0 budget and prohibit confidential artifacts in public GitHub Actions.
 
-## 2026-10-13 13:29 PDT — Scheduled run 5
+## 2026-10-13 13:29 PDT - Scheduled run 5
 
 Implemented a fail-closed, page-by-page PDF reconciliation review gate, with 17 synthetic tests and documentation. Implementation commit: 35c69ac822a38e8c059d70e230aaf0b861160587.
 
@@ -94,7 +94,7 @@ Local commands: git clone --depth 1 (failed: DNS unavailable); python3 -W error:
 
 Blockers: No approved private runner, guide audit, rotated secrets, or real Salesforce run. Next: trusted manifest-to-action planning interface, followed by browser-to-checkpoint integration. Reviewer attestations do not independently prove completeness.
 
-## 2026-10-13 14:07-14:27 PDT — Interactive implementation sprint (user-requested)
+## 2026-10-13 14:07-14:27 PDT - Interactive implementation sprint (user-requested)
 
 Implemented/committed public-safe code with companion synthetic tests and documentation:
 - 64636e25000f6cb9aa83a278ee319494549a16e8: Layout-preserving PDF instructor review sheets. GitHub Actions confirmed success: https://github.com/teomarcelo/workshop-validator/actions/runs/38468660126.
@@ -114,7 +114,7 @@ Limits/blockers: No real Salesforce login or Guide step has been executed. No pr
 
 Next safe milestone: confirm latest CI is green; add synthetic cross-run checkpoint/crash recovery and secure source-to-manifest authoring scaffolding. Real-org validation must wait for operator-authorized private infrastructure/secrets; do not falsely claim 100% step coverage.
 
-## 2026-10-13 15:26 PDT — Scheduled public-safety milestone
+## 2026-10-13 15:26 PDT - Scheduled public-safety milestone
 
 Milestone: Added a conservative tracked-file boundary gate to the public CI job. Implementation commit: cb022d2310d699ff07214a8098605dbbb10de79d.
 
@@ -156,7 +156,7 @@ Limitations: No authenticated Salesforce browser run, no live no-op/omission tes
 
 Next high-priority work: integrate pre/post state and omission/negative-control probes into an approved, resettable PRIVATE Salesforce run; obtain authorized private guide/plan storage and rotated secrets; verify one real end-to-end step before expanding to complete guide coverage.
 
-## 2026-10-13 18:27 PDT — Behavioral necessity pre/post probe integration
+## 2026-10-13 18:27 PDT - Behavioral necessity pre/post probe integration
 
 Milestone: public-safe optional authored `necessity_assertions` in the private plan. They are checked BEFORE the literal action, then enforced as independent postconditions along with normal step assertions. An ambiguous before-state blocks mutation; a deliberately wrong post-state is classified FUNCTIONAL_FAIL. The diagnostic cannot auto-skip an instruction or recommend removing it without reset, skip replay and negative control. Private runner records only sanitized classifications/evidence identifiers in private `behavioral-probes.json`; the quick HTML and annotated instructor PDF remain separate required outputs.
 
@@ -173,7 +173,7 @@ Blockers: no public CI for branch without PR/main merge; no approved private run
 
 Next: obtain authorized merge/PR route, run full Python and Chromium synthetic CI on this commit and fix any failures; then test a resettable private baseline with explicit necessity assertions and a targeted reversible negative control before proposing any instructor correction.
 
-### 2026-10-13 18:32 PDT — Branch CI follow-up for behavioral probes
+### 2026-10-13 18:32 PDT - Branch CI follow-up for behavioral probes
 
 Additional commits: `085e2f2aea8f40dccb92a84ead0876917cb13739` extended the branch-local public CI push filter so synthetic tests could run despite the blocked main update/PR; `0fb7932dfac6273c4ca6b0ee9f59119771418ae6` added an actual Chromium fault-injection test for the new probe. No private data or org was used.
 
@@ -182,7 +182,7 @@ VERIFIED green branch Actions run: https://github.com/teomarcelo/workshop-valida
 The implementation and log remain on `automation/behavioral-probes-20261013`; main was not updated and no pull request was created because those connector operations were blocked. Next: merge via an authorized route and rerun main CI; then establish an approved private resettable baseline and run the pre/post probe against one real guide action with protected inputs and rotated secrets. No live Salesforce validation is claimed.
 
 
-## 2026-10-13 19:30 PDT — Behavioral form-value oracle (scheduled run)
+## 2026-10-13 19:30 PDT - Behavioral form-value oracle (scheduled run)
 
 Milestone: Independently verify the *live* value of generated input/textarea controls, rather than mistaking rendered DOM text for the current editable value. Added `DOM_VALUE` (exact equality only) to the evidence gate and Playwright collector. Synthetic tests intentionally corrupt a generated textarea after a correct before-state: the pre/post necessity probe and independent verifier must produce `FUNCTIONAL_FAIL`, never a false PASS or guide-removal recommendation. Added typed/ambiguous-evidence regression tests and documented the semantics. No private source or artifact was committed.
 
@@ -194,7 +194,7 @@ Scope and blockers: Synthetic browser verification only. No real Salesforce logi
 
 Next: Integrate behavioral probe classifications into both private reports as run-bound evidence without asserting obsolescence; add a controlled skip/replay plus targeted negative-control protocol on a verified resettable baseline. Merge the verified public branch through an authorized route and rerun main CI.
 
-## 2026-10-13 20:29 PDT / 2026-10-14 03:29 UTC — Run-bound behavioral review outputs
+## 2026-10-13 20:29 PDT / 2026-10-14 03:29 UTC - Run-bound behavioral review outputs
 
 Implementation commit: `aff5d1ba18b1d8583a9c6600deadd54402eed3bf` on `automation/behavioral-report-20261013`. The private runner now carries pre/post necessity classifications and evidence IDs into the quick HTML report and pixel-preserving instructor PDF. An already-satisfied manual edit is flagged for review, never automatically removed; an inconclusive executed path cannot support a removal recommendation. A zero-finding run still emits a faithful review PDF. Added synthetic correct/wrong-value, reporting, decision-gate, and zero-note PDF tests.
 
@@ -202,7 +202,7 @@ Actually executed: local `git ls-remote https://github.com/teomarcelo/workshop-v
 
 Blockers: no approved private runner, secure guide/manifest handoff, operator-rotated credentials, resettable baseline or live Salesforce verification. The public CI proves only synthetic behavior; no private PDF, real org, paid API or cloud deployment was used. Next: merge the tested feature ancestry through an authorized route, then design and test controlled omission/replay with negative controls and private baseline provenance before any guide-removal proposal.
 
-## 2026-10-13 21:24-21:27 PDT — Controlled omission replay provenance gate (scheduled)
+## 2026-10-13 21:24-21:27 PDT - Controlled omission replay provenance gate (scheduled)
 
 Milestone: Added `workshop_validator/replay_provenance.py`, 14 public-safe synthetic unit tests in `tests/test_replay_provenance.py`, and `docs/CONTROLLED_REPLAY.md`. The gate requires separately recorded execute/skip/negative-control phases from three distinct resets, matching guide/org/baseline/step, stable target and downstream oracle IDs, unique evidence IDs, verified prerequisites, and passing downstream behavior. A deliberately broken target that still PASSes returns TEST_ORACLE_INSENSITIVE and blocks guide-removal suggestions. Even a valid omission result is only an instructor-review REDUNDANCY_CANDIDATE. This does NOT execute a real omission or prove reset attestations are authentic.
 
@@ -222,7 +222,7 @@ Blockers: Approved private runner, reviewed complete guide plan, encrypted priva
 
 Next milestone: Verify the final public Chromium CI result, merge this tested branch through an authorized review path, then integrate authenticated reset and literal action/skip/fault event provenance with private checkpointing and both required private outputs (quick HTML and pixel-preserving annotated PDF).
 
-## 2026-10-14 00:29 PDT — Controlled replay event-order gate (scheduled)
+## 2026-10-14 00:29 PDT - Controlled replay event-order gate (scheduled)
 
 Milestone: Added `workshop_validator/replay_events.py`, `tests/test_replay_events.py` (14 synthetic tests), and `docs/REPLAY_EVENT_GATE.md`. The new fail-closed structural gate requires ordered, run/reset/step-bound events for literal execution, single-action omission, targeted reversible fault, and independent restoration verification. It binds phase evidence IDs to event evidence, checks distinct executor/verifier identities, and blocks a guide-removal suggestion when an intentionally broken target still passes. A valid result remains an instructor-review candidate only. It does not execute Salesforce, authenticate event collectors, or establish actual baseline resets.
 
@@ -238,7 +238,7 @@ Blockers: No approved PRIVATE runner, authorized encrypted guide/manifest/eviden
 
 Next: Integrate this branch into `main` via an authorized review route, rerun main CI, then connect independently authenticated reset/action/omission/fault/restore records to private checkpoints and run-bound HTML/PDF reports. Preserve Option A dependencies and bounded 429 cooldowns.
 
-## 2026-10-14 01:33 PDT — Private encrypted checkpoint handoff design and local synthetic proof
+## 2026-10-14 01:33 PDT - Private encrypted checkpoint handoff design and local synthetic proof
 
 Focus: durable private cross-job state without pretending a restored checkpoint proves live browser state. Created a public-safe design note `docs/ENCRYPTED_CHECKPOINT_HANDOFF.md` on `automation/encrypted-checkpoint-20261014`, commit `830f0095f19190fc57200e9e561cac92402d8639`. Separately prepared (NOT COMMITTED) an AES-256-GCM SQLite snapshot/restore prototype and 10 synthetic tests, available as a private chat artifact for authorized integration. The prototype uses SQLite's backup API, authenticated run/org/guide context, no-overwrite 0600 files, rejection of RUNNING attempts, and retry-ticket preservation. This is not cloud persistence or authenticated Salesforce action evidence.
 
@@ -248,7 +248,7 @@ GitHub integration attempts: `main` fast-forward and pull request creation were 
 
 Blockers: source/test upload restrictions; no approved private runner, encrypted private object storage, rotated secret key/credentials, complete reviewed AGT503 executable manifest, or proven disposable-org reset and side-effect reconciliation. Next: commit the prepared source/tests via an authorized route, pin the free cryptography dependency, verify full Python and Chromium public CI on the exact commit, and only then wire an approved private encrypted checkpoint handoff with baseline checks. Never auto-resume an in-flight mutation.
 
-## 2026-10-14 03:35 PDT — Restored-state behavioral reconciliation gate
+## 2026-10-14 03:35 PDT - Restored-state behavioral reconciliation gate
 
 Milestone: Added `workshop_validator/resume_reconciliation.py`, 14 synthetic tests, and `docs/RESTORED_STATE_RECHECK.md` on `automation/resume-reconciliation-tested-20261014`. Before a future PRIVATE restored job may consider scheduling any action, the read-only gate requires exact run/org/guide/baseline identity, a coherent checkpoint dependency graph, fresh independently checked baseline and historical-PASS observations, and fresh preconditions for eligible NOT_RUN steps. A deliberately incorrect generated DOM_VALUE yields a blocked resume; reused evidence, unfinished attempts and premature dependent PASS also block. Option A leaves 429-blocked steps blocked. This is a preflight scaffold, not authenticated live state, encrypted persistence, or automatic resume.
 
@@ -260,7 +260,7 @@ GitHub constraints: updating the existing feature ref was blocked by connector s
 
 Blockers: approved private runner and encrypted storage, operator-rotated credentials, complete page-reviewed AGT503 plan, authenticated reset/evidence collectors and disposable-org baseline. Next: integrate this gate with a tested encrypted handoff and private checkpoint restore, require fresh live evidence immediately before each action, and preserve both quick HTML and pixel-preserving annotated PDF outputs.
 
-## 2026-10-15 — Private AGT503 login and baseline (local only)
+## 2026-10-15 - Private AGT503 login and baseline (local only)
 
 The supplied Summer '26 v2 exercise guide was inventoried privately: 32 pages, 156 candidate steps, `verified_complete: false`. No guide text, credentials, org hostname, or screenshots were committed.
 
