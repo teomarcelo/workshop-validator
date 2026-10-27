@@ -557,13 +557,68 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult("UI_MISMATCH", "The profile menu did not open.", (), freeze=True)
 
     def settings_shown() -> bool:
-        return present(state.page, "link", "Settings") or present(state.page, "menuitem", "Settings")
+        if present(state.page, "link", "Settings") or present(state.page, "menuitem", "Settings"):
+            return True
+        # Fallback: exact text match within profile panel
+        for root in _roots(state.page):
+            try:
+                loc = root.get_by_text("Settings", exact=True)
+                if _visible(loc):
+                    return True
+            except Exception:
+                continue
+        return False
 
     missed = require(state, settings_shown, "Settings was not in the profile menu.", limit=state.page_wait_s)
     if missed:
         return _stop_here(missed)
-    if not (click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings")):
-        return CheckResult("UI_MISMATCH", "Settings did not open.", (), freeze=True)
+
+    # Try role-based click first
+    if click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings"):
+        pass  # Success via role
+    else:
+        # Fallback: exact text click within profile panel
+        clicked = False
+        for root in _roots(state.page):
+            try:
+                loc = root.get_by_text("Settings", exact=True)
+                if _count(loc) != 1:
+                    continue  # Ambiguous or missing
+                target = _visible_match(loc)
+                if target is None:
+                    continue
+                target.click(timeout=8000)
+                clicked = True
+                break
+            except Exception:
+                continue
+
+        if not clicked:
+            # Diagnostic: what was found?
+            diagnostic_parts = []
+            for root in _roots(state.page):
+                try:
+                    loc = root.get_by_text("Settings", exact=True)
+                    count = _count(loc)
+                    if count > 0:
+                        diagnostic_parts.append(f"found {count} exact 'Settings' element(s)")
+                        for i in range(min(count, 3)):
+                            try:
+                                elem = loc.nth(i) if hasattr(loc, "nth") else _first(loc)
+                                tag = elem.evaluate("el => el.tagName").lower() if hasattr(elem, "evaluate") else "?"
+                                role_attr = elem.get_attribute("role") if hasattr(elem, "get_attribute") else None
+                                href_attr = elem.get_attribute("href") if hasattr(elem, "get_attribute") else None
+                                visible = elem.is_visible() if hasattr(elem, "is_visible") else False
+                                diagnostic_parts.append(
+                                    f"  [{i}] <{tag}> role={role_attr} href={'yes' if href_attr else 'no'} visible={visible}"
+                                )
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            diagnostic = "; ".join(diagnostic_parts) if diagnostic_parts else "no exact 'Settings' found"
+            return CheckResult("UI_MISMATCH", f"Settings did not open. {diagnostic}", (), freeze=True)
+
     missed = require(
         state,
         lambda: personal_root(state) is not None,
