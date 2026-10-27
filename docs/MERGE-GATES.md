@@ -20,6 +20,8 @@ summary line, plus a fresh reviewer verdict where judgment is needed.
 | Private team data | `team_gates register` (append-only snapshot), `team_gates clock12` (dashboard and standups) | | `team_gates all --private` |
 | Release to the public | owner's yes | | owner |
 
+prove-tests guards against weak or mistaken tests, not hostile ones; review still reads test code that writes files, calls `os._exit` or patches `sys.modules`.
+
 ## Review verdicts
 Reviewers reply in chat. The producer saves each reply with
 `team_kit review --pr <N> --role <role> --head <headRefOid>` (the reply on

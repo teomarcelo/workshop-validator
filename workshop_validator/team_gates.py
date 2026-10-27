@@ -420,6 +420,9 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
 #      the others stay at head, and at least one new test must fail or error.
 # Statuses come from a tiny runner module that writes per-test JSON. Skips,
 # expected failures, unexpected successes and missing results are UNPROVEN.
+# The runner starts with `python -I`, imports json and unittest first, then
+# appends the worktree to the END of sys.path. A PR that adds or changes a root
+# file named like a stdlib module is UNPROVEN. Result keys must equal the ids.
 # SKIP only when no code file changed; code without a new or changed test is UNPROVEN.
 
 _HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$")
@@ -427,14 +430,21 @@ _CLASS = re.compile(r"^class\s+([A-Za-z_]\w*)")
 _TEST_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(")
 PROOF_STATUSES = ("fail", "error")
 RUNNER_NAME = "_prove_tests_runner.py"
-RUNNER_SOURCE = '''"""prove-tests runner: run each test id, write {id: status} JSON. Exit 0 when written."""
+STDLIB_SHADOW_NAMES = frozenset({"json.py", "unittest.py", "os.py", "sys.py", "types.py",
+                                 "re.py", "io.py", "pathlib.py", "subprocess.py"})
+RUNNER_SOURCE = '''"""prove-tests runner: run each test id, write {id: status} JSON. Exit 0 when written.
+
+Started with `python -I`: stdlib json and unittest load before the worktree joins
+the END of sys.path, so a root file cannot shadow them.
+"""
 import json
+import unittest
 import os
 import sys
-import unittest
 
 sys.dont_write_bytecode = True
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(HERE)
 os.environ["RUN_BROWSER_SMOKE"] = "1"
 os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
 os.environ["PYTHONPATH"] = HERE
@@ -520,7 +530,8 @@ def parse_new_test_ids(diff: str) -> list[str]:
 
     The class comes from the class line in the hunk, else from the `@@ ... @@ class X`
     hunk header. A `def test_` line is a test even when it also contains "class ".
-    A test is changed when a line inside its body is added or removed.
+    A test is changed only by an added `def test_` line or an added line inside its
+    body. Removed lines never mark a test, so a removal-only diff yields no ids.
     """
     ids: list[str] = []
     module = cls = method = None
@@ -554,9 +565,7 @@ def parse_new_test_ids(diff: str) -> list[str]:
             continue
         tag, text = line[0], line[1:]
         if tag == "-":
-            if method:
-                changed = True
-            continue
+            continue  # removed lines are not in head; they mark no test
         quotes = text.count('"""') + text.count("'''")
         if in_string:
             if tag == "+" and method:
@@ -592,14 +601,22 @@ def _run_test_ids(run, python: Path, tree: Path, out_json: Path, ids: list[str])
     """({id: status}, None) from the runner module, or (None, reason)."""
     if out_json.exists():
         out_json.unlink()
-    result = run([str(python), str(tree / RUNNER_NAME), str(out_json), *ids], tree)
+    result = run([str(python), "-I", str(tree / RUNNER_NAME), str(out_json), *ids], tree)
     if result.returncode:
         return None, f"test runner exited {result.returncode}"
     try:
         data = json.loads(out_json.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None, "test runner wrote no results"
-    return {tid: str(data.get(tid, "missing")) for tid in ids}, None
+    if not isinstance(data, dict) or set(data) != set(ids):
+        return None, "test runner results do not match the requested tests"
+    return {tid: str(data[tid]) for tid in ids}, None
+
+
+def stdlib_shadow_files(name_only: str) -> list[str]:
+    """Root-level paths from `git diff --name-only` named like a guarded stdlib module."""
+    return [f for f in name_only.splitlines()
+            if f and "/" not in f and f.casefold() in STDLIB_SHADOW_NAMES]
 
 
 def _counts(statuses: dict[str, str]) -> str:
@@ -620,6 +637,13 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
     base = (merge_base.stdout or "").strip()
     if merge_base.returncode or not base:
         print(f"prove-tests: UNPROVEN no merge-base of {base_ref} and {head_oid[:10]}")
+        return False
+
+    shadows = stdlib_shadow_files(_git(repo, "diff", "--name-only", "--no-renames",
+                                       "--diff-filter=d", base, head_oid, runner=runner))
+    if shadows:
+        print("prove-tests: UNPROVEN root file named like a stdlib module added or changed: "
+              + ", ".join(shadows))
         return False
 
     code_out = _git(repo, "diff", "--name-only", "--no-renames", base, head_oid, "--",

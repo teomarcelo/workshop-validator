@@ -958,16 +958,22 @@ class ProveRunner(FakeRunner):
         self.code_files, self.outcome, self.runner_code = code_files, outcome, runner_code
         self.head_missing, self.snapshots = set(head_missing), []
 
+    @staticmethod
+    def runner_index(cmd):
+        """Index of the runner script in cmd, or None."""
+        return next((i for i, a in enumerate(cmd[:3]) if i and a.endswith(team_gates.RUNNER_NAME)), None)
+
     def __call__(self, cmd, cwd):
-        if len(cmd) > 2 and cmd[1].endswith(team_gates.RUNNER_NAME):
+        at = self.runner_index(cmd)
+        if at is not None and len(cmd) > at + 1:
             self.calls.append((list(cmd), Path(cwd)))
-            tree = Path(cmd[1]).parent
+            tree = Path(cmd[at]).parent
             snap = {f: (tree / f).read_text() if (tree / f).exists() else None for f in self.code_files}
             self.snapshots.append(snap)
             swapped = {f for f, text in snap.items()
                        if text != (None if f in self.head_missing else self.HEAD_CODE)}
             if self.runner_code == 0:
-                Path(cmd[2]).write_text(json.dumps(self.outcome(swapped)))
+                Path(cmd[at + 1]).write_text(json.dumps(self.outcome(swapped)))
             return subprocess.CompletedProcess(cmd, self.runner_code, "", "")
         result = super().__call__(cmd, cwd)
         if cmd[:3] == ["git", "worktree", "add"] and result.returncode == 0:
@@ -1084,7 +1090,7 @@ class ProveTestsTests(unittest.TestCase):
         ok, out = self.prove(runner, _feature_diff("test_new_a"))
         self.assertFalse(ok)
         self.assertIn("UNPROVEN", out)
-        self.assertTrue(any(c[1].endswith(team_gates.RUNNER_NAME) for c, _ in runner.calls))
+        self.assertTrue(any(ProveRunner.runner_index(c) is not None for c, _ in runner.calls))
 
     def test_skip_and_expected_failure_on_base_are_unproven(self):
         tid = "tests.test_feature.FeatureTests.test_new_a"
@@ -1133,13 +1139,122 @@ class ProveTestsTests(unittest.TestCase):
         names = ["ok", "fail", "error", "skip", "xfail", "xpass", "subfail"]
         ids = [f"tests.test_syn.Syn.test_{n}" for n in names] + ["tests.test_broken.X.test_y"]
         out_json = Path(self.tmp.name) / "r.json"
-        done = subprocess.run([sys.executable, str(pkg / team_gates.RUNNER_NAME), str(out_json), *ids],
+        done = subprocess.run([sys.executable, "-I", str(pkg / team_gates.RUNNER_NAME), str(out_json), *ids],
                               cwd=pkg, capture_output=True, text=True)
         self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
         got = json.loads(out_json.read_text())
         self.assertEqual([got[i] for i in ids],
                          ["ok", "fail", "error", "skip", "expectedFailure", "unexpectedSuccess",
                           "fail", "error"])
+
+    # G1-fix3: runner hardening
+
+    def test_runner_launched_isolated(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {tid: "fail" if swapped else "ok"})
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertTrue(ok, out)
+        launches = [c for c, _ in runner.calls if ProveRunner.runner_index(c) is not None]
+        self.assertEqual(len(launches), 2)
+        for cmd in launches:
+            self.assertEqual(cmd[1], "-I")
+            self.assertTrue(cmd[2].endswith(team_gates.RUNNER_NAME))
+
+    def test_runner_ignores_root_stdlib_shadows_and_appends_tree_last(self):
+        pkg = Path(self.tmp.name) / "tree"
+        (pkg / "tests").mkdir(parents=True)
+        (pkg / "tests" / "__init__.py").write_text("")
+        for name in ("json.py", "unittest.py"):
+            (pkg / name).write_text("raise SystemExit(7)\n")
+        (pkg / "tests" / "test_path.py").write_text(
+            "import json, os, sys, unittest\n"
+            "HERE = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))\n"
+            "class P(unittest.TestCase):\n"
+            "    def test_tree_last(self):\n"
+            "        self.assertEqual(os.path.realpath(sys.path[-1]), HERE)\n"
+            "        self.assertNotIn(HERE, [os.path.realpath(p) for p in sys.path[:-1]])\n"
+            "        self.assertFalse(os.path.realpath(json.__file__).startswith(HERE + os.sep))\n")
+        (pkg / team_gates.RUNNER_NAME).write_text(team_gates.RUNNER_SOURCE)
+        out_json = Path(self.tmp.name) / "r.json"
+        tid = "tests.test_path.P.test_tree_last"
+        done = subprocess.run([sys.executable, "-I", str(pkg / team_gates.RUNNER_NAME), str(out_json), tid],
+                              cwd=pkg, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        self.assertEqual(json.loads(out_json.read_text()), {tid: "ok"})
+
+    def test_root_stdlib_named_file_is_unproven(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        for name in sorted(team_gates.STDLIB_SHADOW_NAMES):
+            with self.subTest(name=name):
+                listing = f"{name}\nworkshop_validator/a.py\n"
+                runner = ProveRunner(["workshop_validator/a.py"],
+                                     lambda swapped: {tid: "fail" if swapped else "ok"},
+                                     rules=[(lambda c: c[:3] == ["git", "diff", "--name-only"]
+                                             and "workshop_validator/" not in c, 0, listing)])
+                ok, out = self.prove(runner, _feature_diff("test_new_a"))
+                self.assertFalse(ok)
+                self.assertIn(f"UNPROVEN root file named like a stdlib module added or changed: {name}", out)
+                self.assertFalse([c for c, _ in runner.calls if ProveRunner.runner_index(c) is not None])
+
+    def test_nested_stdlib_named_file_is_not_refused(self):
+        self.assertEqual(team_gates.stdlib_shadow_files("tests/json.py\ndocs/os.py\nREADME.md\n"), [])
+        self.assertEqual(team_gates.stdlib_shadow_files("Json.py\nre.py\n"), ["Json.py", "re.py"])
+
+    def test_runner_keys_must_equal_requested_ids(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        cases = {
+            "extra": lambda swapped: {tid: "fail" if swapped else "ok", "tests.other.X.test_y": "ok"},
+            "missing": lambda swapped: {},
+            "missing on base": lambda swapped: {"tests.other.X.test_y": "fail"} if swapped else {tid: "ok"},
+        }
+        for label, outcome in cases.items():
+            with self.subTest(case=label):
+                ok, out = self.prove(ProveRunner(["workshop_validator/a.py"], outcome),
+                                     _feature_diff("test_new_a"))
+                self.assertFalse(ok)
+                self.assertIn("test runner results do not match the requested tests", out)
+
+    def test_parse_removal_only_diff_yields_no_ids(self):
+        diff = ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+                "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+                "@@ -10,7 +10,3 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_keep(self):\n"
+                "         self.assertTrue(feature.ok())\n"
+                " \n"
+                "-    def test_gone(self):\n"
+                "-        self.assertTrue(feature.old())\n"
+                "-\n"
+                "-        self.assertTrue(feature.older())\n")
+        self.assertEqual(team_gates.parse_new_test_ids(diff), [])
+
+    def test_parse_removal_after_unchanged_test_does_not_list_it(self):
+        diff = ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+                "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+                "@@ -10,4 +10,3 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_keep(self):\n"
+                "         self.assertTrue(feature.ok())\n"
+                "-        self.assertTrue(feature.extra())\n"
+                "@@ -40,2 +39,5 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_old(self):\n"
+                "         pass\n"
+                "+\n"
+                "+    def test_new(self):\n"
+                "+        self.assertTrue(feature.new())\n")
+        self.assertEqual(team_gates.parse_new_test_ids(diff),
+                         ["tests.test_feature.FeatureTests.test_new"])
+
+    def test_parse_real_body_edit_still_found_next_to_removals(self):
+        diff = ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+                "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+                "@@ -10,6 +10,5 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_edited(self):\n"
+                "-        self.assertTrue(feature.ok())\n"
+                "+        self.assertFalse(feature.ok())\n"
+                "     def test_trimmed(self):\n"
+                "         pass\n"
+                "-        pass\n")
+        self.assertEqual(team_gates.parse_new_test_ids(diff),
+                         ["tests.test_feature.FeatureTests.test_edited"])
 
     # item 5: new and empty files
 
