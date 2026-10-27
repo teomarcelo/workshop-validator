@@ -58,3 +58,30 @@ pages grow taller; original page numbers remain on the guide's footers.
 
 The browser result still must be proven by a real Salesforce trial-org run. A
 potentially redundant generated default is not an automatically approved edit.
+
+## Claiming orgs
+
+The team claims new verification orgs itself (W-042). The owner gives only
+the event code. Put it in `~/.workshop-validator/org-claim.json`, mode 0600:
+
+```json
+{"portal_url": "<portal_url>", "event_code": "<event_code>"}
+```
+
+- `python -m workshop_validator.org_claim` (or `--dry-run`) opens the portal,
+  follows Add Event, checks that the event-code field and its submit button
+  exist, then stops. Nothing is submitted.
+- `python -m workshop_validator.org_claim --claim` submits the code, opens the
+  claimed org's details, reads the username and password by label, and
+  appends one org to `verification-orgs.json` (atomic write, mode 0600). It
+  prints only `org-claim: CLAIMED org <n>`. When the values are unclear it
+  writes nothing and prints `NEEDS_REVIEW`.
+- `--claim` is refused unless the last run said move on (a success or a real
+  failure) and no unused org is left (W-043). `--force` skips that check. Only
+  the owner uses it.
+- `--guides` downloads the guide PDFs linked on the portal into
+  `~/.workshop-validator/team/guide-inbox/` (mode 0600) and prints the count.
+
+The tool never prints page text, credentials, the portal address or the code.
+Exit codes: 0 done, 1 needs review, 2 refused, 3 stopped (for example sign-in
+required).
