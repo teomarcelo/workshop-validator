@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -387,6 +388,7 @@ class MergeWhenGreenTests(unittest.TestCase):
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
         ])
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -922,8 +924,62 @@ class WorktreeCleanupAncestorTests(unittest.TestCase):
             self.assertEqual(deleted, [])
 
 
+MB = "m" * 40
+HEAD = "h" * 40
+
+
+def _feature_diff(*methods, header="class FeatureTests(unittest.TestCase):"):
+    """Synthetic diff adding test methods to an existing class whose line is outside the hunk."""
+    body = "".join(f"+\n+    def {m}(self):\n+        self.assertTrue(feature.ok())\n" for m in methods)
+    return ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+            "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+            f"@@ -40,3 +40,{3 + 3 * len(methods)} @@ {header}\n"
+            "     def test_old(self):\n         pass\n \n" + body)
+
+
+class ProveRunner(FakeRunner):
+    """FakeRunner that fakes the temp worktree and answers the runner module with JSON.
+
+    `git worktree add` writes "# head code" for each code file (none for `head_missing`).
+    `outcome(swapped)` gets the set of code files not at their head version during that
+    run and returns {test_id: status}. `snapshots` records {file: content or None} per run.
+    """
+
+    HEAD_CODE = "# head code\n"
+
+    def __init__(self, code_files, outcome, rules=(), runner_code=0, base_missing=(), head_missing=()):
+        base = [
+            (lambda c: c[:2] == ["git", "merge-base"], 0, MB + "\n"),
+            (lambda c: c[:3] == ["git", "diff", "--name-only"], 0, "".join(f + "\n" for f in code_files)),
+            (lambda c: c[:2] == ["git", "show"] and c[2].split(":", 1)[1] in base_missing, 128, ""),
+            (lambda c: c[:2] == ["git", "show"], 0, "# base code\n"),
+        ]
+        super().__init__(list(rules) + base)
+        self.code_files, self.outcome, self.runner_code = code_files, outcome, runner_code
+        self.head_missing, self.snapshots = set(head_missing), []
+
+    def __call__(self, cmd, cwd):
+        if len(cmd) > 2 and cmd[1].endswith(team_gates.RUNNER_NAME):
+            self.calls.append((list(cmd), Path(cwd)))
+            tree = Path(cmd[1]).parent
+            snap = {f: (tree / f).read_text() if (tree / f).exists() else None for f in self.code_files}
+            self.snapshots.append(snap)
+            swapped = {f for f, text in snap.items()
+                       if text != (None if f in self.head_missing else self.HEAD_CODE)}
+            if self.runner_code == 0:
+                Path(cmd[2]).write_text(json.dumps(self.outcome(swapped)))
+            return subprocess.CompletedProcess(cmd, self.runner_code, "", "")
+        result = super().__call__(cmd, cwd)
+        if cmd[:3] == ["git", "worktree", "add"] and result.returncode == 0:
+            for f in self.code_files:
+                if f not in self.head_missing:
+                    (Path(cmd[-2]) / f).parent.mkdir(parents=True, exist_ok=True)
+                    (Path(cmd[-2]) / f).write_text(self.HEAD_CODE)
+        return result
+
+
 class ProveTestsTests(unittest.TestCase):
-    """Tests for the prove-tests gate (W-034)."""
+    """Tests for the prove-tests gate (W-034). Synthetic diffs only."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -931,213 +987,246 @@ class ProveTestsTests(unittest.TestCase):
         self.repo = Path(self.tmp.name) / "repo"
         self.repo.mkdir()
 
-    def test_new_test_passing_on_base_fails(self):
-        """A new test that passes on base code with no failing test should FAIL."""
-        diff = """diff --git a/tests/test_new_feature.py b/tests/test_new_feature.py
-new file mode 100644
---- /dev/null
-+++ b/tests/test_new_feature.py
-@@ -0,0 +1,5 @@
-+import unittest
-+
-+class NewFeatureTests(unittest.TestCase):
-+    def test_new_feature(self):
-+        self.assertTrue(True)
-"""
-        code_files = "workshop_validator/new_feature.py\n"
-
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_new_feature.py\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
-            (lambda c: c[:3] == ["git", "show"], 0, ""),  # File is new in head
-            # The test passes on base code
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
-             "test_new_feature (tests.test_new_feature.NewFeatureTests.test_new_feature)\n"
-             "docstring ... ok\n"),
-        ])
-
+    def prove(self, runner, diff):
+        runner.rules.insert(0, (lambda c: c[:2] == ["git", "diff"] and "--name-only" not in c, 0, diff))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
+            ok = team_gates.prove_tests(self.repo, "origin/main", HEAD, runner=runner)
+        return ok, out.getvalue()
 
-        self.assertFalse(result)
-        self.assertIn("FAIL", out.getvalue())
-        self.assertIn("no tests failed on base", out.getvalue())
+    # item 1: parse_new_test_ids
 
-    def test_new_test_failing_on_base_passes(self):
-        """A new test that fails on base code should PASS."""
-        diff = """diff --git a/tests/test_feature.py b/tests/test_feature.py
---- a/tests/test_feature.py
-+++ b/tests/test_feature.py
-@@ -3,6 +3,9 @@ import unittest
+    def test_parse_takes_class_from_hunk_header(self):
+        ids = team_gates.parse_new_test_ids(_feature_diff("test_new_a", "test_new_b"))
+        self.assertEqual(ids, ["tests.test_feature.FeatureTests.test_new_a",
+                               "tests.test_feature.FeatureTests.test_new_b"])
 
- class FeatureTests(unittest.TestCase):
-     def test_old(self):
-         pass
-+
-+    def test_new_behavior(self):
-+        self.assertTrue(False)
-"""
-        code_files = "workshop_validator/feature.py\n"
+    def test_parse_def_line_wins_over_comment_with_class(self):
+        diff = ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+                "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+                "@@ -40,2 +40,4 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_old(self):\n         pass\n"
+                "+    def test_lookup(self):  # class lookup by name\n"
+                "+        self.assertTrue(feature.ok())\n")
+        self.assertEqual(team_gates.parse_new_test_ids(diff),
+                         ["tests.test_feature.FeatureTests.test_lookup"])
 
+    def test_parse_finds_changed_test_body_and_skips_strings(self):
+        diff = ("diff --git a/tests/test_feature.py b/tests/test_feature.py\n"
+                "--- a/tests/test_feature.py\n+++ b/tests/test_feature.py\n"
+                "@@ -10,6 +10,6 @@ class FeatureTests(unittest.TestCase):\n"
+                "     def test_changed(self):\n"
+                '         text = """\n'
+                " class NotAClass:\n"
+                ' """\n'
+                "-        self.assertTrue(feature.ok(text))\n"
+                "+        self.assertFalse(feature.ok(text))\n"
+                "     def test_untouched(self):\n"
+                "         pass\n")
+        self.assertEqual(team_gates.parse_new_test_ids(diff),
+                         ["tests.test_feature.FeatureTests.test_changed"])
+
+    # item 2
+
+    def test_code_change_without_new_test_is_unproven_not_skip(self):
+        runner = ProveRunner(["workshop_validator/x.py"], lambda swapped: {})
+        ok, out = self.prove(runner, "")
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN", out)
+        self.assertNotIn("SKIP", out)
+        self.assertIn("workshop_validator/x.py", out)
+
+    def test_docs_only_change_skips(self):
+        runner = ProveRunner([], lambda swapped: {})
+        ok, out = self.prove(runner, "")
+        self.assertTrue(ok)
+        self.assertIn("SKIP no code change", out)
+
+    # item 3: one file swapped at a time
+
+    def test_each_code_file_needs_its_own_failing_test(self):
+        files = ["workshop_validator/a.py", "workshop_validator/b.py"]
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        runner = ProveRunner(files, lambda swapped: {tid: "fail" if "workshop_validator/a.py" in swapped else "ok"})
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN per file: workshop_validator/b.py 0 fail on base", out)
+        self.assertIn("workshop_validator/a.py 1/1 fail on base", out)
+        # head run, then one run per file with exactly that file at base
+        head, base = "# head code\n", "# base code\n"
+        self.assertEqual(runner.snapshots, [{files[0]: head, files[1]: head},
+                                            {files[0]: base, files[1]: head},
+                                            {files[0]: head, files[1]: base}])
+
+    def test_pass_when_every_code_file_has_a_failing_test(self):
+        files = ["workshop_validator/a.py", "workshop_validator/b.py"]
+        ids = ["tests.test_feature.FeatureTests.test_new_a", "tests.test_feature.FeatureTests.test_new_b"]
+
+        def outcome(swapped):
+            if not swapped:
+                return {i: "ok" for i in ids}
+            return {ids[0]: "fail" if "workshop_validator/a.py" in swapped else "ok",
+                    ids[1]: "error" if "workshop_validator/b.py" in swapped else "ok"}
+
+        ok, out = self.prove(ProveRunner(files, outcome), _feature_diff("test_new_a", "test_new_b"))
+        self.assertTrue(ok, out)
+        self.assertIn("PASS", out)
+        self.assertIn("workshop_validator/a.py 1/2 fail on base", out)
+        self.assertIn("workshop_validator/b.py 1/2 fail on base", out)
+
+    # item 4: structured results
+
+    def test_results_come_from_runner_json_not_text(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        fake_text = f"test_new_a ({tid})\ndoc ... FAIL\n"
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {tid: "ok"},
+                             rules=[(lambda c: "-m" in c and "unittest" in c, 1, fake_text)])
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN", out)
+        self.assertTrue(any(c[1].endswith(team_gates.RUNNER_NAME) for c, _ in runner.calls))
+
+    def test_skip_and_expected_failure_on_base_are_unproven(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        for status in ("skip", "expectedFailure", "unexpectedSuccess", "missing"):
+            with self.subTest(status=status):
+                runner = ProveRunner(["workshop_validator/a.py"],
+                                     lambda swapped, s=status: {tid: s if swapped else "ok"})
+                ok, out = self.prove(runner, _feature_diff("test_new_a"))
+                self.assertFalse(ok)
+                self.assertIn("UNPROVEN", out)
+
+    def test_skip_on_head_is_unproven(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {tid: "fail" if swapped else "skip"})
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN new tests not ok on head", out)
+
+    def test_runner_nonzero_exit_is_unproven(self):
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {}, runner_code=2)
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN on head: test runner exited 2", out)
+
+    def test_runner_module_writes_per_test_statuses(self):
+        pkg = Path(self.tmp.name) / "tree"
+        (pkg / "tests").mkdir(parents=True)
+        (pkg / "tests" / "__init__.py").write_text("")
+        (pkg / "workshop_validator").mkdir()  # imported from the tree, even via a symlinked tmp path
+        (pkg / "workshop_validator" / "__init__.py").write_text("")
+        (pkg / "tests" / "test_syn.py").write_text(
+            "import unittest\nimport workshop_validator\n"
+            "class Syn(unittest.TestCase):\n"
+            "    def test_ok(self): pass\n"
+            "    def test_fail(self): self.fail('x')\n"
+            "    def test_error(self): raise RuntimeError('x')\n"
+            "    def test_skip(self): self.skipTest('x')\n"
+            "    @unittest.expectedFailure\n"
+            "    def test_xfail(self): self.fail('x')\n"
+            "    @unittest.expectedFailure\n"
+            "    def test_xpass(self): pass\n"
+            "    def test_subfail(self):\n"
+            "        with self.subTest(i=1): self.fail('x')\n")
+        (pkg / "tests" / "test_broken.py").write_text("import no_such_module_for_prove\n")
+        (pkg / team_gates.RUNNER_NAME).write_text(team_gates.RUNNER_SOURCE)
+        names = ["ok", "fail", "error", "skip", "xfail", "xpass", "subfail"]
+        ids = [f"tests.test_syn.Syn.test_{n}" for n in names] + ["tests.test_broken.X.test_y"]
+        out_json = Path(self.tmp.name) / "r.json"
+        done = subprocess.run([sys.executable, str(pkg / team_gates.RUNNER_NAME), str(out_json), *ids],
+                              cwd=pkg, capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+        got = json.loads(out_json.read_text())
+        self.assertEqual([got[i] for i in ids],
+                         ["ok", "fail", "error", "skip", "expectedFailure", "unexpectedSuccess",
+                          "fail", "error"])
+
+    # item 5: new and empty files
+
+    def test_new_file_import_error_on_base_is_proof(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        new = "workshop_validator/new_mod.py"
+
+        runner = ProveRunner([new], lambda swapped: {tid: "error" if swapped else "ok"},
+                             base_missing=(new,))
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertTrue(ok, out)
+        self.assertIn(f"{new} 1/1 fail on base", out)
+        self.assertEqual(runner.snapshots, [{new: "# head code\n"}, {new: None}])  # removed on base
+
+    def test_empty_base_file_is_written_not_removed(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        code = "workshop_validator/a.py"
+        runner = ProveRunner([code], lambda swapped: {tid: "fail" if swapped else "ok"},
+                             rules=[(lambda c: c[:2] == ["git", "show"], 0, "")])
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertTrue(ok, out)
+        self.assertEqual(runner.snapshots, [{code: "# head code\n"}, {code: ""}])
+
+    # item 6: merge-base everywhere
+
+    def test_base_is_merge_base_for_diff_and_show(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {tid: "fail" if swapped else "ok"})
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertTrue(ok, out)
+        self.assertEqual(runner.find("git", "merge-base")[0][0], ["git", "merge-base", "origin/main", HEAD])
+        for cmd, _ in runner.find("git", "diff"):
+            self.assertIn(MB, cmd)
+            self.assertNotIn("origin/main", " ".join(cmd))
+        self.assertEqual(runner.find("git", "show")[0][0], ["git", "show", f"{MB}:workshop_validator/a.py"])
+
+    def test_merge_when_green_uses_pr_base_branch(self):
+        team = Path(self.tmp.name) / "team"
+        for role, verdict in (("code-reviewer", "APPROVE"), ("safety-scanner", "CLEAR")):
+            team_kit.save_review(team, 5, role, OID, f"notes\nVERDICT: {verdict}")
         runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
-            (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
-            # The test fails on base code
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
-             "test_new_behavior (tests.test_feature.FeatureTests.test_new_behavior)\n"
-             "docstring ... FAIL\n"),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c[-1], 0,
+             json.dumps({"mergeCommit": {"oid": "f" * 40}})),
+            (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(GOOD_PR)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
         ])
+        with mock.patch.object(team_gates, "prove_tests", return_value=True) as prove, \
+                contextlib.redirect_stdout(io.StringIO()):
+            team_gates.merge_when_green(self.repo, team, 5, dry_run=True, runner=runner)
+        self.assertEqual(prove.call_args.args[1:], ("origin/main", OID))
 
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
+    def test_no_merge_base_is_unproven(self):
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {},
+                             rules=[(lambda c: c[:2] == ["git", "merge-base"], 1, "")])
+        ok, out = self.prove(runner, "")
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN no merge-base", out)
 
-        self.assertTrue(result)
-        self.assertIn("PASS", out.getvalue())
-        self.assertIn("1 failed", out.getvalue())
+    # item 7: Chromium
 
-    def test_docs_only_pr_skips(self):
-        """A PR that only changes docs should SKIP."""
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, ""),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, ""),
-        ])
+    def test_chromium_check_launches_closes_and_stops(self):
+        tid = "tests.test_feature.FeatureTests.test_new_a"
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {tid: "fail" if swapped else "ok"})
+        self.prove(runner, _feature_diff("test_new_a"))
+        checks = [c for c, _ in runner.calls if len(c) == 3 and c[1] == "-c"]
+        self.assertEqual(len(checks), 1)
+        for needle in ("chromium.launch(headless=True)", ".close()", ".stop()"):
+            self.assertIn(needle, checks[0][2])
 
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
+    def test_chromium_launch_failure_is_unproven(self):
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {},
+                             rules=[(lambda c: len(c) == 3 and c[1] == "-c", 1, "")])
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN headless Chromium", out)
 
-        self.assertTrue(result)
-        self.assertIn("SKIP no code change", out.getvalue())
+    # item 8: cleanup
 
-    def test_no_new_tests_skips(self):
-        """A PR that changes code but adds no tests should SKIP."""
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, ""),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, "workshop_validator/x.py\n"),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, ""),
-        ])
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
-
-        self.assertTrue(result)
-        self.assertIn("SKIP", out.getvalue())
-
-    def test_temp_worktree_removed_on_error(self):
-        """Temp worktree should be removed even when git commands fail."""
-        diff = """diff --git a/tests/test_x.py b/tests/test_x.py
---- a/tests/test_x.py
-+++ b/tests/test_x.py
-@@ -1,3 +1,7 @@
- import unittest
-+
-+class XTests(unittest.TestCase):
-+    def test_something(self):
-+        pass
-"""
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_x.py\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, "workshop_validator/x.py\n"),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
-            # Simulate worktree add failure
-            (lambda c: c[:3] == ["git", "worktree", "add"], 1, ""),
-        ])
-
-        with self.assertRaises(subprocess.CalledProcessError):
-            team_gates.prove_tests(self.repo, "base", "head", runner=runner)
-
-        # Verify worktree remove was called
-        removes = runner.find("git", "worktree", "remove")
-        self.assertEqual(len(removes), 1)
-
-    def test_skipped_test_is_unproven(self):
-        """A skipped test should result in UNPROVEN, not PASS."""
-        diff = """diff --git a/tests/test_feature.py b/tests/test_feature.py
---- a/tests/test_feature.py
-+++ b/tests/test_feature.py
-@@ -3,3 +3,7 @@ import unittest
-
- class FeatureTests(unittest.TestCase):
-     def test_old(self):
-         pass
-+
-+    def test_new_skipped(self):
-+        self.skipTest("not ready")
-"""
-        code_files = "workshop_validator/feature.py\n"
-
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
-            (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
-            # The test is skipped
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
-             "test_new_skipped (tests.test_feature.FeatureTests.test_new_skipped)\n"
-             "docstring ... skipped 'not ready'\n"),
-        ])
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
-
-        self.assertFalse(result)
-        self.assertIn("UNPROVEN", out.getvalue())
-        self.assertIn("skipped", out.getvalue())
-
-    def test_one_of_two_tests_fails_on_base_passes(self):
-        """When 1 of 2 new tests fails on base, that's enough proof (PASS)."""
-        diff = """diff --git a/tests/test_feature.py b/tests/test_feature.py
---- a/tests/test_feature.py
-+++ b/tests/test_feature.py
-@@ -3,3 +3,10 @@ import unittest
-
- class FeatureTests(unittest.TestCase):
-     def test_old(self):
-         pass
-+
-+    def test_new_regression(self):
-+        self.assertTrue(True)
-+
-+    def test_new_behavior(self):
-+        self.assertFalse(True)
-"""
-        code_files = "workshop_validator/feature.py\n"
-
-        runner = FakeRunner([
-            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
-            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
-            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
-            (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
-            # One passes (regression test), one fails (proves new behavior)
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
-             "test_new_regression (tests.test_feature.FeatureTests.test_new_regression)\n"
-             "docstring ... ok\n"
-             "test_new_behavior (tests.test_feature.FeatureTests.test_new_behavior)\n"
-             "docstring ... FAIL\n"),
-        ])
-
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
-
-        self.assertTrue(result)
-        self.assertIn("PASS", out.getvalue())
-        self.assertIn("1 failed", out.getvalue())
-        self.assertIn("1 passed", out.getvalue())
+    def test_worktree_removed_then_pruned_even_when_add_fails(self):
+        runner = ProveRunner(["workshop_validator/a.py"], lambda swapped: {},
+                             rules=[(lambda c: c[:3] == ["git", "worktree", "add"], 1, "")])
+        ok, out = self.prove(runner, _feature_diff("test_new_a"))
+        self.assertFalse(ok)
+        self.assertIn("UNPROVEN git worktree add", out)
+        names = [c[:3] for c, _ in runner.calls]
+        self.assertIn(["git", "worktree", "remove"], names)
+        self.assertLess(names.index(["git", "worktree", "remove"]), names.index(["git", "worktree", "prune"]))
 
 
 if __name__ == "__main__":
