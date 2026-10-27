@@ -1,4 +1,4 @@
-"""Tests for F15: worktree-cleanup recognises fix-round bases (each fails on 5d1fe4d)."""
+"""Tests for F15: worktree-cleanup recognises fix-round bases and F15-fix1: fetch optimization."""
 
 import contextlib
 import io
@@ -226,6 +226,138 @@ class MergedPrAncestorTests(unittest.TestCase):
             # No fetch or merge-base calls should have been made for invalid OIDs
             fetch_calls = runner.find("git", "fetch")
             self.assertEqual(len(fetch_calls), 0, "Should not fetch invalid OIDs")
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+
+
+class FetchOptimizationTests(unittest.TestCase):
+    """F15-fix1: fetch each oid at most once, only when not local."""
+
+    def test_local_oids_not_fetched(self):
+        """Several worktrees with several merged PRs whose commits are local - zero fetches."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt1 = repo / "agent-wt-1"
+            wt2 = repo / "agent-wt-2"
+            wt1.mkdir(parents=True)
+            wt2.mkdir(parents=True)
+            agent1_oid = "a" * 40
+            agent2_oid = "b" * 40
+            pr1_oid = "c" * 40
+            pr2_oid = "d" * 40
+            tree1 = "e" * 40
+            tree2 = "f" * 40
+
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt1}\nHEAD {agent1_oid}\nbranch refs/heads/worktree-agent-one\n\n"
+                         f"worktree {wt2}\nHEAD {agent2_oid}\nbranch refs/heads/worktree-agent-two\n")
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                # Two merged PRs
+                (lambda c: c[:2] == ["gh", "pr"] and "--state" in c and "merged" in c and "--limit" in c and "200" in c,
+                 0, f'[{{"headRefOid": "{pr1_oid}"}}, {{"headRefOid": "{pr2_oid}"}}]'),
+                # Both worktrees clean
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),
+                # No own PRs for agent branches
+                (lambda c: c[:2] == ["gh", "pr"] and "--head" in c, 0, "[]"),
+                # Branch oids
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-one"], 0, agent1_oid + "\n"),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-two"], 0, agent2_oid + "\n"),
+                # ALL cat-file checks return 0 (all oids are local)
+                (lambda c: c[:2] == ["git", "cat-file"] and "-e" in c, 0, ""),
+                # merge-base checks (none are ancestors)
+                (lambda c: c[:2] == ["git", "merge-base"] and "--is-ancestor" in c, 1, ""),
+                # Tree oids
+                (lambda c: c[:2] == ["git", "rev-parse"] and agent1_oid in str(c) and "tree" in str(c), 0, tree1 + "\n"),
+                (lambda c: c[:2] == ["git", "rev-parse"] and agent2_oid in str(c) and "tree" in str(c), 0, tree2 + "\n"),
+                # Trees not in main
+                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, "other-tree\n"),
+                (lambda c: c[:3] == ["git", "worktree", "prune"], 0, ""),
+            ])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0, dry_run=True)
+
+            # Verify zero fetches happened (all oids were local)
+            fetch_calls = [c for c, cwd in runner.calls if c[:2] == ["git", "fetch"]]
+            self.assertEqual(len(fetch_calls), 0, f"Expected zero fetches when all oids local, got {len(fetch_calls)}: {fetch_calls}")
+
+    def test_missing_oid_fetched_once_across_worktrees(self):
+        """Missing oid is fetched once even when several worktrees need it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt1 = repo / "agent-wt-1"
+            wt2 = repo / "agent-wt-2"
+            wt3 = repo / "agent-wt-3"
+            for wt in [wt1, wt2, wt3]:
+                wt.mkdir(parents=True)
+            
+            agent1_oid = "a" * 40
+            agent2_oid = "b" * 40
+            agent3_oid = "c" * 40
+            shared_pr_oid = "d" * 40  # This oid is needed by all three worktrees
+
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt1}\nHEAD {agent1_oid}\nbranch refs/heads/worktree-agent-one\n\n"
+                         f"worktree {wt2}\nHEAD {agent2_oid}\nbranch refs/heads/worktree-agent-two\n\n"
+                         f"worktree {wt3}\nHEAD {agent3_oid}\nbranch refs/heads/worktree-agent-three\n")
+
+            fetch_count = [0]  # Track fetches of shared_pr_oid
+
+            class TrackingRunner(FakeRunner):
+                def __call__(self, cmd, cwd):
+                    self.calls.append((list(cmd), Path(cwd)))
+                    # Track fetches of the shared oid
+                    if cmd[:3] == ["git", "fetch", "origin"] and shared_pr_oid in cmd:
+                        fetch_count[0] += 1
+                    # cat-file for shared_pr_oid: NOT local before first fetch (code 1), local after (code 0)
+                    if cmd[:2] == ["git", "cat-file"] and "-e" in cmd and shared_pr_oid in str(cmd):
+                        code = 1 if fetch_count[0] == 0 else 0
+                        return subprocess.CompletedProcess(cmd, code, "", "")
+                    # Use parent logic for all other commands
+                    for match, code, out in self.rules:
+                        if match(cmd):
+                            return subprocess.CompletedProcess(cmd, code, out, "")
+                    return subprocess.CompletedProcess(cmd, 0, "", "")
+
+            runner = TrackingRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                # One merged PR with the shared oid
+                (lambda c: c[:2] == ["gh", "pr"] and "--state" in c and "merged" in c and "--limit" in c and "200" in c,
+                 0, f'[{{"headRefOid": "{shared_pr_oid}"}}]'),
+                # All worktrees clean
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),
+                # No own PRs
+                (lambda c: c[:2] == ["gh", "pr"] and "--head" in c, 0, "[]"),
+                # Branch oids
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-one"], 0, agent1_oid + "\n"),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-two"], 0, agent2_oid + "\n"),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-three"], 0, agent3_oid + "\n"),
+                # Fetch of the shared oid (only happens once)
+                (lambda c: c[:3] == ["git", "fetch", "origin"] and shared_pr_oid in c, 0, ""),
+                # merge-base checks (all are ancestors after fetch succeeds)
+                (lambda c: c[:2] == ["git", "merge-base"] and "--is-ancestor" in c, 0, ""),
+            ])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0, dry_run=True)
+
+            output = out.getvalue()
+            # All three worktrees should be removed (merged-pr-ancestor)
+            self.assertIn("remove", output)
+            # Count how many worktrees were removed with merged-pr-ancestor
+            removed_lines = [line for line in output.split('\n') if 'merged-pr-ancestor' in line]
+            self.assertEqual(len(removed_lines), 3, f"Expected 3 worktrees removed, got {len(removed_lines)}")
+            # Verify the shared oid was fetched exactly once
+            fetch_calls = [c for c, cwd in runner.calls if c[:3] == ["git", "fetch", "origin"] and shared_pr_oid in c]
+            self.assertEqual(len(fetch_calls), 1, f"Expected exactly 1 fetch of shared oid across 3 worktrees, got {len(fetch_calls)}")
 
 
 if __name__ == "__main__":
