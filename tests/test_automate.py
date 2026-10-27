@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from workshop_validator.automate import (
-    FAILED, INCONCLUSIVE, SUCCESS, load_aliases, load_gate, load_orgs, main,
+    FAILED, INCONCLUSIVE, SUCCESS, gate_outcome_of, load_aliases, load_gate, load_orgs, main,
     next_org_index, org_key, outcome_of, save_gate,
 )
 from workshop_validator.report import ReportStep
@@ -78,6 +78,39 @@ class PrivateFileTests(unittest.TestCase):
         self.assertNotEqual(org_key("a@example.test"), org_key("b@example.test"))
         self.assertEqual(org_key("A@example.test "), org_key("a@example.test"))
         self.assertNotIn("example", org_key("a@example.test"))
+
+
+class GateOutcomeTests(unittest.TestCase):
+    """Tests for the org-move decision, which judges the stopping step only."""
+
+    def test_mismatch_then_needs_review_stop_gives_inconclusive(self):
+        # A non-stopping UI_MISMATCH followed by NEEDS_REVIEW that stops the walk
+        result = _run("PASS", "UI_MISMATCH", "PASS", "NEEDS_REVIEW", "NOT_RUN", "NOT_RUN")
+        # The stopping step (NEEDS_REVIEW) is inconclusive
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+        # But outcome_of still reports the earlier UI_MISMATCH as FAILED
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_mismatch_then_stopping_mismatch_gives_failed(self):
+        # A UI_MISMATCH that doesn't stop, then a UI_MISMATCH that stops
+        result = _run("PASS", "UI_MISMATCH", "PASS", "UI_MISMATCH", "NOT_RUN", "NOT_RUN")
+        # The stopping step (second UI_MISMATCH) is a real failure
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_walk_completes_with_mismatches_gives_failed(self):
+        # Walk runs to completion with UI_MISMATCH steps that don't stop
+        result = _run("PASS", "UI_MISMATCH", "PASS", "UI_MISMATCH", "PASS")
+        # No stopping step, so use overall outcome
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_time_limit_not_run_gives_inconclusive(self):
+        # A NOT_RUN step with time limit note
+        result = _run("PASS", "PASS", "NOT_RUN", notes={2: "exceeded its time limit"})
+        # The stopping step has the time limit note
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+        self.assertEqual(outcome_of(result)[0], INCONCLUSIVE)
 
 
 
