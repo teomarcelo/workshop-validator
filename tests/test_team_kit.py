@@ -985,6 +985,147 @@ class TeamKitDecideTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+class F8DecideStatusTests(unittest.TestCase):
+    """F8: team_kit decide uses the register's statuses (W-063)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        # Create a minimal plan for dashboard rendering
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+        # Create synthetic register header
+        register = self.team / "DECISIONS.md"
+        register.write_text("Statuses: DECIDED (owner's quoted words only), RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED.\n\n")
+
+    def test_decided_status_accepted_with_quote(self):
+        """DECIDED status should be accepted when --quote is provided."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-100", "--status", "DECIDED",
+                              "--text", "Use async for background tasks",
+                              "--quote", "We need non-blocking I/O for the live org monitor."])
+        self.assertEqual(code, 0)
+        register = self.team / "DECISIONS.md"
+        content = register.read_text()
+        self.assertIn("W-100", content)
+        self.assertIn("DECIDED", content)
+        self.assertIn("We need non-blocking I/O for the live org monitor.", content)
+
+    def test_recommended_status_accepted(self):
+        """RECOMMENDED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-101", "--status", "RECOMMENDED",
+                              "--text", "Recommendation text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-101", (self.team / "DECISIONS.md").read_text())
+
+    def test_noted_status_accepted(self):
+        """NOTED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-102", "--status", "NOTED",
+                              "--text", "Note text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-102", (self.team / "DECISIONS.md").read_text())
+
+    def test_open_status_accepted(self):
+        """OPEN status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-103", "--status", "OPEN",
+                              "--text", "Open question text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-103", (self.team / "DECISIONS.md").read_text())
+
+    def test_resolved_status_accepted(self):
+        """RESOLVED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-104", "--status", "RESOLVED",
+                              "--text", "Resolution text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-104", (self.team / "DECISIONS.md").read_text())
+
+    def test_superseded_status_accepted(self):
+        """SUPERSEDED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-105", "--status", "SUPERSEDED",
+                              "--text", "Superseded by W-200"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-105", (self.team / "DECISIONS.md").read_text())
+
+    def test_revisit_status_refused(self):
+        """REVISIT status should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-106", "--status", "REVISIT",
+                              "--text", "Revisit text"])
+        self.assertNotEqual(code, 0)
+
+    def test_deferred_status_refused(self):
+        """DEFERRED status should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-107", "--status", "DEFERRED",
+                              "--text", "Deferred text"])
+        self.assertNotEqual(code, 0)
+
+    def test_decided_without_quote_refused(self):
+        """DECIDED status without --quote should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-108", "--status", "DECIDED",
+                              "--text", "Decision text without quote"])
+        self.assertNotEqual(code, 0)
+
+    def test_fails_on_origin_main(self):
+        """Tests should fail when run against origin/main's team_kit.py."""
+        # This test proves that the new tests would fail on the old code
+        # by temporarily importing the origin/main version
+        import sys
+        import importlib.util
+        import subprocess
+
+        # Save current team_kit module
+        old_module = sys.modules['workshop_validator.team_kit']
+
+        try:
+            # Find main checkout root via git worktree list
+            result = subprocess.run(
+                ["git", "worktree", "list", "--porcelain"],
+                capture_output=True, text=True, check=True
+            )
+            main_root = None
+            for line in result.stdout.splitlines():
+                if line.startswith("worktree "):
+                    # First worktree is main
+                    main_root = Path(line.split()[1])
+                    break
+
+            if not main_root:
+                self.skipTest("Could not find main worktree")
+
+            # Load origin/main's team_kit.py
+            origin_path = main_root / "workshop_validator" / "team_kit.py"
+            spec = importlib.util.spec_from_file_location("workshop_validator.team_kit_origin", origin_path)
+            origin_module = importlib.util.module_from_spec(spec)
+            sys.modules['workshop_validator.team_kit'] = origin_module
+            spec.loader.exec_module(origin_module)
+
+            # Try DECIDED with quote - origin/main doesn't have --quote arg, so argparse exits
+            with self.assertRaises(SystemExit) as cm:
+                origin_module.main(["--private-root", str(self.team.parent), "decide",
+                                   "--id", "W-200", "--status", "DECIDED",
+                                   "--text", "Test text",
+                                   "--quote", "Owner quote"])
+            self.assertEqual(cm.exception.code, 2, "Should fail with exit code 2 on origin/main")
+
+            # Try RECOMMENDED - should fail on old code (not in old VALID_DECISION_STATUSES)
+            code = origin_module.main(["--private-root", str(self.team.parent), "decide",
+                                       "--id", "W-201", "--status", "RECOMMENDED",
+                                       "--text", "Test text"])
+            self.assertNotEqual(code, 0, "RECOMMENDED should fail on origin/main")
+
+        finally:
+            # Restore original module
+            sys.modules['workshop_validator.team_kit'] = old_module
+
+
 class SavePlanDuplicateStepTests(unittest.TestCase):
     """F6 item 2: save_plan rejects duplicate step ids."""
 
