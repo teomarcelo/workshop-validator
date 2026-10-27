@@ -2743,5 +2743,65 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
         self.assertIn(("click", "button", "New Resource"), page.events)
 
 
+class UnnamedModalTests(unittest.TestCase):
+    def test_unnamed_modal_blocks_when_control_not_found(self):
+        """A visible unnamed modal covering the page returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[
+                ("dialog", "Help Agent\nWelcome to your new org\nGet Started"),
+                ("h1", "Help Agent"),
+            ],
+        )
+        # Add a heading inside the dialog
+        page.children = {
+            ("dialog", "Help Agent\nWelcome to your new org\nGet Started"): [("h1", "Help Agent")]
+        }
+
+        # Step text that doesn't mention "Help Agent"
+        step_text = "Select the profile picture and select Settings."
+
+        # The modal title should be detected
+        modal_title = guide_walk._unnamed_modal_title(page, step_text)
+        self.assertIsNotNone(modal_title)
+        self.assertEqual(modal_title, "Help Agent")
+
+    def test_no_modal_returns_none(self):
+        """When there's no modal, _unnamed_modal_title returns None."""
+        page = Page("https://example.lightning.force.com/home")
+        modal_title = guide_walk._unnamed_modal_title(page, "Select Settings.")
+        self.assertIsNone(modal_title)
+
+    def test_named_modal_returns_none(self):
+        """When the step mentions the modal, _unnamed_modal_title returns None."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[
+                ("dialog", "Help Agent\nWelcome message"),
+                ("h1", "Help Agent"),
+            ],
+        )
+        page.children = {
+            ("dialog", "Help Agent\nWelcome message"): [("h1", "Help Agent")]
+        }
+
+        # Step text that mentions "Help Agent"
+        step_text = "Close the Help Agent modal and select Settings."
+
+        modal_title = guide_walk._unnamed_modal_title(page, step_text)
+        self.assertIsNone(modal_title)
+
+    def test_modal_without_heading_uses_first_text(self):
+        """Modal without a heading uses first words of dialog text as title."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[("dialog", "Welcome to the assistant This is a longer text")],
+        )
+        # No children, so should use first words of dialog text
+        modal_title = guide_walk._unnamed_modal_title(page, "Open Settings")
+        self.assertIsNotNone(modal_title)
+        self.assertIn("welcome", modal_title.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
