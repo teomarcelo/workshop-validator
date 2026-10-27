@@ -371,6 +371,117 @@ class StepBoardTests(unittest.TestCase):
         self.assertNotIn("#fff4e0", page, "Should not have hardcoded background color")
         self.assertNotIn("#9a6700", page, "Should not have hardcoded foreground color")
 
+    def test_weak_evidence_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("weak-evidence",))},
+        )
+        self.assertIn("Weak evidence", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("Evidence is based only on a click action", page)
+
+    def test_url_only_evidence_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Navigate to page"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("url-only-evidence",))},
+        )
+        self.assertIn("Evidence is the URL only", page)
+        self.assertIn("class='chip suspect'", page)
+
+    def test_unexpected_change_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Save the form"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("unexpected-change",))},
+        )
+        self.assertIn("Unexpected page change", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("The page changed in an unexpected way", page)
+
+    def test_multi_flag_pass_counted_once(self):
+        page, board = html_for(
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Open the page"),
+            ),
+            {
+                "a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only", "weak-evidence")),
+                "b": StepOutcome("PASS", evidence_ids=("evidence-2",)),
+            },
+        )
+        self.assertEqual(board.suspect_passes, 1)
+        self.assertIn("1", page)
+        self.assertIn("pass needs a check", page)
+
+    def test_all_five_suspect_flags_counted(self):
+        page, board = html_for(
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Open the page"),
+                step("c", "Exercise 1", "Task 1: Start", "3", "Navigate"),
+                step("d", "Exercise 1", "Task 1: Start", "4", "Submit"),
+                step("e", "Exercise 1", "Task 1: Start", "5", "Verify"),
+            ),
+            {
+                "a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",)),
+                "b": StepOutcome("PASS", evidence_ids=("evidence-2",), suspect=("no-screen-change",)),
+                "c": StepOutcome("PASS", evidence_ids=("evidence-3",), suspect=("weak-evidence",)),
+                "d": StepOutcome("PASS", evidence_ids=("evidence-4",), suspect=("url-only-evidence",)),
+                "e": StepOutcome("PASS", evidence_ids=("evidence-5",), suspect=("unexpected-change",)),
+            },
+        )
+        self.assertEqual(board.suspect_passes, 5)
+        self.assertIn("5", page)
+        self.assertIn("passes need a check", page)
+
+    def test_all_suspect_flags_render_in_run_report(self):
+        from workshop_validator.step_board import render_run_report
+
+        inventory = GuideInventory(
+            1,
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Open the page"),
+                step("c", "Exercise 1", "Task 1: Start", "3", "Navigate"),
+                step("d", "Exercise 1", "Task 1: Start", "4", "Submit"),
+                step("e", "Exercise 1", "Task 1: Start", "5", "Verify"),
+            ),
+            (),
+            (),
+        )
+
+        board = build_board(
+            inventory,
+            outcomes={
+                "a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",)),
+                "b": StepOutcome("PASS", evidence_ids=("evidence-2",), suspect=("no-screen-change",)),
+                "c": StepOutcome("PASS", evidence_ids=("evidence-3",), suspect=("weak-evidence",)),
+                "d": StepOutcome("PASS", evidence_ids=("evidence-4",), suspect=("url-only-evidence",)),
+                "e": StepOutcome("PASS", evidence_ids=("evidence-5",), suspect=("unexpected-change",)),
+            },
+            notice="Test notice",
+            run_id="test-run",
+        )
+
+        summary = {
+            "outcome": "success",
+            "reason": "",
+            "org": 1,
+            "orgs": 1,
+        }
+
+        html = render_run_report(board, summary=summary, guide_name="Test Guide")
+
+        # Verify all five suspect flags appear
+        self.assertIn("Weak evidence: element only", html)
+        self.assertIn("Screen did not change", html)
+        self.assertIn("Weak evidence", html)
+        self.assertIn("Evidence is the URL only", html)
+        self.assertIn("Unexpected page change", html)
+
+        # Verify suspect counter
+        self.assertIn("5", html)
+        self.assertIn("passes need a check", html)
+
 
 if __name__ == "__main__":
     unittest.main()
