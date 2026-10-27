@@ -162,6 +162,24 @@ li.fail {
 .badge.fail { background: #fde8e6; color: #9f1c1c; }
 .badge.not-run { background: #eceae4; color: #3e4942; }
 h3 .badge { margin-left: 8px; vertical-align: 2px; }
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0 0 calc(2.25rem + 12px);
+}
+.chip {
+  display: inline-block;
+  font: 600 11px/1 system-ui, sans-serif;
+  letter-spacing: 0.02em;
+  border-radius: 12px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.chip.suspect {
+  background: #fff4e0;
+  color: #9a6700;
+}
 label { display: block; font-weight: 600; margin: 16px 0 6px; }
 .fields label:first-child { margin-top: 0; }
 input[type="text"], input[type="password"] {
@@ -363,6 +381,7 @@ class Board:
     tasks_failed: int
     tasks_not_run: int
     unmatched: int
+    suspect_passes: int = 0
 
 
 def outcomes_from_report_steps(steps: Sequence[ReportStep]) -> dict[str, StepOutcome]:
@@ -404,6 +423,12 @@ def build_board(
     failed = labels.count("FAIL")
     passed = labels.count("PASS")
     not_run = labels.count("NOT RUN")
+    suspect_passes = sum(
+        1 for section in sections
+        for task in section.tasks
+        for step in task.steps
+        if step.status == "PASS" and ("presence-only" in step.chips or "no-screen-change" in step.chips)
+    )
     if failed:
         tone = "failed"
     elif passed and not not_run:
@@ -422,6 +447,7 @@ def build_board(
         tasks_failed=task_labels.count("FAIL"),
         tasks_not_run=task_labels.count("NOT RUN"),
         unmatched=unmatched,
+        suspect_passes=suspect_passes,
     )
 
 
@@ -841,6 +867,12 @@ def _metrics(board: Board) -> str:
             f"<div class='metric {tone}'><strong>{value}</strong>"
             f"<span>{escape(label)}</span></div>"
         )
+    if board.suspect_passes > 0:
+        label = "pass needs a check" if board.suspect_passes == 1 else "passes need a check"
+        parts.append(
+            f"<div class='metric pending'><strong>{board.suspect_passes}</strong>"
+            f"<span>{escape(label)}</span></div>"
+        )
     return "<div class='metrics'>" + "".join(parts) + "</div>"
 
 
@@ -896,13 +928,29 @@ def _render_task(task: TaskView) -> str:
 
 def _render_step(step: StepView) -> str:
     reason = f"<p class='reason'>{escape(step.reason)}</p>" if step.reason else ""
+    chips_html = ""
+    if step.chips:
+        chip_items = []
+        for chip in step.chips:
+            if chip == "presence-only":
+                chip_items.append(
+                    "<span class='chip suspect' title='Evidence based only on element presence, not visible text'>"
+                    "Weak evidence: element only</span>"
+                )
+            elif chip == "no-screen-change":
+                chip_items.append(
+                    "<span class='chip suspect' title='URL, page title, and headings did not change after the action'>"
+                    "Screen did not change</span>"
+                )
+        if chip_items:
+            chips_html = f"<div class='chips'>{''.join(chip_items)}</div>"
     return (
         f"<li class='{step.css}' data-status='{escape(step.label, quote=True)}'>"
         "<div class='line'>"
         f"<span class='num'>{escape(step.number)}.</span>"
         f"<span class='text'>{escape(step.title)}</span>"
         f"<span class='badge {step.css}'>{escape(step.label)}</span>"
-        f"</div>{reason}</li>"
+        f"</div>{chips_html}{reason}</li>"
     )
 
 
@@ -1050,6 +1098,10 @@ def render_run_report(
     not_run_count = len(statuses) - pass_count - fail_count - needs_review_count - blocked_count
     already_set_count = sum("already-set" in step.chips for step in steps)
     renamed_count = sum("renamed" in step.chips for step in steps)
+    suspect_pass_count = sum(
+        1 for step in steps
+        if step.status == "PASS" and ("presence-only" in step.chips or "no-screen-change" in step.chips)
+    )
 
     stats_parts = [
         "<div class='stats'>",
@@ -1068,6 +1120,12 @@ def render_run_report(
     if renamed_count > 0:
         stats_parts.append(
             f"<div class='stat'><span class='stat-value'>{renamed_count}</span><span class='stat-label'>Renamed in UI</span></div>"
+        )
+
+    if suspect_pass_count > 0:
+        label = "pass needs a check" if suspect_pass_count == 1 else "passes need a check"
+        stats_parts.append(
+            f"<div class='stat needs-review'><span class='stat-value'>{suspect_pass_count}</span><span class='stat-label'>{label}</span></div>"
         )
 
     stats_parts.extend([
@@ -1206,6 +1264,10 @@ def render_run_report(
                             chips_html.append("<span class='chip already-set'>Already set by org</span>")
                         elif chip == "renamed":
                             chips_html.append("<span class='chip renamed'>Renamed in UI</span>")
+                        elif chip == "presence-only":
+                            chips_html.append("<span class='chip suspect' title='Evidence based only on element presence, not visible text'>Weak evidence: element only</span>")
+                        elif chip == "no-screen-change":
+                            chips_html.append("<span class='chip suspect' title='URL, page title, and headings did not change after the action'>Screen did not change</span>")
                     if chips_html:
                         sections_html.append("<div class='chips'>" + "".join(chips_html) + "</div>")
 

@@ -295,6 +295,56 @@ class StepBoardTests(unittest.TestCase):
         self.assertIn("Welcome message is shown: FAIL", text)
         self.assertIn("Live Test shows Let's chat.", text)
 
+    def test_presence_only_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+        )
+        self.assertIn("Weak evidence: element only", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("Evidence based only on element presence", page)
+
+    def test_no_screen_change_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Open the page"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("no-screen-change",))},
+        )
+        self.assertIn("Screen did not change", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("URL, page title, and headings did not change", page)
+
+    def test_suspect_pass_counter_shows_for_flagged_passes(self):
+        page, _board = html_for(
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Open the page"),
+            ),
+            {
+                "a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",)),
+                "b": StepOutcome("PASS", evidence_ids=("evidence-2",), suspect=("no-screen-change",)),
+            },
+        )
+        self.assertIn("2", page)
+        self.assertIn("passes need a check", page)
+        self.assertIn("class='metric pending'", page)
+
+    def test_suspect_pass_counter_singular_form(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+        )
+        self.assertIn("1", page)
+        self.assertIn("pass needs a check", page)
+        self.assertNotIn("passes need", page)
+
+    def test_suspect_pass_counter_hidden_when_no_flags(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",))},
+        )
+        self.assertNotIn("pass needs a check", page)
+        self.assertNotIn("passes need a check", page)
+
 
 if __name__ == "__main__":
     unittest.main()
