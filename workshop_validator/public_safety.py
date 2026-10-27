@@ -187,8 +187,12 @@ def get_main_checkout(root: Path) -> Path | None:
         return root
 
 
-def check_main_clean(root: Path) -> tuple[bool, str]:
-    """Check that main checkout is on branch main and has no untracked or modified files.
+def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
+    """Check that main checkout is on branch main, and optionally check for dirty files.
+
+    Args:
+        root: Repository root path
+        check_dirty: If True, also check for untracked or modified files (default: True)
 
     Returns (True, msg) if not in a git repo (skip check for test environments).
     """
@@ -227,14 +231,17 @@ def check_main_clean(root: Path) -> tuple[bool, str]:
             branch_name = branch.replace("refs/heads/", "")
             return False, f"Main checkout is on branch {branch_name}, not main"
 
-        # Check for modified or untracked files
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=main_checkout, capture_output=True, text=True, check=True
-        )
-        if result.stdout.strip():
-            return False, "Main checkout has untracked or modified files"
+        # Check for modified or untracked files (only if requested)
+        if check_dirty:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=main_checkout, capture_output=True, text=True, check=True
+            )
+            if result.stdout.strip():
+                return False, "Main checkout has untracked or modified files"
         return True, "Main checkout is clean"
+    except FileNotFoundError:
+        return False, "git binary not found"
     except subprocess.CalledProcessError:
         return False, "Could not check main checkout status"
 
@@ -242,7 +249,7 @@ def check_main_clean(root: Path) -> tuple[bool, str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Public safety gate for tracked files and commits.")
     parser.add_argument("--main-clean", action="store_true",
-                        help="Also check that main checkout has no untracked or modified files")
+                        help="Also check that main checkout is on main branch and has no untracked or modified files")
     parser.add_argument("--check-emails", action="store_true", default=True,
                         help="Check commit author/committer emails (default: true)")
     args = parser.parse_args(argv)

@@ -99,10 +99,10 @@ class TeamHooksMainCheckoutTests(unittest.TestCase):
 
 
 class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
-    """F9 item 3: team_kit watchdog reports STALLED when main checkout is not on main."""
+    """F9: team_kit watchdog reports STALLED through watchdog_action (NUDGE or TAKEOVER)."""
 
-    def test_watchdog_reports_stalled_when_main_on_other_branch(self):
-        """watchdog_check should report STALLED when main checkout is on a different branch."""
+    def test_watchdog_reports_takeover_when_main_on_other_branch_no_live_producer(self):
+        """watchdog_check should report TAKEOVER when main checkout is on a different branch and no live producer."""
         with tempfile.TemporaryDirectory() as tmp:
             main_repo = Path(tmp) / "main"
             main_repo.mkdir()
@@ -128,11 +128,14 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             from workshop_validator.team_kit import watchdog_check
             result = watchdog_check(main_repo, team)
 
-            self.assertIn("NONE STALLED", result)
+            # Should report TAKEOVER (not NONE) because no live producer
+            self.assertIn("TAKEOVER", result)
+            self.assertIn("STALLED", result)
             self.assertIn("review", result)
+            self.assertNotIn("NONE STALLED", result)
 
-    def test_watchdog_reports_stalled_when_main_detached(self):
-        """watchdog_check should report STALLED when main checkout HEAD is detached."""
+    def test_watchdog_reports_takeover_when_main_detached_no_live_producer(self):
+        """watchdog_check should report TAKEOVER when main checkout HEAD is detached and no live producer."""
         with tempfile.TemporaryDirectory() as tmp:
             main_repo = Path(tmp) / "main"
             main_repo.mkdir()
@@ -159,8 +162,144 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             from workshop_validator.team_kit import watchdog_check
             result = watchdog_check(main_repo, team)
 
-            self.assertIn("NONE STALLED", result)
+            # Should report TAKEOVER (not NONE) because no live producer
+            self.assertIn("TAKEOVER", result)
+            self.assertIn("STALLED", result)
             self.assertIn("detached", result.lower())
+            self.assertNotIn("NONE STALLED", result)
+
+    def test_watchdog_with_untracked_file_still_handles_real_stalled(self):
+        """watchdog_check ignores dirty files; a real STALLED status still yields NUDGE/TAKEOVER."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+            team = Path(tmp) / "team"
+            team.mkdir(parents=True)
+
+            # Initialize repo on main
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Add an untracked file (watchdog should ignore this)
+            (main_repo / "untracked.txt").write_text("untracked content")
+
+            # Create team state with stale heartbeat
+            from workshop_validator.team_state import start_job, _write_private
+            start_job(team.parent, "guide.pdf", "quick", now="2026-10-27T10:00:00+00:00")
+            state_path = team.parent / "team" / "state.json"
+            state = json.loads(state_path.read_text())
+            state["heartbeat"] = "2026-10-27T10:00:00+00:00"
+            _write_private(state_path, json.dumps(state, indent=2) + "\n")
+
+            # Create a plan with a running step
+            (team / "progress").mkdir(parents=True)
+            plan_path = team / "progress" / "now.json"
+            plan_path.write_text(json.dumps({
+                "steps": [{"id": "test-step", "state": "running"}],
+                "updated": "2026-10-27T10:00:00+00:00"
+            }), encoding="utf-8")
+            plan_path.chmod(0o600)
+
+            # Set the mtime of now.json to an old time (35+ minutes ago)
+            import os
+            from datetime import datetime, timezone
+            old_time = datetime(2026, 10, 27, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+            os.utime(plan_path, (old_time, old_time))
+
+            from workshop_validator.team_kit import watchdog_check
+            now = datetime(2026, 10, 27, 10, 35, 0, tzinfo=timezone.utc)
+            result = watchdog_check(main_repo, team, now=now)
+
+            # Should report TAKEOVER for real STALLED status (stale heartbeat), not blocked by untracked file
+            self.assertIn("TAKEOVER", result)
+            self.assertIn("STALLED", result)
+
+
+class PublicSafetyCheckMainCleanTests(unittest.TestCase):
+    """F9 fix1: check_main_clean fails closed on git errors and missing git binary."""
+
+    def test_check_main_clean_catches_file_not_found_error(self):
+        """check_main_clean should catch FileNotFoundError when git binary is missing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            repo.mkdir()
+
+            from unittest import mock
+            from workshop_validator import public_safety
+
+            # Mock subprocess.run to raise FileNotFoundError
+            with mock.patch("workshop_validator.public_safety.subprocess.run", side_effect=FileNotFoundError("git not found")):
+                ok, msg = public_safety.check_main_clean(repo)
+
+            self.assertFalse(ok)
+            self.assertIn("git binary not found", msg)
+
+    def test_check_main_clean_fails_on_git_errors(self):
+        """check_main_clean should fail on git errors (except 'not a git repository')."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize a real git repo
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            from unittest import mock
+            from workshop_validator import public_safety
+
+            # Mock subprocess.run to raise CalledProcessError after the initial git-dir check
+            original_run = subprocess.run
+            call_count = [0]
+
+            def mock_run(*args, **kwargs):
+                call_count[0] += 1
+                # Let the first call (git rev-parse --git-dir) succeed
+                if call_count[0] == 1:
+                    return original_run(*args, **kwargs)
+                # Second call (git worktree list) fails
+                raise subprocess.CalledProcessError(1, args[0], stderr="git error")
+
+            with mock.patch("workshop_validator.public_safety.subprocess.run", side_effect=mock_run):
+                ok, msg = public_safety.check_main_clean(main_repo)
+
+            self.assertFalse(ok)
+            self.assertIn("Could not check main checkout status", msg)
+
+    def test_check_main_clean_with_check_dirty_false_ignores_untracked_files(self):
+        """check_main_clean with check_dirty=False should ignore untracked files."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize repo on main
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Add an untracked file
+            (main_repo / "untracked.txt").write_text("untracked content")
+
+            from workshop_validator import public_safety
+
+            # With check_dirty=False, should pass despite untracked file
+            ok, msg = public_safety.check_main_clean(main_repo, check_dirty=False)
+            self.assertTrue(ok)
+
+            # With check_dirty=True (default), should fail due to untracked file
+            ok, msg = public_safety.check_main_clean(main_repo, check_dirty=True)
+            self.assertFalse(ok)
+            self.assertIn("untracked or modified files", msg)
 
 
 if __name__ == "__main__":
