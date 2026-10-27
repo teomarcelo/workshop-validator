@@ -546,5 +546,106 @@ class RunReportTests(unittest.TestCase):
         self.assertIn("Completed step", html)
 
 
+
+class SuspectChipReportTests(unittest.TestCase):
+    """Run report, live report and history page carry the suspect chip and its theme CSS."""
+
+    SENTINELS = {
+        "light": {"chip_suspect_bg": "#a1b2c3", "chip_suspect": "#c3b2a1"},
+        "dark": {"chip_suspect_bg": "#d4e5f6", "chip_suspect": "#f6e5d4"},
+    }
+    CHIP_LABELS = {
+        "presence-only": "Weak evidence: element only",
+        "no-screen-change": "Screen did not change",
+    }
+
+    def _patched(self):
+        """Replace existing theme values only. Fails when theme.py lacks the keys."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        from workshop_validator import theme
+
+        stack = ExitStack()
+        for mode, colors in (("light", theme.COLORS_LIGHT), ("dark", theme.COLORS_DARK)):
+            for key in self.SENTINELS[mode]:
+                self.assertIn(key, colors, f"theme COLORS_{mode.upper()} must define {key}")
+            stack.enter_context(patch.dict(colors, self.SENTINELS[mode]))
+        return stack
+
+    def _assert_suspect_css(self, html):
+        import re
+
+        light = self.SENTINELS["light"]
+        dark = self.SENTINELS["dark"]
+        rules = re.findall(r"\.chip\.suspect\s*\{([^}]*)\}", html)
+        light_rule = (
+            f"background: {light['chip_suspect_bg']};",
+            f"color: {light['chip_suspect']};",
+        )
+        dark_rule = (
+            f"background: {dark['chip_suspect_bg']};",
+            f"color: {dark['chip_suspect']};",
+        )
+        self.assertTrue(
+            any(all(part in rule for part in light_rule) for rule in rules),
+            "light .chip.suspect rule must use COLORS_LIGHT tokens",
+        )
+        self.assertTrue(
+            any(all(part in rule for part in dark_rule) for rule in rules),
+            "dark .chip.suspect rule must use COLORS_DARK tokens",
+        )
+        dark_block = html[html.index("prefers-color-scheme: dark"):]
+        self.assertRegex(
+            dark_block,
+            r"\.chip\.suspect\s*\{[^}]*" + re.escape(dark["chip_suspect_bg"]),
+            "dark rule must sit inside the dark color-scheme block",
+        )
+
+    def _board(self):
+        steps = tuple(
+            make_step(f"s{i}", "Exercise 1", "Task 1", str(i), f"Synthetic step {i}")
+            for i in range(1, len(self.CHIP_LABELS) + 1)
+        )
+        outcomes = {
+            f"s{i}": StepOutcome("PASS", evidence_ids=(f"ev-{i}",), suspect=(flag,))
+            for i, flag in enumerate(self.CHIP_LABELS, start=1)
+        }
+        inventory = GuideInventory(1, steps, (), ())
+        return build_board(inventory, outcomes=outcomes, notice="Synthetic", run_id="suspect-001")
+
+    def test_run_report_shows_each_suspect_chip_with_theme_css(self):
+        summary = {
+            "org": 1, "orgs": 1, "outcome": "success", "reason": "Synthetic",
+            "signed_in": True, "counts": {"PASS": len(self.CHIP_LABELS)},
+        }
+        with self._patched():
+            html = render_run_report(self._board(), summary=summary, guide_name="Synthetic Guide")
+        for flag, label in self.CHIP_LABELS.items():
+            with self.subTest(flag=flag):
+                self.assertIn(f">{label}</span>", html)
+        self.assertEqual(html.count("<span class='chip suspect'"), len(self.CHIP_LABELS))
+        self.assertIn("passes need a check", html)
+        self._assert_suspect_css(html)
+
+    def test_live_report_carries_suspect_chip_css(self):
+        from workshop_validator.step_board import render_live_report
+
+        with self._patched():
+            html = render_live_report(
+                guide_name="Synthetic Guide", run_id="r", org=1, orgs=1, lines=["Step 1"],
+            )
+        self._assert_suspect_css(html)
+
+    def test_history_index_carries_suspect_chip_css(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            private_root = Path(tmpdir)
+            (private_root / "reports").mkdir(parents=True)
+            (private_root / "reports" / "history.json").write_text("[]", encoding="utf-8")
+            with self._patched():
+                index_path = write_history_index(private_root)
+            html = index_path.read_text(encoding="utf-8")
+        self._assert_suspect_css(html)
+
+
 if __name__ == "__main__":
     unittest.main()

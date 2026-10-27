@@ -3770,7 +3770,43 @@ def _visible_names_snapshot(page) -> frozenset[str]:
     return frozenset(names)
 
 
-def _detect_suspect_flags(step: GuideStep, evidence_token: str, before_names: frozenset[str], after_names: frozenset[str]) -> tuple[str, ...]:
+def _extract_visible_headings(page) -> frozenset[str]:
+    """Extract visible heading text for screen-change detection."""
+    headings: set[str] = set()
+    try:
+        for root in _roots(page):
+            try:
+                loc = root.locator("[role='heading']")
+                count = min(_count(loc), 50)
+                for i in range(count):
+                    item = loc.nth(i)
+                    if not hasattr(item, "is_visible") or not item.is_visible():
+                        continue
+                    try:
+                        text = (item.inner_text(timeout=500) or "").strip()
+                        if text and len(text) < 200:
+                            headings.add(norm(text))
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return frozenset(headings)
+
+
+def _detect_suspect_flags(
+    step: GuideStep,
+    evidence_token: str,
+    before_names: frozenset[str],
+    after_names: frozenset[str],
+    before_url: str = "",
+    after_url: str = "",
+    before_title: str = "",
+    after_title: str = "",
+    before_headings: frozenset[str] | None = None,
+    after_headings: frozenset[str] | None = None,
+) -> tuple[str, ...]:
     """Compute suspect flags for a step result."""
     flags: list[str] = []
 
@@ -3781,6 +3817,25 @@ def _detect_suspect_flags(step: GuideStep, evidence_token: str, before_names: fr
     # url-only-evidence: PASS with only URL change evidence
     if evidence_token == "after-state: url changed":
         flags.append("url-only-evidence")
+
+    # presence-only: evidence based on DOM presence without visible text
+    # Dialog counts, aria attributes, or count increases without reading text
+    if evidence_token in ("after-state: dialog opened",):
+        flags.append("presence-only")
+    elif evidence_token.startswith("after-state: ") and any(
+        evidence_token.endswith(suffix) for suffix in (" selected", " pressed", " expanded")
+    ):
+        flags.append("presence-only")
+    elif evidence_token.startswith("after-state: ") and " appeared" in evidence_token:
+        flags.append("presence-only")
+
+    # no-screen-change: URL, title, and headings all unchanged after a screen-change action
+    if before_headings is not None and after_headings is not None:
+        url_unchanged = before_url == after_url
+        title_unchanged = norm(before_title) == norm(after_title)
+        headings_unchanged = before_headings == after_headings
+        if url_unchanged and title_unchanged and headings_unchanged:
+            flags.append("no-screen-change")
 
     # unexpected-change: new names appeared that aren't in step text
     step_text_lower = norm(step.text or "")
@@ -3829,6 +3884,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     # Capture before-state for suspect detection and evidence verification
     before_names = _visible_names_snapshot(state.page)
     before_url = getattr(state.page, "url", "")
+    before_title = _page_title(state.page)
+    before_headings = _extract_visible_headings(state.page)
     # Also capture occurrence counts for target names (handles field placement case)
     before_scoped = _scoped_name_counts(state.page)
     before_counts = {t: before_scoped.get(t, 0) for t in target_names if len(t) > 3}
@@ -4114,7 +4171,15 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     if snapshot:
         note = f"{note} The page showed {_snippet(snapshot)}."
 
-    suspect = _detect_suspect_flags(step, evidence_desc, before_names, after_names)
+    # Capture final after-state for screen-change detection
+    after_title = _page_title(state.page)
+    after_headings = _extract_visible_headings(state.page)
+
+    suspect = _detect_suspect_flags(
+        step, evidence_desc, before_names, after_names,
+        before_url, after_url, before_title, after_title,
+        before_headings, after_headings
+    )
     return passed(step, evidence_desc, note, suspect=suspect)
 
 
