@@ -588,94 +588,85 @@ _SHOWN_BEFORE_JS = """() => {
 # visible before the View profile click. No record, or a panel that is the
 # whole document, means no panel. When the baseline is missing, the panel is
 # the smallest common ancestor containing both Log Out and Settings.
-def _panel_js(item_name: str) -> str:
-    """Generate JavaScript to find profile panel, parameterized by item name.
-
-    Args:
-        item_name: The menu item to search for (e.g., "Settings", "My Account")
-
-    Returns:
-        JavaScript function string that takes a Log Out element and marks the panel
-    """
-    # Escape the item name for safe injection into JavaScript string
-    escaped_name = item_name.replace('\\', '\\\\').replace("'", "\\'")
-
-    return f"""(el) => {{
+# The item name is passed as an evaluate argument, never built into the
+# script text, so quotes, backslashes and newlines in it cannot break it.
+# Call as target.evaluate(_PANEL_JS, item_name).
+_PANEL_JS = """(el, itemName) => {
   const seen = window.__wvShownBeforeProfile;
   const up = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
 
-  if (seen) {{
+  if (seen) {
     // Original behavior: use baseline
     let panel = null;
-    for (let n = el; n; n = up(n)) {{
+    for (let n = el; n; n = up(n)) {
       if (seen.has(n)) break;
       panel = n;
-    }}
+    }
     if (!panel || panel === document.documentElement || panel === document.body) return false;
     panel.setAttribute('data-wv-profile-panel', '1');
     return true;
-  }}
+  }
 
   // No baseline: find smallest common ancestor of Log Out (el) and named item
-  const findVisibleItems = () => {{
+  const findVisibleItems = () => {
     const results = [];
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
-    while (walker.nextNode()) {{
+    while (walker.nextNode()) {
       const node = walker.currentNode;
       const text = (node.textContent || '').trim();
-      if (text === '{escaped_name}') {{
+      if (text === itemName) {
         const rect = node.getBoundingClientRect();
         const style = window.getComputedStyle(node);
-        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {{
+        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
           results.push(node);
-        }}
-      }}
-    }}
+        }
+      }
+    }
     return results;
-  }};
+  };
 
   const itemElements = findVisibleItems();
   if (itemElements.length === 0) return false;
 
   // Build Log Out ancestor chain
   const logoutAncestors = [];
-  for (let n = el; n; n = up(n)) {{
+  for (let n = el; n; n = up(n)) {
     if (n === document.body || n === document.documentElement) break;
     logoutAncestors.push(n);
-  }}
+  }
 
   // Find smallest common ancestor
   let smallestPanel = null;
   let smallestSize = Infinity;
 
-  for (const item of itemElements) {{
-    for (let n = item; n; n = up(n)) {{
+  for (const item of itemElements) {
+    for (let n = item; n; n = up(n)) {
       if (n === document.body || n === document.documentElement) break;
 
-      if (logoutAncestors.includes(n)) {{
+      if (logoutAncestors.includes(n)) {
         const rect = n.getBoundingClientRect();
         const size = rect.width * rect.height;
 
         // Exclude if it contains global header/nav as direct children
-        const hasGlobalNav = Array.from(n.children).some(child => {{
+        const hasGlobalNav = Array.from(n.children).some(child => {
           const tag = child.tagName.toLowerCase();
           const role = child.getAttribute('role');
           return tag === 'header' || tag === 'nav' || role === 'banner' || role === 'navigation';
-        }});
+        });
 
-        if (size > 0 && size < smallestSize && !hasGlobalNav) {{
+        if (size > 0 && size < smallestSize && !hasGlobalNav) {
           smallestPanel = n;
           smallestSize = size;
-        }}
+        }
         break;
-      }}
-    }}
-  }}
+      }
+    }
+  }
 
   if (!smallestPanel) return false;
   smallestPanel.setAttribute('data-wv-profile-panel', '1');
   return true;
-}}"""
+}"""
 
 _PANEL_SELECTOR = '[data-wv-profile-panel="1"]'
 
@@ -721,7 +712,7 @@ def _profile_panels(page) -> list:
         for role in ("link", "button", "menuitem"):
             for target in _visible_items(_by_role(root, role, "Log Out", exact=True)):
                 try:
-                    marked = bool(target.evaluate(_panel_js("Settings"))) or marked
+                    marked = bool(target.evaluate(_PANEL_JS, "Settings")) or marked
                 except Exception:
                     continue
         if marked:

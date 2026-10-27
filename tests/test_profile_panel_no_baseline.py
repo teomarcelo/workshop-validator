@@ -7,7 +7,7 @@ try:
 except ImportError:
     sync_playwright = None
 
-from workshop_validator.guide_walk import _panel_js
+from workshop_validator.guide_walk import _PANEL_JS, _PANEL_SELECTOR, _profile_panels
 
 
 # Scenario (a): Panel opens in iframe, contains Settings + Log Out, Settings also outside
@@ -82,6 +82,19 @@ HTML_PANEL_WITH_GLOBAL_NAV = '''
 '''
 
 
+# Scenario (e): item name holds quote, double quote, backslash and newline.
+# Text is set by the test at runtime; a near-miss copy sits outside the panel.
+HTML_SPECIAL_NAME = '''
+<div id="page-wrapper" style="width: 800px; height: 600px;">
+    <div id="near-item" style="width: 100px; height: 20px;"></div>
+    <div id="panel" style="width: 200px; height: 150px;">
+        <span id="exact-item" style="display: block;"></span>
+        <a href="#logout" id="logout-link">Log Out</a>
+    </div>
+</div>
+'''
+
+
 @unittest.skipUnless(sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1", "Browser smoke only")
 class TestProfilePanelNoBaseline(unittest.TestCase):
     """Test _panel_js logic for finding panels without pre-click baseline."""
@@ -110,9 +123,8 @@ class TestProfilePanelNoBaseline(unittest.TestCase):
         iframe = page.frame('profile-frame')
         logout = iframe.locator('a:has-text("Log Out")').first
 
-        # Run _panel_js on the Log Out element with "Settings" as the item
-        panel_js = _panel_js('Settings')
-        result = logout.evaluate(panel_js)
+        # Run _PANEL_JS on the Log Out element with "Settings" as the item
+        result = logout.evaluate(_PANEL_JS, 'Settings')
 
         self.assertTrue(result, "Should find panel in iframe without baseline")
 
@@ -135,10 +147,14 @@ class TestProfilePanelNoBaseline(unittest.TestCase):
         page.click('#avatar')
         page.wait_for_selector('iframe#profile-frame')
 
-        # No Log Out element exists, so we can't run _panel_js
         iframe = page.frame('profile-frame')
         logout = iframe.locator('a:has-text("Log Out")')
         self.assertEqual(logout.count(), 0, "Log Out should not exist")
+
+        # Run the real panel lookup over the page and its frames
+        self.assertEqual(_profile_panels(page), [], "No panel without Log Out")
+        self.assertEqual(iframe.locator(_PANEL_SELECTOR).count(), 0)
+        self.assertEqual(page.locator(_PANEL_SELECTOR).count(), 0)
 
         page.close()
 
@@ -150,9 +166,8 @@ class TestProfilePanelNoBaseline(unittest.TestCase):
         # Find Log Out element
         logout = page.locator('a:has-text("Log Out")').first
 
-        # Run _panel_js with baseline
-        panel_js = _panel_js('Settings')
-        result = logout.evaluate(panel_js)
+        # Run _PANEL_JS with baseline
+        result = logout.evaluate(_PANEL_JS, 'Settings')
 
         self.assertTrue(result, "Should find panel with baseline")
 
@@ -170,9 +185,8 @@ class TestProfilePanelNoBaseline(unittest.TestCase):
         # Find Log Out element
         logout = page.locator('a:has-text("Log Out")').first
 
-        # Run _panel_js
-        panel_js = _panel_js('Settings')
-        result = logout.evaluate(panel_js)
+        # Run _PANEL_JS
+        result = logout.evaluate(_PANEL_JS, 'Settings')
 
         self.assertFalse(result, "Should reject container with global nav")
 
@@ -180,6 +194,45 @@ class TestProfilePanelNoBaseline(unittest.TestCase):
         panel = page.locator('[data-wv-profile-panel="1"]')
         self.assertEqual(panel.count(), 0, "Should not mark any panel")
 
+        page.close()
+
+    def test_profile_panels_finds_iframe_panel(self):
+        """Control for the not-found case: the same lookup finds the panel when Log Out is there."""
+        page = self.browser.new_page()
+        page.set_content(HTML_PANEL_IN_IFRAME)
+        page.click('#avatar')
+        page.wait_for_selector('iframe#profile-frame')
+
+        self.assertEqual(len(_profile_panels(page)), 1)
+        iframe = page.frame('profile-frame')
+        self.assertEqual(iframe.locator(_PANEL_SELECTOR).count(), 1)
+        self.assertEqual(iframe.locator('#panel[data-wv-profile-panel="1"]').count(), 1)
+        page.close()
+
+    def test_item_name_with_special_characters_matched_exactly(self):
+        """Quote, double quote, backslash and newline in the name are matched exactly."""
+        name = "Alpha's \"Beta\" \\ Gamma\nDelta"
+        page = self.browser.new_page()
+        page.set_content(HTML_SPECIAL_NAME)
+        page.evaluate(
+            """(name) => {
+                document.querySelector('#exact-item').textContent = name;
+                document.querySelector('#near-item').textContent = name.slice(0, -1);
+            }""",
+            name,
+        )
+        logout = page.locator('#logout-link')
+
+        result = logout.evaluate(_PANEL_JS, name)
+
+        self.assertTrue(result, "Exact special-character name should be found")
+        self.assertEqual(page.locator('#panel[data-wv-profile-panel="1"]').count(), 1)
+        self.assertEqual(page.locator(_PANEL_SELECTOR).count(), 1)
+
+        # A name that differs by one character finds nothing and does not throw
+        page.locator(_PANEL_SELECTOR).evaluate("(n) => n.removeAttribute('data-wv-profile-panel')")
+        self.assertFalse(logout.evaluate(_PANEL_JS, name + "x"))
+        self.assertEqual(page.locator(_PANEL_SELECTOR).count(), 0)
         page.close()
 
 
