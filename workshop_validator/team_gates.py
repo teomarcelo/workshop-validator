@@ -43,8 +43,10 @@ def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
 
 def _redact_stderr(stderr: str) -> str:
     """Redact email addresses and tokens from stderr; strip control chars; return first 5 lines."""
-    # Strip control characters (including ANSI escapes) before redacting
-    stripped = "".join(c for c in stderr if c >= " " or c in "\n\r\t")
+    # Strip control and format characters (Cc and Cf) except newline and tab
+    import unicodedata
+    stripped = "".join(c for c in stderr
+                      if unicodedata.category(c) not in ("Cc", "Cf") or c in "\n\t")
     redacted = EMAIL_PATTERN.sub("<email>", stripped)
     redacted = TOKEN_PATTERN.sub("<redacted>", redacted)
     # Also redact runs of 40+ chars from [A-Za-z0-9+/=._-]
