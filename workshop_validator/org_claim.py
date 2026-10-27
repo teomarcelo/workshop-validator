@@ -305,10 +305,9 @@ def _https_origin(url: str) -> tuple[str, int] | None:
         if parts.scheme.lower() != "https" or not parts.hostname:
             return None
         # Reject explicit port 0 or any non-443 explicit port
-        port = parts.port or 443
-        if parts.port is not None and port != 443:
+        if parts.port is not None and parts.port != 443:
             return None
-        return parts.hostname.lower(), port
+        return parts.hostname.lower(), parts.port or 443
     except ValueError:  # a malformed port
         return None
 
