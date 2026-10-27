@@ -345,6 +345,34 @@ class StepBoardTests(unittest.TestCase):
         self.assertNotIn("pass needs a check", page)
         self.assertNotIn("passes need a check", page)
 
+    def test_suspect_chip_uses_theme_tokens(self):
+        """Verify that suspect chip CSS reads colors from theme.py, not hardcoded values."""
+        from unittest.mock import patch
+        from workshop_validator import theme
+
+        # Patch theme colors with sentinel values
+        sentinel_bg = "#ff00ff"  # Magenta
+        sentinel_fg = "#00ff00"  # Green
+
+        original_light = theme.COLORS_LIGHT.copy()
+        patched_light = original_light.copy()
+        patched_light["chip_suspect_bg"] = sentinel_bg
+        patched_light["chip_suspect"] = sentinel_fg
+
+        with patch.object(theme, "COLORS_LIGHT", patched_light):
+            page, _board = html_for(
+                (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+                {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+            )
+
+        # Verify sentinel colors appear in the CSS
+        self.assertIn(sentinel_bg, page, "Suspect chip background color should come from theme.COLORS_LIGHT")
+        self.assertIn(sentinel_fg, page, "Suspect chip foreground color should come from theme.COLORS_LIGHT")
+
+        # Verify the old hardcoded colors are not present
+        self.assertNotIn("#fff4e0", page, "Should not have hardcoded background color")
+        self.assertNotIn("#9a6700", page, "Should not have hardcoded foreground color")
+
 
 if __name__ == "__main__":
     unittest.main()

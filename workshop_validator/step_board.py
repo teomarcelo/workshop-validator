@@ -32,7 +32,11 @@ _FAIL_REASONS = {
     "AUTH_BLOCKED": "Authentication or permissions blocked this step.",
     "NEEDS_REVIEW": "The step ran, but the result is not a pass.",
 }
-_DOCUMENT = """<!doctype html>
+
+
+def _get_document_template() -> str:
+    """Generate the document template with theme colors."""
+    template = """<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -177,8 +181,8 @@ h3 .badge { margin-left: 8px; vertical-align: 2px; }
   white-space: nowrap;
 }
 .chip.suspect {
-  background: #fff4e0;
-  color: #9a6700;
+  background: @@CHIP_SUSPECT_BG@@;
+  color: @@CHIP_SUSPECT@@;
 }
 label { display: block; font-weight: 600; margin: 16px 0 6px; }
 .fields label:first-child { margin-top: 0; }
@@ -330,6 +334,10 @@ if (form) {
 </body>
 </html>
 """
+    # Replace placeholders with theme colors
+    template = template.replace("@@CHIP_SUSPECT_BG@@", theme.COLORS_LIGHT["chip_suspect_bg"])
+    template = template.replace("@@CHIP_SUSPECT@@", theme.COLORS_LIGHT["chip_suspect"])
+    return template
 
 
 @dataclass(frozen=True)
@@ -541,7 +549,7 @@ def render_document(*, title: str, lede: str, body: str) -> str:
 
     Uses the original cream/serif template style for compatibility with existing code.
     """
-    page = _DOCUMENT.replace("@@TITLE@@", escape(title))
+    page = _get_document_template().replace("@@TITLE@@", escape(title))
     page = page.replace("@@LEDE@@", escape(lede))
     return page.replace("@@BODY@@", body)
 
