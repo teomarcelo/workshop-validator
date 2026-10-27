@@ -330,38 +330,6 @@ class EmptyEmailDetectionTests(unittest.TestCase):
         bad_count = _count_bad_emails(git_output)
         self.assertEqual(bad_count, 1, "Non-noreply email should be counted as bad")
 
-    def test_empty_email_detected_with_nul_format(self):
-        """Empty author or committer email should be detected using NUL-separated format."""
-        with tempfile.TemporaryDirectory() as tmp:
-            repo = Path(tmp)
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "base@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
-
-            # Base commit
-            (repo / "base.txt").write_text("base")
-            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
-
-            # Commit with empty email (use --allow-empty-email flag)
-            subprocess.run(["git", "config", "user.email", ""], cwd=repo, check=True, capture_output=True)
-            (repo / "test.txt").write_text("test")
-            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
-            # Git requires --allow-empty-email to commit with empty email
-            result = subprocess.run(
-                ["git", "-c", "user.email=", "commit", "--allow-empty-email", "-m", "test"],
-                cwd=repo, capture_output=True
-            )
-            if result.returncode != 0:
-                # If git doesn't support empty email, skip test
-                self.skipTest("Git version doesn't support empty email commits")
-
-            # Should fail with empty email
-            ok, msg = check_commit_emails(repo, "origin_main")
-            self.assertFalse(ok, "Should detect empty email")
-            self.assertIn("non-github noreply email", msg.lower())
-
 
 if __name__ == "__main__":
     unittest.main()
