@@ -1959,16 +1959,91 @@ OWN_VALUE_EMPTY = (
     "{label} is empty. The guide asks for the learner's own value, and the "
     "validator does not invent one."
 )
+OWN_VALUE_OPTIONAL = (
+    "{label} is empty. The guide asks for the learner's own value and does not "
+    "mark it mandatory, so it was left unchanged."
+)
+
+
+def _is_field_mandatory(step_text: str, label: str) -> bool:
+    """Check if the step text marks the field as mandatory.
+
+    Detection rules:
+    - Whole words "required" or "mandatory" anywhere in the step
+    - Word "must" when the same clause names the field label
+    """
+    text_lower = step_text.lower()
+    label_lower = label.lower()
+
+    # Check for "required" or "mandatory" as whole words
+    if re.search(r'\brequired\b', text_lower) or re.search(r'\bmandatory\b', text_lower):
+        return True
+
+    # Check for "must" in the same clause as the field label
+    # Split by sentence-ending punctuation and check each clause
+    for clause in re.split(r'[.;]', text_lower):
+        if 'must' in clause and label_lower in clause:
+            return True
+
+    return False
+
+
+def _is_editable_field(target) -> bool:
+    """Check if a target is an editable input field (not a header or label)."""
+    try:
+        # Check role first (textbox, combobox are editable)
+        role = target.get_attribute("role")
+        if role in ("textbox", "combobox"):
+            return True
+    except Exception:
+        # If we can't read the role, don't assume it's editable
+        pass
+
+    try:
+        # Check tag name (input, textarea are editable)
+        tag = target.evaluate("el => el.tagName.toLowerCase()")
+        if tag in ("input", "textarea"):
+            return True
+    except Exception:
+        # If we can't read the tag, don't assume it's editable
+        pass
+
+    return False
 
 
 def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | None:
     field = labeled(state.page, label)
-    target = None if field is None else _visible_match(field)
+    if field is None:
+        return None
+
+    # Find the first visible AND editable match
+    count = _count(field)
+    if count == 0:
+        return None
+    nth = getattr(field, "nth", None)
+    candidates = [nth(i) for i in range(min(count, 8))] if callable(nth) else [_first(field)]
+
+    target = None
+    for candidate in candidates:
+        try:
+            if hasattr(candidate, "is_visible") and not candidate.is_visible():
+                continue
+        except Exception:
+            continue
+        if _is_editable_field(candidate):
+            target = candidate
+            break
+
     if target is None:
         return None
+
     if _input(target).strip():
         return passed(step, f"already-set:{label}", OWN_VALUE_NOTE.format(label=label))
-    return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), ())
+    # Empty field: check if mandatory
+    step_text = step.text or ""
+    if _is_field_mandatory(step_text, label):
+        return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), (), freeze=True)
+    return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
 def _intent_for(text: str) -> _Intent:

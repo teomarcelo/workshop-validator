@@ -74,7 +74,7 @@ themselves. These stop the loop and are reported to the user.
 - **Renamed control:** after docs confirm and the auditor approves, an alias in
   `~/.workshop-validator/aliases.json` lets later steps run. The step stays FAIL.
 - **Already set by the org:** read, not clicked; PASS with `already-set:` evidence.
-- **Learner's own value** (`Email: (your email)`): kept if present, NEEDS_REVIEW if empty.
+- **Learner's own value** (`Email: (your email)`): kept if present; if empty and not marked mandatory, NOT_RUN and the walk continues; if empty and mandatory, NEEDS_REVIEW and the walk stops.
 - **Password / security answer:** NOT_RUN, including the Save that submits that form.
 - **Outside the browser** (Downloads folder, desktop): NOT_RUN, the walk continues.
 
