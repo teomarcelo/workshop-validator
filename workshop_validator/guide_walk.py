@@ -3732,6 +3732,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_scoped = _scoped_name_counts(state.page)
     before_counts = {t: before_scoped.get(t, 0) for t in target_names if len(t) > 3}
     before_dialogs = _count_visible_dialogs(state.page)
+    before_messages = _read_status_messages(state.page)
+    before_has_saved = _words_visible(state.page, "successfully saved")
 
     loc = _locator_for_name(state.page, name)
     if loc is None or not _click_locator(loc):
@@ -3741,129 +3743,154 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         if _in_setup(state.page):
             return None
 
-    # Capture after-state and verify the click had an effect
-    after_names = _visible_names_snapshot(state.page)
-    after_url = getattr(state.page, "url", "")
-    # Also capture occurrence counts for target names
-    after_scoped = _scoped_name_counts(state.page)
-    after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
-    after_dialogs = _count_visible_dialogs(state.page)
-
-    # Check for after-state evidence
+    # Poll for after-state evidence (banner may appear with delay)
+    start_time = state.clock()
     evidence_desc = None
+    after_names = frozenset()
 
-    # A dialog that was not visible before the click is now open.
-    if after_dialogs > before_dialogs:
-        evidence_desc = "after-state: dialog opened"
+    while not evidence_desc:
+        # Capture after-state and verify the click had an effect
+        after_names = _visible_names_snapshot(state.page)
+        after_url = getattr(state.page, "url", "")
+        # Also capture occurrence counts for target names
+        after_scoped = _scoped_name_counts(state.page)
+        after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
+        after_dialogs = _count_visible_dialogs(state.page)
 
-    # Check if dialog text was accepted (after clicking OK/Confirm)
-    accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
-    if not evidence_desc and accepted:
-        evidence_desc = "after-state: dialog text read"
+        # Check for after-state evidence
+        evidence_desc = None
 
-    # Check if success banner appeared (for Save/Submit buttons)
-    if not evidence_desc and _words_visible(state.page, "successfully saved"):
-        evidence_desc = "after-state: success message visible"
+        # A dialog that was not visible before the click is now open.
+        if after_dialogs > before_dialogs:
+            evidence_desc = "after-state: dialog opened"
 
-    # Check if clicked element has aria-selected/pressed/expanded = true
-    try:
-        target = _visible_match(loc)
-        if target:
-            for attr in ("aria-selected", "aria-pressed", "aria-expanded"):
-                value = target.get_attribute(attr)
-                if value and value.lower() == "true":
-                    attr_name = attr.replace("aria-", "")
-                    evidence_desc = f"after-state: {name} {attr_name}"
+        # Check if dialog text was accepted (after clicking OK/Confirm)
+        accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
+        if not evidence_desc and accepted:
+            evidence_desc = "after-state: dialog text read"
+
+        # Check if NEW success message appeared (for Save/Submit buttons)
+        if not evidence_desc:
+            after_messages = _read_status_messages(state.page)
+            new_messages = after_messages - before_messages
+            for msg in new_messages:
+                if _classify_save_message(msg) == "success":
+                    evidence_desc = "after-state: success message visible"
                     break
-    except Exception:
-        pass
 
-    # Check if URL changed (must be same host, not an error page, with target in URL/heading)
-    if not evidence_desc and before_url != after_url:
-        from urllib.parse import urlparse
-        before_parsed = urlparse(before_url)
-        after_parsed = urlparse(after_url)
+        # Fallback: page-wide check for NEW "successfully saved" (backward compatibility)
+        if not evidence_desc and not before_has_saved and _words_visible(state.page, "successfully saved"):
+            evidence_desc = "after-state: success message visible"
 
-        # Must be same host
-        if before_parsed.netloc == after_parsed.netloc:
-            # Check for error page indicators
-            page_text_lower = norm(_read_page_text(state.page))
-            is_error = any(indicator in page_text_lower for indicator in (
-                "error", "404", "insufficient privileges", "access denied",
-                "permission denied", "unauthorized"
-            ))
+        # Check if clicked element has aria-selected/pressed/expanded = true
+        if not evidence_desc:
+            try:
+                target = _visible_match(loc)
+                if target:
+                    for attr in ("aria-selected", "aria-pressed", "aria-expanded"):
+                        value = target.get_attribute(attr)
+                        if value and value.lower() == "true":
+                            attr_name = attr.replace("aria-", "")
+                            evidence_desc = f"after-state: {name} {attr_name}"
+                            break
+            except Exception:
+                pass
 
-            if not is_error:
-                # Check if target name appears in new URL or page heading/title using whole-token matching
-                # Get URL path/query and page title
-                after_url_lower = after_url.lower()
-                page_title_lower = norm(_page_title(state.page))
+        # Check if URL changed (must be same host, not an error page, with target in URL/heading)
+        if not evidence_desc and before_url != after_url:
+            from urllib.parse import urlparse
+            before_parsed = urlparse(before_url)
+            after_parsed = urlparse(after_url)
 
-                # Tokenize URL (path + query) and title on non-alphanumerics
-                url_tokens = set(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
-                title_tokens = _re_mod.findall(r'[a-z0-9]+', page_title_lower)
+            # Must be same host
+            if before_parsed.netloc == after_parsed.netloc:
+                # Check for error page indicators
+                page_text_lower = norm(_read_page_text(state.page))
+                is_error = any(indicator in page_text_lower for indicator in (
+                    "error", "404", "insufficient privileges", "access denied",
+                    "permission denied", "unauthorized"
+                ))
 
-                # Filter out common tokens
-                ignored = {"salesforce", "lightning", "force", "com"}
-                url_tokens -= ignored
-                title_tokens = [t for t in title_tokens if t not in ignored]
+                if not is_error:
+                    # Check if target name appears in new URL or page heading/title using whole-token matching
+                    # Get URL path/query and page title
+                    after_url_lower = after_url.lower()
+                    page_title_lower = norm(_page_title(state.page))
 
-                # Check if any target name matches using whole-token matching
-                found_in_url = False
-                found_in_heading = False
-                for target_name in target_names:
-                    # Targets shorter than 3 chars never use URL/title evidence
-                    if len(target_name) < 3:
-                        continue
+                    # Tokenize URL (path + query) and title on non-alphanumerics
+                    url_tokens = set(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
+                    title_tokens = _re_mod.findall(r'[a-z0-9]+', page_title_lower)
 
-                    # Tokenize target name
-                    target_tokens = _re_mod.findall(r'[a-z0-9]+', target_name)
-                    if not target_tokens:
-                        continue
+                    # Filter out common tokens
+                    ignored = {"salesforce", "lightning", "force", "com"}
+                    url_tokens -= ignored
+                    title_tokens = [t for t in title_tokens if t not in ignored]
 
-                    # Check if all target tokens appear in URL in order
-                    if len(target_tokens) == 1 and target_tokens[0] in url_tokens:
-                        found_in_url = True
-                        break
-                    elif len(target_tokens) > 1:
-                        # For multi-token targets, check if all appear in sequence OR concatenated as one token
-                        url_str = ' '.join(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
-                        target_str = ' '.join(target_tokens)
-                        concatenated = ''.join(target_tokens)
-                        if target_str in url_str or concatenated in url_tokens:
+                    # Check if any target name matches using whole-token matching
+                    found_in_url = False
+                    found_in_heading = False
+                    for target_name in target_names:
+                        # Targets shorter than 3 chars never use URL/title evidence
+                        if len(target_name) < 3:
+                            continue
+
+                        # Tokenize target name
+                        target_tokens = _re_mod.findall(r'[a-z0-9]+', target_name)
+                        if not target_tokens:
+                            continue
+
+                        # Check if all target tokens appear in URL in order
+                        if len(target_tokens) == 1 and target_tokens[0] in url_tokens:
                             found_in_url = True
                             break
+                        elif len(target_tokens) > 1:
+                            # For multi-token targets, check if all appear in sequence OR concatenated as one token
+                            url_str = ' '.join(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
+                            target_str = ' '.join(target_tokens)
+                            concatenated = ''.join(target_tokens)
+                            if target_str in url_str or concatenated in url_tokens:
+                                found_in_url = True
+                                break
 
-                    # Check if all target tokens appear in title in order
-                    if len(target_tokens) == 1 and target_tokens[0] in title_tokens:
-                        found_in_heading = True
-                        break
-                    elif len(target_tokens) > 1:
-                        title_str = ' '.join(title_tokens)
-                        target_str = ' '.join(target_tokens)
-                        concatenated = ''.join(target_tokens)
-                        if target_str in title_str or concatenated in title_tokens:
+                        # Check if all target tokens appear in title in order
+                        if len(target_tokens) == 1 and target_tokens[0] in title_tokens:
                             found_in_heading = True
                             break
+                        elif len(target_tokens) > 1:
+                            title_str = ' '.join(title_tokens)
+                            target_str = ' '.join(target_tokens)
+                            concatenated = ''.join(target_tokens)
+                            if target_str in title_str or concatenated in title_tokens:
+                                found_in_heading = True
+                                break
 
-                if found_in_url or found_in_heading:
-                    evidence_desc = "after-state: url changed"
-                # else: no evidence, will fall through to NEEDS_REVIEW
+                    if found_in_url or found_in_heading:
+                        evidence_desc = "after-state: url changed"
+                    # else: no evidence, will fall through to poll or timeout
 
-    # Check if new names appeared that match target_names, or if target name occurrence increased
-    if not evidence_desc:
-        # A target name newly shown, or shown more times (a field placed on the canvas
-        # while it stays in the palette). Counts leave out menus, listboxes and popups
-        # and use the canvas when present, so a dropdown repeating the name is not evidence.
-        for target in sorted(target_names):
-            if len(target) > 3 and after_counts.get(target, 0) > before_counts.get(target, 0):
-                evidence_desc = f"after-state: {target} appeared"
-                break
+        # Check if new names appeared that match target_names, or if target name occurrence increased
+        if not evidence_desc:
+            # A target name newly shown, or shown more times (a field placed on the canvas
+            # while it stays in the palette). Counts leave out menus, listboxes and popups
+            # and use the canvas when present, so a dropdown repeating the name is not evidence.
+            for target in sorted(target_names):
+                if len(target) > 3 and after_counts.get(target, 0) > before_counts.get(target, 0):
+                    evidence_desc = f"after-state: {target} appeared"
+                    break
 
-    # If no evidence of change, return NEEDS_REVIEW
-    if not evidence_desc:
-        note = f"Clicked {name}, but no change could be read from the page."
-        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+        # If evidence found, break out of polling loop
+        if evidence_desc:
+            break
+
+        # Check if timeout reached
+        elapsed = state.clock() - start_time
+        if elapsed >= state.timeout_s:
+            # Timeout reached, return NEEDS_REVIEW
+            note = f"Clicked {name}, but no change could be read from the page."
+            return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+
+        # Sleep and continue polling
+        _sleep(state, state.interval_s)
 
     # PASS with after-state evidence
     snapshot = _read_page_text(state.page)
