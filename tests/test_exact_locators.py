@@ -625,7 +625,7 @@ class ExactLocatorTests(unittest.TestCase):
             page=page, timeout_s=30, interval_s=0.1, clock=clock, sleeper=clock.sleep,
             page_wait_s=2, page_poll_s=0.1,
         )
-        state.home = "https://test123.my.salesforce.com"
+        state.home = "https://example.my.salesforce.com"
         return state
 
     def _make_step(self):
