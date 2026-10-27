@@ -3787,7 +3787,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
-    # wait for a delayed banner. Other buttons: also require NEW success messages (V11).
+    # wait for a delayed banner. Other buttons: old behavior (can be pre-existing).
     is_save_submit = norm(name) in _SAVE_SUBMIT_NAMES
     if not evidence_desc:
         if is_save_submit:
