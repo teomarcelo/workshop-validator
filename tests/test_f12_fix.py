@@ -112,7 +112,8 @@ class WatchdogCheckOSErrorTests(unittest.TestCase):
                 result = team_kit.watchdog_check(repo, team)
                 # watchdog_check returns a formatted string like "TAKEOVER STALLED: ..."
                 self.assertIn("STALLED", result)
-                self.assertIn("OSError checking main checkout", result)
+                # F14 changed this to catch any Exception, not just OSError
+                self.assertIn("Exception checking main checkout", result)
 
 
 class NoreplyPatternFullmatchTests(unittest.TestCase):
