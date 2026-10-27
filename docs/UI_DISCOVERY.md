@@ -12,6 +12,8 @@ For click and fill actions, the validator uses this priority order to locate con
 
 1. **Role with exact accessible name**: `get_by_role(role, name=name, exact=True)`
 2. **Exact text**: `get_by_text(text, exact=True)`
-3. **Test ID**: `get_by_test_id(id)` when present
+3. **Exact placeholder**: `get_by_placeholder(text, exact=True)`
+4. **Test ID**: `get_by_test_id(id)` when present
+5. **CSS selectors with exact attribute equality**: `[attribute='value']`, never `[attribute*='value']` or case-insensitive `i` flag
 
-Regex patterns and partial text matches are not used for action targets. If the exact name is not found, the step ends with UI_MISMATCH or NEEDS_REVIEW, never by clicking a look-alike control.
+Regex patterns, partial text matches, substring attribute matches (`*=`), unquoted `text=` selectors, and case-insensitive selectors are not used for action targets. If the exact name is not found, the step ends with UI_MISMATCH or NEEDS_REVIEW, never by clicking a look-alike control.

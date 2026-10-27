@@ -90,3 +90,4 @@ jobs:
           python -m unittest discover -s tests -p test_discovery.py -v
           python -m unittest discover -s tests -p test_necessity_browser.py -v
           python -m unittest discover -s tests -p test_private_runner.py -v
+          python -m unittest discover -s tests -p test_exact_locators.py -v

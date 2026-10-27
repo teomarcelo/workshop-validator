@@ -680,10 +680,10 @@ def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
 
 def _quick_find(page):
     finders = (
-        lambda root: root.get_by_placeholder("Quick Find"),
-        lambda root: root.get_by_placeholder("Search Setup"),
+        lambda root: root.get_by_placeholder("Quick Find", exact=True),
+        lambda root: root.get_by_placeholder("Search Setup", exact=True),
         lambda root: root.locator("input[title='Quick Find']"),
-        lambda root: _by_role(root, "searchbox", "Quick Find", exact=False),
+        lambda root: _by_role(root, "searchbox", "Quick Find", exact=True),
     )
     for root in _roots(page):
         for finder in finders:
@@ -1805,13 +1805,6 @@ def _locator_for_name(page, name: str):
                 return loc
         try:
             loc = root.get_by_text(name, exact=True)
-        except Exception:
-            loc = None
-        if loc is not None and _visible(loc):
-            return loc
-    if _html_has(page, name):
-        try:
-            loc = page.locator(f"text={name}")
         except Exception:
             loc = None
         if loc is not None and _visible(loc):
@@ -2970,11 +2963,10 @@ def _open_add_element(page) -> None:
             continue
         try:
             loc = root.locator(
-                "[title='Add Element' i], [aria-label='Add Element' i], "
-                "[title='Add To Flow' i], [aria-label='Add To Flow' i], "
-                "button[title*='Add Element' i], button[aria-label*='Add Element' i], "
-                "button[aria-label*='Add To Flow' i], "
-                "[class*='add-element'] button, button[class*='add-element']"
+                "[title='Add Element'], [aria-label='Add Element'], "
+                "[title='Add To Flow'], [aria-label='Add To Flow'], "
+                "button[title='Add Element'], button[aria-label='Add Element'], "
+                "button[aria-label='Add To Flow']"
             )
         except Exception:
             continue
