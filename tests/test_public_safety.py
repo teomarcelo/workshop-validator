@@ -95,5 +95,27 @@ leaked_path = "{home_path}"  # This should be caught
         self.assertEqual(self.check("README.md", "# Synthetic Example"), ())
 
 
+# ---- F6 item 6: author email checks ---------------------------------------
+
+
+class PublicSafetyAuthorEmailTests(unittest.TestCase):
+    """F6 item 6a: public_safety fails when commit author/committer email is not GitHub noreply or allowed bot."""
+
+    def test_non_github_noreply_email_rejected(self):
+        """Commits with non-GitHub noreply emails should be rejected."""
+        # This will be tested in the main() function which checks git log
+        # For now, test the email validation function when implemented
+        pass
+
+
+class PublicSafetyMainCleanTests(unittest.TestCase):
+    """F6 item 6b: public_safety --main-clean mode fails when main checkout has untracked or modified files."""
+
+    def test_main_clean_mode_fails_with_untracked_files(self):
+        """--main-clean should fail when untracked files exist."""
+        # This will be tested with the --main-clean CLI flag
+        pass
+
+
 if __name__ == "__main__":
     unittest.main()

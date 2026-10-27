@@ -31,6 +31,7 @@ VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b"
 PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
+OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -44,6 +45,11 @@ def _git(repo: Path, *args: str, check=True, runner=None) -> str:
         raise subprocess.CalledProcessError(result.returncode, ["git", *args],
                                             result.stdout, result.stderr)
     return result.stdout or ""
+
+
+def is_valid_oid(oid: str | None) -> bool:
+    """Validate that oid is exactly 40 hex characters."""
+    return bool(oid and OID_PATTERN.match(str(oid).strip().lower()))
 
 
 # ---- pure checks (unit tested) ---------------------------------------------
@@ -295,8 +301,8 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         return 2
     head = info.get("headRefName") or ""
     head_oid = str(info.get("headRefOid") or "").strip()
-    if not head_oid:
-        print(f"merge-when-green: REFUSED PR #{pr} has no headRefOid to pin the merge to")
+    if not head_oid or not is_valid_oid(head_oid):
+        print(f"merge-when-green: REFUSED PR #{pr} has no valid headRefOid to pin the merge to")
         return 2
     if not head.startswith("automation/"):
         print("merge-when-green: REFUSED head branch is not automation/*")
@@ -323,15 +329,25 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     if dry_run:
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
         return 0
-    merged = run(["gh", "pr", "merge", str(pr), "--squash", "--delete-branch",
+    merged = run(["gh", "pr", "merge", str(pr), "--squash",
                   "--match-head-commit", head_oid], repo)
     if merged.returncode:
-        print(f"merge-when-green: FAIL gh pr merge exited {merged.returncode}")
-        return 1
-    view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit", runner=runner) or {}
-    sha = (view.get("mergeCommit") or {}).get("oid", "")
+        # Read PR state to check if it was merged despite non-zero exit
+        pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "state,mergeCommit", runner=runner) or {}
+        if pr_view.get("state") == "MERGED":
+            # Continue - PR was merged successfully
+            pass
+        else:
+            print(f"merge-when-green: FAIL gh pr merge exited {merged.returncode}")
+            return 1
+    else:
+        pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit", runner=runner) or {}
+
+    sha = (pr_view.get("mergeCommit") or {}).get("oid", "")
     result = wait_main_ci(repo, sha, runner=runner) if sha else "timeout"
     if result == "success":
+        # Delete remote branch after successful merge
+        run(["git", "push", "origin", "--delete", head], repo)
         print(f"merge-when-green: MERGED PR #{pr}, main CI green")
         return 0
     if result == "failure":
@@ -379,24 +395,46 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         dirty = _git(path, "status", "--porcelain", check=False, runner=runner).strip() if path.is_dir() else ""
         commit_time = team_kit._branch_commit_time(repo, branch)
         idle = worktree_idle_time(path, commit_time)
-        merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--head", branch,
-                              "--json", "number,headRefOid", runner=runner) or []
-        # Only delete branch if its current oid matches the merged PR's headRefOid
+
+        # Worktree-agent-* branches never match PR heads, check origin/main ancestry
+        if branch.startswith("worktree-agent-"):
+            merged_prs = []  # Don't look for PRs
+        else:
+            merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--base", "main",
+                                  "--json", "number,headRefOid", runner=runner) or []
+
         branch_oid = _git(repo, "rev-parse", branch, check=False, runner=runner).strip() if branch else ""
-        safe_to_delete = bool(branch_oid) and any(pr.get("headRefOid") == branch_oid for pr in merged_prs)
-        # Also check if branch tip is an ancestor of any merged PR's headRefOid
-        if not safe_to_delete and branch_oid and merged_prs:
+        safe_to_delete = False
+
+        if branch_oid and is_valid_oid(branch_oid):
+            # Check exact match with merged PR headRefOid
             for pr in merged_prs:
                 pr_oid = pr.get("headRefOid")
-                if pr_oid:
-                    # Try to fetch the oid (may fail if it's been GC'd)
-                    _git(repo, "fetch", "origin", pr_oid, check=False, runner=runner)
-                    # Check if branch_oid is ancestor of pr_oid
-                    run = runner or _default_runner
-                    result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
-                    if result.returncode == 0:
-                        safe_to_delete = True
-                        break
+                if pr_oid and is_valid_oid(pr_oid) and pr_oid == branch_oid:
+                    safe_to_delete = True
+                    break
+
+            # Also check if branch tip is an ancestor of any merged PR's headRefOid
+            if not safe_to_delete and merged_prs:
+                for pr in merged_prs:
+                    pr_oid = pr.get("headRefOid")
+                    if pr_oid and is_valid_oid(pr_oid):
+                        # Try to fetch the oid (may fail if it's been GC'd)
+                        _git(repo, "fetch", "origin", pr_oid, check=False, runner=runner)
+                        # Check if branch_oid is ancestor of pr_oid
+                        run = runner or _default_runner
+                        result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
+                        if result.returncode == 0:
+                            safe_to_delete = True
+                            break
+
+            # For worktree-agent-* branches or if no merged PR, check origin/main ancestry
+            if not safe_to_delete:
+                run = runner or _default_runner
+                result = run(["git", "merge-base", "--is-ancestor", branch_oid, "origin/main"], repo)
+                if result.returncode == 0:
+                    safe_to_delete = True
+
         if dirty or idle < idle_hours or not safe_to_delete:
             kept += 1
             continue

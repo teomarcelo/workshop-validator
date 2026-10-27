@@ -69,6 +69,11 @@ def load_plan(team: Path) -> dict:
 
 
 def save_plan(team: Path, plan: dict, now=None) -> None:
+    # Check for duplicate step ids
+    step_ids = [step.get("id") for step in plan.get("steps", []) if step.get("id")]
+    if len(step_ids) != len(set(step_ids)):
+        duplicates = [sid for sid in set(step_ids) if step_ids.count(sid) > 1]
+        raise ValueError(f"duplicate step ids: {', '.join(duplicates)}")
     for step in plan.get("steps", []):
         if step.get("state") not in STATES:
             raise ValueError(f"step {step.get('id')}: state must be one of {STATES}")
@@ -368,6 +373,50 @@ def _read_time_iso(value) -> datetime | None:
         return None
 
 
+# ---- decide register row ---------------------------------------------------
+
+VALID_DECISION_STATUSES = ("NOTED", "RESOLVED", "REVISIT", "DEFERRED")
+
+
+def append_decision(team: Path, decision_id: str, decision_status: str, text: str, now=None) -> Path:
+    """Append one decision row to DECISIONS.md and render dashboard."""
+    if not decision_id or not decision_id.startswith("W-"):
+        raise ValueError("decision_id must start with 'W-'")
+    if decision_status not in VALID_DECISION_STATUSES:
+        raise ValueError(f"status must be one of {VALID_DECISION_STATUSES}")
+    if not text or not text.strip():
+        raise ValueError("text cannot be empty")
+
+    register = team / "DECISIONS.md"
+    existing = register.read_text(encoding="utf-8") if register.is_file() else ""
+
+    # Check for duplicate id
+    if f"| {decision_id} |" in existing:
+        raise ValueError(f"decision {decision_id} already exists in register")
+
+    date_str = _utc(now).strftime("%Y-%m-%d")
+    row = f"| {decision_id} | {date_str} | {decision_status} | {text.strip()} |\n"
+
+    _write_private(register, existing + row)
+
+    # Render dashboard
+    from .team_dashboard import render
+    plan = load_plan(team)
+    chain_state, reason = status(team.parent if (team.parent / "repo").is_dir() else Path.cwd(), team, now)
+    # Load decisions for dashboard
+    decisions = []
+    for line in (existing + row).splitlines():
+        if line.strip().startswith("|") and not line.strip().startswith("| ID |"):
+            parts = [p.strip() for p in line.split("|")]
+            if len(parts) >= 5:
+                decisions.append(parts[1:5])  # ID, Date, Status, Text
+    dashboard_path = team / "dashboard.html"
+    html = render(plan, chain_state, reason, [], decisions, _utc(now))
+    _write_private(dashboard_path, html)
+
+    return register
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Producer-team plan, ledger and chain status.")
     parser.add_argument("--private-root", default=None)
@@ -391,6 +440,10 @@ def main(argv: list[str] | None = None) -> int:
     rev.add_argument("--pr", type=int, required=True)
     rev.add_argument("--role", required=True)
     rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
+    dec = sub.add_parser("decide", help="Append decision row and render dashboard")
+    dec.add_argument("--id", required=True, help="Decision ID (e.g., W-001)")
+    dec.add_argument("--status", required=True, help="Decision status (NOTED, RESOLVED, REVISIT, DEFERRED)")
+    dec.add_argument("--text", required=True, help="Decision text")
     args = parser.parse_args(argv)
 
     team = team_root(Path(args.private_root).expanduser() if args.private_root else None)
@@ -431,6 +484,14 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(f"review: saved {path.name} for HEAD {args.head.strip().lower()[:10]}")
         return 0
+    if args.cmd == "decide":
+        try:
+            path = append_decision(team, args.id, args.status, args.text)
+            print(f"Decision {args.id} appended, dashboard rendered")
+            return 0
+        except ValueError as exc:
+            print(f"decide: REFUSED {exc}", file=sys.stderr)
+            return 1
     if args.cmd == "claim":
         claim_producer(team)
         print("producer-live claimed (pending session)")
