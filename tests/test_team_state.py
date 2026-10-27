@@ -2,12 +2,14 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
 import json
 import tempfile
 import unittest
 
 from workshop_validator.team_state import (
     PHASES,
+    _write_private,
     acquire_lock,
     advance,
     finish,
@@ -140,6 +142,50 @@ class TestTeamState(unittest.TestCase):
         self.assertEqual(log_path.stat().st_mode & 0o777, 0o600)
         team_dir = self.root / "team"
         self.assertEqual(team_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_write_private_atomic_on_failure(self):
+        """Crash after write leaves old content intact (atomic version only).
+
+        Fails on 53801f2: target file gets new content, then chmod fails.
+        Passes on atomic version: old content preserved when os.replace fails.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "target.json"
+            original_content = '{"original": "content"}'
+            target.write_text(original_content)
+
+            # Patch path.chmod to fail (53801f2 calls this after write_text)
+            # Patch os.replace to fail (atomic version calls this)
+            original_chmod = Path.chmod
+            chmod_calls = []
+
+            def failing_chmod(self, *args, **kwargs):
+                chmod_calls.append(str(self))
+                if self == target:
+                    # On 53801f2: chmod is called on target after write succeeded
+                    raise IOError("Simulated crash during chmod")
+                return original_chmod(self, *args, **kwargs)
+
+            def failing_replace(src, dst):
+                # On atomic version: os.replace is called instead of chmod on target
+                raise IOError("Simulated crash during os.replace")
+
+            with mock.patch.object(Path, 'chmod', failing_chmod):
+                with mock.patch('os.replace', failing_replace):
+                    try:
+                        _write_private(target, '{"new": "content"}')
+                        self.fail("Expected IOError")
+                    except IOError:
+                        pass
+
+            # Check result
+            current_content = target.read_text()
+
+            # On 53801f2: target was written with new content, then chmod failed
+            # Target now has new content = '{"new": "content"}' (fails this assertion)
+            # On atomic version: os.replace failed, target still has old content (passes)
+            self.assertEqual(current_content, original_content,
+                           "Atomic write should preserve old content on failure")
 
 
 if __name__ == "__main__":

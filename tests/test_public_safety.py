@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -93,6 +94,116 @@ leaked_path = "{home_path}"  # This should be caught
     def test_clean_synthetic_content_passes(self):
         self.assertEqual(self.check("test.py", "def example(): pass"), ())
         self.assertEqual(self.check("README.md", "# Synthetic Example"), ())
+
+
+# ---- F6 item 6: author email checks ---------------------------------------
+
+
+class PublicSafetyAuthorEmailTests(unittest.TestCase):
+    """F6 item 6a: public_safety fails when commit author/committer email is not GitHub noreply or allowed bot."""
+
+    def test_non_github_noreply_email_rejected(self):
+        """Commits with non-GitHub noreply emails should be rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create base commit on origin/main
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Change email and create a new commit
+            subprocess.run(["git", "config", "user.email", "someone@host.internal.example"], cwd=repo, check=True, capture_output=True)
+            (repo / "test.txt").write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test"], cwd=repo, check=True, capture_output=True)
+
+            # Check should fail (without printing email/domain per F6-fix item 5)
+            from workshop_validator.public_safety import check_commit_emails
+            ok, msg = check_commit_emails(repo, "origin_main")
+            self.assertFalse(ok)
+            # Should NOT print email or domain
+            self.assertNotIn("internal.example", msg)
+            self.assertNotIn("someone@", msg)
+            # Should print count only (case insensitive)
+            self.assertIn("non-github noreply email", msg.lower())
+
+    def test_github_noreply_email_accepted(self):
+        """Commits with GitHub noreply emails should be accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "base@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create base commit on origin/main
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Create a new commit with GitHub noreply email
+            subprocess.run(["git", "config", "user.email", "1+x@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+            (repo / "test.txt").write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test"], cwd=repo, check=True, capture_output=True)
+
+            # Check should pass
+            from workshop_validator.public_safety import check_commit_emails
+            ok, msg = check_commit_emails(repo, "origin_main")
+            self.assertTrue(ok)
+
+
+class PublicSafetyMainCleanTests(unittest.TestCase):
+    """F6 item 6b: public_safety --main-clean mode fails when main checkout has untracked or modified files."""
+
+    def test_main_clean_mode_fails_with_untracked_files(self):
+        """--main-clean should fail when untracked files exist."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create initial commit
+            (repo / "tracked.txt").write_text("tracked")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+
+            # Add untracked file
+            (repo / "untracked.txt").write_text("untracked")
+
+            # Check should fail
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(repo)
+            self.assertFalse(ok)
+            self.assertIn("untracked or modified", msg)
+
+    def test_main_clean_mode_passes_on_clean_tree(self):
+        """--main-clean should pass when tree is clean."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create initial commit
+            (repo / "tracked.txt").write_text("tracked")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+
+            # Check should pass
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(repo)
+            self.assertTrue(ok)
 
 
 if __name__ == "__main__":

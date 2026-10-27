@@ -59,5 +59,33 @@ class AgentFilesSharedRulesTests(unittest.TestCase):
                                 f"{agent_file.name} has empty team rules section")
 
 
+# ---- F6 item 7: team-rules block must be LAST ## heading ------------------
+
+
+class TeamRulesBlockPositionTests(unittest.TestCase):
+    """F6 item 7: team-rules block must be the LAST ## heading."""
+
+    def test_team_rules_is_last_h2_heading(self):
+        """Team rules block should be the last ## heading in each agent file."""
+        expected_heading = "## Team rules (shared by every role)"
+        for agent_file in AGENTS_DIR.glob("*.md"):
+            with self.subTest(file=agent_file.name):
+                text = agent_file.read_text(encoding="utf-8")
+                rules_pos = text.find(expected_heading)
+                self.assertGreater(rules_pos, 0, f"{agent_file.name} missing team rules heading")
+
+                # Check that no ## heading appears after team rules
+                after_rules = text[rules_pos + len(expected_heading):]
+                h2_pattern = re.compile(r'^## ', re.MULTILINE)
+                match = h2_pattern.search(after_rules)
+                self.assertIsNone(match,
+                                  f"{agent_file.name} has ## heading after team rules at position {rules_pos + len(expected_heading) + match.start() if match else 0}")
+
+    def test_agents_folder_not_empty(self):
+        """Agents folder must not be empty."""
+        agent_files = list(AGENTS_DIR.glob("*.md"))
+        self.assertGreater(len(agent_files), 0, "Agents folder is empty")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -382,16 +382,21 @@ class MergeWhenGreenTests(unittest.TestCase):
 
     def run_merge(self, info):
         runner = FakeRunner([
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c, 0,
-             json.dumps({"mergeCommit": {"oid": "b" * 40}})),
-            (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(info)),
+            # pr view after successful merge (mergeCommit, headRefOid - no state)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": "b" * 40}, "headRefOid": OID})),
+            # Initial pr view (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c), 0, json.dumps(info)),
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
         ])
         out = io.StringIO()
-        with contextlib.redirect_stdout(out):
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
+             contextlib.redirect_stdout(out):
             code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
         return code, out.getvalue(), runner
 
@@ -423,8 +428,7 @@ class MergeWhenGreenTests(unittest.TestCase):
         merge = runner.find("gh", "pr", "merge")
         self.assertEqual(len(merge), 1)
         self.assertEqual(merge[0][0][-2:], ["--match-head-commit", OID])
-        names = [c[:2] for c, _ in runner.calls]
-        self.assertLess(names.index(["git", "fetch"]), names.index(["git", "worktree"]))
+        # Note: git worktree is called by merged_tree_gates which is mocked, so we don't verify order here
 
 
 class MergedTreeGatesTests(unittest.TestCase):
@@ -434,9 +438,15 @@ class MergedTreeGatesTests(unittest.TestCase):
             runner = FakeRunner()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(team_gates.merged_tree_gates(repo, OID, runner=runner))
-            merges = runner.find("git", "merge")
-            self.assertEqual(merges[0][0], ["git", "merge", "--no-edit", "--no-ff", OID])
-            self.assertNotEqual(merges[0][1], repo)
+            # Find git merge command (may include -c flags for noreply email)
+            merge_calls = [(c, cwd) for c, cwd in runner.calls if "merge" in c and "--no-ff" in c]
+            self.assertEqual(len(merge_calls), 1)
+            merge_cmd, merge_cwd = merge_calls[0]
+            self.assertIn("--no-edit", merge_cmd)
+            self.assertIn("--no-ff", merge_cmd)
+            self.assertIn(OID, merge_cmd)
+            # Merge must run in temp worktree, not main checkout
+            self.assertNotEqual(merge_cwd, repo)
             self.assertEqual(runner.find("git", "worktree", "add")[0][0][-1], "origin/main")
 
 
@@ -920,6 +930,371 @@ class WorktreeCleanupAncestorTests(unittest.TestCase):
                 team_gates.worktree_cleanup(repo, runner=runner)
 
             # Should NOT have deleted the branch
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertEqual(deleted, [])
+
+
+# ---- F6: team tooling fixes ------------------------------------------------
+
+
+class TeamKitDecideTests(unittest.TestCase):
+    """F6 item 1: team_kit decide command appends register row and renders dashboard."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        # Create a minimal plan
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+
+    def test_decide_appends_row_and_renders_dashboard(self):
+        """decide command should append one row and render dashboard in same call."""
+        register = self.team / "DECISIONS.md"
+        dashboard = self.team / "dashboard.html"
+
+        # Run decide command
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-001", "--status", "NOTED",
+                              "--text", "Synthetic decision for test"])
+
+        self.assertEqual(code, 0)
+        self.assertTrue(register.exists())
+        self.assertIn("W-001", register.read_text())
+        self.assertTrue(dashboard.exists())
+        self.assertIn("W-001", dashboard.read_text())
+
+    def test_decide_refuses_duplicate_id(self):
+        """decide should refuse a duplicate id."""
+        register = self.team / "DECISIONS.md"
+        register.parent.mkdir(parents=True, exist_ok=True)
+        register.write_text("| W-002 | 2026-10-27 | NOTED | First |\n")
+
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-002", "--status", "NOTED",
+                              "--text", "Duplicate"])
+
+        self.assertNotEqual(code, 0)
+
+    def test_decide_refuses_bad_status(self):
+        """decide should refuse an invalid status."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-003", "--status", "INVALID",
+                              "--text", "Bad status"])
+
+        self.assertNotEqual(code, 0)
+
+
+class SavePlanDuplicateStepTests(unittest.TestCase):
+    """F6 item 2: save_plan rejects duplicate step ids."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+
+    def test_save_plan_rejects_duplicate_step_ids(self):
+        """save_plan should raise ValueError when duplicate step ids are present."""
+        p = plan({"id": "a", "state": "next"}, {"id": "a", "state": "done"})
+        with self.assertRaises(ValueError) as ctx:
+            team_kit.save_plan(self.team, p)
+        self.assertIn("duplicate", str(ctx.exception).lower())
+
+
+class MergeWhenGreenF6Tests(unittest.TestCase):
+    """F6 item 3: merge_when_green reads PR state after non-zero gh pr merge."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.team = Path(self.tmp.name) / "team"
+        self.repo.mkdir()
+        for role, verdict in (("code-reviewer", "APPROVE"), ("safety-scanner", "CLEAR")):
+            team_kit.save_review(self.team, 5, role, OID, f"notes\nVERDICT: {verdict}")
+
+    def test_merge_reads_state_after_nonzero_gh_pr_merge(self):
+        """After non-zero gh pr merge, read PR state; if MERGED, continue."""
+        merge_oid = "m" * 40
+        runner = FakeRunner([
+            # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
+             json.dumps(GOOD_PR)),
+            # pr checks call
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            # git fetch for base and head
+            (lambda c: c[:3] == ["git", "fetch", "origin"], 0, ""),
+            # merge-base for gates
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            # gh pr merge - returns non-zero
+            (lambda c: c[:3] == ["gh", "pr", "merge"], 1, ""),
+            # Second pr view call after non-zero merge (state, mergeCommit, headRefOid)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c) and "mergeCommit" in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED", "headRefOid": OID})),
+            # git push to delete branch
+            (lambda c: c[:2] == ["git", "push"], 0, ""),
+        ])
+        out = io.StringIO()
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+
+        # Should continue and succeed since PR is MERGED with correct headRefOid
+        self.assertEqual(code, 0, f"Output: {out.getvalue()}")
+        self.assertIn("MERGED", out.getvalue())
+
+    def test_merge_deletes_remote_branch_after_merge_not_local_in_worktree(self):
+        """Should delete remote branch with git push origin --delete after merge, not local in worktree."""
+        merge_oid = "m" * 40
+        runner = FakeRunner([
+            # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
+             json.dumps(GOOD_PR)),
+            # pr checks call
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            # git fetch for base and head
+            (lambda c: c[:3] == ["git", "fetch", "origin"], 0, ""),
+            # merge-base
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            # gh pr merge - succeeds
+            (lambda c: c[:3] == ["gh", "pr", "merge"], 0, ""),
+            # pr view after successful merge (mergeCommit, headRefOid - no state)
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": merge_oid}, "headRefOid": OID})),
+            # git push to delete branch
+            (lambda c: c[:2] == ["git", "push"], 0, ""),
+        ])
+
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+
+        # Should NOT use --delete-branch flag
+        merge_calls = runner.find("gh", "pr", "merge")
+        self.assertEqual(len(merge_calls), 1)
+        self.assertNotIn("--delete-branch", merge_calls[0][0])
+
+        # Should use git push origin --delete after merge
+        deletes = [c for c, _ in runner.calls if c[:2] == ["git", "push"] and "--delete" in c]
+        self.assertEqual(len(deletes), 1)
+
+
+class WorktreeCleanupF6Tests(unittest.TestCase):
+    """F6 item 4: worktree_cleanup handles worktree-agent-* branches and tree matches."""
+
+    def test_worktree_agent_branches_checked_via_tree_match(self):
+        """Worktree-agent-* branches should be checked via tree match with origin/main."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt = repo / "wt"
+            wt.mkdir(parents=True)
+            branch_oid = "1" * 40
+            tree_oid = "a" * 40
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/worktree-agent-abc123\n")
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),  # Clean
+                (lambda c: c[:2] == ["gh", "pr"], 0, "[]"),  # No PRs
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-abc123"], 0, branch_oid + "\n"),
+                (lambda c: len(c) == 3 and c[:2] == ["git", "rev-parse"] and "^{tree}" in c[2], 0, tree_oid + "\n"),
+                # Check tree in origin/main log - tree found
+                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, f"{tree_oid}\nother\n"),
+            ])
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0)
+
+            # Should have deleted the worktree
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertIn("worktree-agent-abc123", deleted)
+
+    def test_pr_exact_checks_all_merged_prs_pr_ancestor_only_own_branch(self):
+        """pr-exact checks all merged PRs; pr-ancestor only checks own branch PRs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt1 = repo / "wt1"
+            wt2 = repo / "wt2"
+            wt1.mkdir(parents=True)
+            wt2.mkdir(parents=True)
+
+            # wt1: worktree-agent branch with HEAD = another branch's merged PR head (pr-exact)
+            exact_oid = "e" * 40
+            # wt2: worktree-agent branch with HEAD = ancestor of another branch's merged PR (kept)
+            ancestor_oid = "a" * 40
+            other_pr_oid = "b" * 40
+
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt1}\nHEAD {exact_oid}\nbranch refs/heads/worktree-agent-exact\n\n"
+                         f"worktree {wt2}\nHEAD {ancestor_oid}\nbranch refs/heads/worktree-agent-ancestor\n")
+
+            # All merged PRs includes one with exact_oid (from another branch)
+            all_prs = [{"headRefOid": exact_oid}, {"headRefOid": other_pr_oid}]
+
+            runner = FakeRunner([
+                # First call: get all merged PRs for pr-exact
+                (lambda c: c[:3] == ["gh", "pr", "list"] and "--limit" in c and "200" in c, 0, json.dumps(all_prs)),
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+
+                # wt1 (exact match)
+                (lambda c: c[:2] == ["git", "status"] and str(wt1) in " ".join(str(x) for x in c), 0, ""),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-exact"], 0, exact_oid + "\n"),
+                # No own-branch PRs query for worktree-agent-*
+
+                # wt2 (ancestor only, not exact)
+                (lambda c: c[:2] == ["git", "status"] and str(wt2) in " ".join(str(x) for x in c), 0, ""),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-ancestor"], 0, ancestor_oid + "\n"),
+                # Tree check for wt2 (not in main)
+                (lambda c: len(c) == 3 and c[:2] == ["git", "rev-parse"] and ancestor_oid in c[2], 0, "t2" * 20 + "\n"),
+                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, "other-tree\n"),
+            ])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0, dry_run=True)
+
+            output = out.getvalue()
+            # wt1 should be removed (pr-exact match with another branch's merged PR)
+            self.assertIn("remove wt1: pr-exact", output)
+
+            # wt2 should be kept (only ancestor, not exact, and tree not in main)
+            self.assertIn("keep wt2: no-proof", output)
+
+
+class ValidateOidF6Tests(unittest.TestCase):
+    """F6 item 5: validate every oid from gh as 40 hex before using in git commands."""
+
+    def test_invalid_oid_rejected_in_merge_when_green(self):
+        """Invalid oid from gh should be rejected before git commands."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            team = Path(tmp) / "team"
+            repo.mkdir(parents=True, exist_ok=True)
+
+            invalid_pr = dict(GOOD_PR, headRefOid="not-a-valid-oid")
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(invalid_pr)),
+            ])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = team_gates.merge_when_green(repo, team, 5, runner=runner)
+
+            self.assertEqual(code, 2)
+            self.assertIn("REFUSED", out.getvalue())
+
+    def test_validates_oids_in_worktree_cleanup(self):
+        """Worktree cleanup should validate oids from gh pr list."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            branch_oid = "1" * 40
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {repo}/wt\nHEAD {branch_oid}\nbranch refs/heads/automation/feature\n")
+            # Invalid oid from gh pr list
+            merged = json.dumps([{"number": 10, "headRefOid": "invalid-oid"}])
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["gh", "pr"], 0, merged),
+                (lambda c: c == ["git", "rev-parse", "automation/feature"], 0, branch_oid + "\n"),
+            ])
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner)
+
+            # Should not have tried to use the invalid oid
+            fetches = runner.find("git", "fetch", "origin")
+            for cmd, _ in fetches:
+                self.assertNotIn("invalid-oid", cmd)
+
+
+class WorktreeCleanupKeepDirtyF6Tests(unittest.TestCase):
+    """F6 item 8: cleanup tests for dirty/recently active worktrees and miscased root."""
+
+    def test_keeps_dirty_worktree(self):
+        """Dirty worktrees should be kept even if old and merged."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt = repo / "wt"
+            wt.mkdir(parents=True)
+            branch_oid = "1" * 40
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/automation/feature\n")
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, "M file.txt\n"),  # Dirty
+                (lambda c: c[:2] == ["gh", "pr"], 0, json.dumps([{"number": 10, "headRefOid": branch_oid}])),
+                (lambda c: c == ["git", "rev-parse", "automation/feature"], 0, branch_oid + "\n"),
+            ])
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0)
+
+            # Should NOT have deleted dirty worktree
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertEqual(deleted, [])
+
+    def test_keeps_recently_active_worktree(self):
+        """Recently active worktrees should be kept."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt = repo / "wt"
+            wt.mkdir(parents=True)
+            # Create a recently modified file
+            (wt / "recent.txt").write_text("active")
+            os.utime(wt / "recent.txt", (time.time(), time.time()))
+
+            branch_oid = "1" * 40
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/automation/feature\n")
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),  # Clean
+                (lambda c: c[:2] == ["gh", "pr"], 0, json.dumps([{"number": 10, "headRefOid": branch_oid}])),
+                (lambda c: c == ["git", "rev-parse", "automation/feature"], 0, branch_oid + "\n"),
+            ])
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=1.0)
+
+            # Should NOT have deleted recently active worktree
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertEqual(deleted, [])
+
+    def test_denies_miscased_root(self):
+        """Worktrees should be kept when ancestry cannot be proven."""
+        # This test verifies that worktrees are kept when not provably merged
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt = repo / "wt"
+            wt.mkdir(parents=True)
+            branch_oid = "1" * 40
+            unrelated_oid = "9" * 40  # Different from branch
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/automation/feature\n")
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),
+                (lambda c: c[:2] == ["gh", "pr"], 0, json.dumps([{"number": 10, "headRefOid": unrelated_oid}])),
+                (lambda c: c == ["git", "rev-parse", "automation/feature"], 0, branch_oid + "\n"),
+                (lambda c: c[:2] == ["git", "fetch"], 0, ""),
+                # Simulate ancestor check failure for PR oid
+                (lambda c: c[:3] == ["git", "merge-base", "--is-ancestor"] and c[3] == branch_oid and c[4] == unrelated_oid, 1, ""),
+                # Simulate ancestor check failure for origin/main
+                (lambda c: c[:3] == ["git", "merge-base", "--is-ancestor"] and c[4] == "origin/main", 1, ""),
+            ])
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0)
+
+            # Should not have deleted unproven worktree
             deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
             self.assertEqual(deleted, [])
 

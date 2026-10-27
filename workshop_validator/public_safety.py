@@ -4,8 +4,11 @@ This is defense in depth, not a replacement for secret scanning.
 No file contents or private-looking filenames are ever printed.
 """
 from pathlib import Path, PurePosixPath
+import argparse
+import os
 import re
 import subprocess
+import sys
 
 BLOCKED_SUFFIXES = frozenset({
     ".pdf", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".har",
@@ -32,6 +35,7 @@ HOME_PATH_PATTERN = re.compile(  # public-safety: pattern
     r"(?:/Users/[^/\s]+/|/home/[^/\s]+/|C:\\Users\\)", re.IGNORECASE  # public-safety: pattern
 )  # public-safety: pattern
 GUIDE_NAME_PATTERN = re.compile(r"[A-Z]{3}\d{3}_FULL_")  # public-safety: pattern
+OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def inspect_tracked(root: Path, names: list[str]) -> tuple[str, ...]:
@@ -103,7 +107,91 @@ def inspect_tracked(root: Path, names: list[str]) -> tuple[str, ...]:
     return tuple(issues)
 
 
-def main() -> int:
+ALLOWED_BOT_EMAILS = frozenset({
+    "noreply@github.com",
+    "github-actions[bot]@users.noreply.github.com",
+})
+
+
+def _count_bad_emails(git_log_output: str) -> int:
+    """Count non-GitHub-noreply emails in git log output.
+
+    Input format: git log --format=%ae%x00%ce output (NUL-separated author and committer
+    emails per commit, newline-separated commits). Empty emails are counted as bad.
+
+    Returns count of bad (non-noreply or empty) emails.
+    """
+    bad_count = 0
+    # Split on newline to get per-commit records
+    email_pairs = git_log_output.split('\n')
+    for pair in email_pairs:
+        if pair:
+            # Split on NUL to get author and committer emails
+            emails = pair.split('\x00')
+            for email in emails:
+                # Empty email is bad
+                if not email:
+                    bad_count += 1
+                    continue
+                # Allow GitHub noreply emails (user-specific)
+                if email.endswith("@users.noreply.github.com") or email in ALLOWED_BOT_EMAILS:
+                    continue
+                bad_count += 1
+    return bad_count
+
+
+def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str = "HEAD") -> tuple[bool, str]:
+    """Check that all commits between base_ref and head_ref have allowed emails."""
+    try:
+        # Check if base ref exists
+        check_base = subprocess.run(
+            ["git", "rev-parse", "--verify", base_ref],
+            cwd=root, capture_output=True, text=True
+        )
+        if check_base.returncode != 0:
+            return False, f"base ref {base_ref} not found; fetch it first"
+
+        # Get commit range with NUL-separated author and committer emails
+        result = subprocess.run(
+            ["git", "log", f"{base_ref}..{head_ref}", "--format=%ae%x00%ce"],
+            cwd=root, capture_output=True, text=True, check=True
+        )
+
+        bad_count = _count_bad_emails(result.stdout)
+
+        if bad_count > 0:
+            return False, f"Found {bad_count} non-GitHub noreply email(s)"
+
+        # Count total emails for success message
+        email_count = sum(len(pair.split('\x00')) for pair in result.stdout.split('\n') if pair)
+        return True, f"All {email_count} commit emails are GitHub noreply or allowed bots"
+    except subprocess.CalledProcessError:
+        return False, "Could not check commit emails"
+
+
+def check_main_clean(root: Path) -> tuple[bool, str]:
+    """Check that main checkout has no untracked or modified files."""
+    try:
+        # Check for modified or untracked files
+        result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=root, capture_output=True, text=True, check=True
+        )
+        if result.stdout.strip():
+            return False, "Main checkout has untracked or modified files"
+        return True, "Main checkout is clean"
+    except subprocess.CalledProcessError:
+        return False, "Could not check main checkout status"
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Public safety gate for tracked files and commits.")
+    parser.add_argument("--main-clean", action="store_true",
+                        help="Also check that main checkout has no untracked or modified files")
+    parser.add_argument("--check-emails", action="store_true", default=True,
+                        help="Check commit author/committer emails (default: true)")
+    args = parser.parse_args(argv)
+
     root = Path(__file__).resolve().parents[1]
     try:
         # Check tracked files
@@ -124,14 +212,42 @@ def main() -> int:
 
         all_names = tracked_names + untracked_names
         problems = inspect_tracked(root, all_names)
+
+        if problems:
+            print(f"Public safety gate rejected {len(problems)} file(s); review locally", file=sys.stderr)
+            return 1
+
+        # Check commit emails
+        if args.check_emails:
+            # Use PR_HEAD from environment (set in CI on pull_request events) to check
+            # the PR's real commits instead of GitHub's synthetic merge commit
+            pr_head = os.environ.get("PR_HEAD", "").strip()
+            if pr_head:
+                # Validate PR_HEAD is a valid 40-hex git oid
+                if not OID_PATTERN.match(pr_head):
+                    print("Public safety gate: PR_HEAD must be 40 hex characters", file=sys.stderr)
+                    return 1
+                head_ref = pr_head
+            else:
+                head_ref = "HEAD"
+            email_ok, email_msg = check_commit_emails(root, head_ref=head_ref)
+            if not email_ok:
+                print(f"Public safety gate: {email_msg}", file=sys.stderr)
+                return 1
+
+        # Check main clean if requested
+        if args.main_clean:
+            clean_ok, clean_msg = check_main_clean(root)
+            if not clean_ok:
+                print(f"Public safety gate: {clean_msg}", file=sys.stderr)
+                return 1
+
+        print(f"Public safety gate passed: {len(all_names)} text files ({len(tracked_names)} tracked, {len(untracked_names)} untracked)")
+        return 0
+
     except (OSError, ValueError, subprocess.CalledProcessError, UnicodeDecodeError):
-        print("Public safety gate could not inspect files; failing closed")
+        print("Public safety gate could not inspect files; failing closed", file=sys.stderr)
         return 1
-    if problems:
-        print(f"Public safety gate rejected {len(problems)} file(s); review locally")
-        return 1
-    print(f"Public safety gate passed: {len(all_names)} text files ({len(tracked_names)} tracked, {len(untracked_names)} untracked)")
-    return 0
 
 
 if __name__ == "__main__":
