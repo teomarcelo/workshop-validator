@@ -27,15 +27,17 @@ Counter-example: the same step gave PASS, then gave UI_MISMATCH after a fix to `
 - `outcome`: success, failed, or inconclusive.
 - `counts`: dict of status counts (how many PASS, UI_MISMATCH, etc.).
 - `first_failure`: dict with `step_id`, `page`, and `status` of the first non-PASS step.
-- `run_dir`: path to the private run directory containing `summary.json`, `board.jsonl`, and `walk.webm`.
+- `run_dir`: path to the private run directory containing `summary.json`, `board.json`, and `walk.webm`.
 
-**board.jsonl** (per step, in each `runs/<org-key>/<run-id>/board.jsonl`):
+**board.json** (per step, in each `runs/<org-key>/<run-id>/board.json`):
 - `step_id`: unique identifier for the step in the guide.
 - `status`: final status after step-verifier review.
-- `text`: the step instruction text (private, never committed).
-- `note`: reason for the status, including evidence or why it failed.
-- `page`: PDF page number.
-- `suspect`: optional flag when check-fixer or step-verifier sees something unusual.
+- `title`: the step instruction text (private, never committed).
+- `reason`: why the step got this status, including evidence or why it failed.
+- `number`: step sequence number in the guide.
+- `label`: display label for the step.
+- `css`: CSS class for rendering.
+- `chips`: list of status chips to display.
 
 **lessons.json** (aggregated, in `~/.workshop-validator/lessons.json`):
 - De-duplicated step rows with `kind`, `title` (step text), `status`, `detail`, `seen` (count), `first`, and `last` (dates).
@@ -45,7 +47,7 @@ Counter-example: the same step gave PASS, then gave UI_MISMATCH after a fix to `
 ### What is missing
 
 1. **Validator version per run**: `history.json` does not store the commit SHA or tag that produced the run. Without this, we cannot distinguish a flaky check from a code-change effect.
-2. **Cross-run step correlation**: `board.jsonl` is per run. We have no index mapping (guide, step_id, instance) to a list of (run_id, status, commit). Detecting flaky checks requires scanning all runs for a guide on an instance, reading each `board.jsonl`, and comparing step statuses.
+2. **Cross-run step correlation**: `board.json` is per run. We have no index mapping (guide, step_id, instance) to a list of (run_id, status, commit). Detecting flaky checks requires scanning all runs for a guide on an instance, reading each `board.json`, and comparing step statuses.
 3. **Quarantine storage**: there is no file or database table tracking which steps are in quarantine, their cause category, when they entered, or what stable runs they need to exit.
 
 ## Quarantine system
@@ -99,7 +101,7 @@ When a fix PR addresses a flaky check, the PR description must name the cause. I
 
 ### How reports show flaky steps
 
-A step in quarantine is shown with its **real status** (the one from the current run), never artificially upgraded to PASS. Next to the status chip, a second chip labeled `FLAKY (timing)` or `FLAKY (unknown)` appears in a muted color (orange or yellow). The step note includes: "This step is in quarantine due to [cause]. It has given [list of statuses] across [N] runs on this instance. [stable_count]/[stable_needed] stable runs so far."
+A step in quarantine is shown with its **real status** (the one from the current run), never artificially upgraded to PASS. Next to the status chip, a second chip labeled `FLAKY (timing)` or `FLAKY (unknown)` appears in a muted color (orange or yellow). The step's reason field includes: "This step is in quarantine due to [cause]. It has given [list of statuses] across [N] runs on this instance. [stable_count]/[stable_needed] stable runs so far."
 
 Example in `report.html`:
 
@@ -130,10 +132,10 @@ This is a design-only brief; no code changes happen here. A follow-on build brie
 
 ### 1. `workshop_validator/flaky_detector.py`
 
-**What it does**: scans `history.json` and each run's `board.jsonl` to detect flaky steps. Called after each run by `automate.py`.
+**What it does**: scans `history.json` and each run's `board.json` to detect flaky steps. Called after each run by `automate.py`.
 
 **Key functions**:
-- `detect_flaky(private_root: Path, current_run_id: str) -> list[dict]`: reads `history.json`, groups runs by (guide, instance), loads each `board.jsonl`, compares statuses per step_id, filters for runs with the same commit SHA, returns a list of newly detected flaky steps.
+- `detect_flaky(private_root: Path, current_run_id: str) -> list[dict]`: reads `history.json`, groups runs by (guide, instance), loads each `board.json`, compares statuses per step_id, filters for runs with the same commit SHA, returns a list of newly detected flaky steps. Runs without a `commit` field (older runs from before this feature) are skipped.
 - `add_to_quarantine(private_root: Path, flaky_steps: list[dict]) -> None`: merges new flaky steps into `quarantine.json`, de-duplicating by (guide, step_id, instance), updates `runs` list, sets `cause` to `unknown` if not already diagnosed.
 
 **Acceptance test**: synthetic test with 2 fake runs (same guide, instance, commit; different statuses for step S-1) confirms `detect_flaky` returns 1 entry and `add_to_quarantine` writes it to `quarantine.json`.
@@ -157,11 +159,11 @@ This is a design-only brief; no code changes happen here. A follow-on build brie
 **What it does**: after appending to `history.json` and before writing the final report, call `flaky_detector.detect_flaky` and `quarantine_store.record_run` for every step in the current run.
 
 **Changes**:
-- After line 313 (`history_path = append_history(...)`), call `flaky_detector.detect_flaky(private_root, run_id)` and `flaky_detector.add_to_quarantine(private_root, newly_detected)`.
-- After rendering the report, call `quarantine_store.record_run` for each step, updating `stable_count`.
+- In the main run function, after calling `append_history` to write the run summary, call `flaky_detector.detect_flaky(private_root, run_id)` and `flaky_detector.add_to_quarantine(private_root, newly_detected)`.
+- After rendering the report with `write_run_report`, call `quarantine_store.record_run` for each step, updating `stable_count`.
 - Store the current commit SHA in `summary.json` and `history.json` (new field `commit`).
 
-**Acceptance test**: smoke test confirms `quarantine.json` is created after a run with a flaky step (synthetic board.jsonl with 2 runs, same guide/instance/commit, different statuses).
+**Acceptance test**: smoke test confirms `quarantine.json` is created after a run with a flaky step (synthetic board.json with 2 runs, same guide/instance/commit, different statuses).
 
 ### 4. `workshop_validator/step_board.py` (changes)
 
@@ -170,7 +172,7 @@ This is a design-only brief; no code changes happen here. A follow-on build brie
 **Changes**:
 - In `write_run_report`, load `quarantine.json` via `quarantine_store.load_quarantine`.
 - For each step in the report, call `quarantine_store.is_quarantined(quar, guide, step.step_id, instance)`.
-- If quarantined, add a `<span class="chip chip-flaky">FLAKY ({cause})</span>` after the status chip, and append the quarantine note to `step.note`.
+- If quarantined, add a `<span class="chip chip-flaky">FLAKY ({cause})</span>` to the step's `chips` list, and append the quarantine note to the step's `reason` field.
 - Add a flaky-step summary section to the report header showing the count of quarantined steps in this run.
 
 **Acceptance test**: synthetic test with a fake quarantine entry and a board step confirms the rendered HTML contains `<span class="chip chip-flaky">FLAKY (timing)</span>`.
@@ -186,9 +188,9 @@ This is a design-only brief; no code changes happen here. A follow-on build brie
 
 **Acceptance test**: synthetic test confirms the history page HTML includes a tab with class `tab-flaky` and a table row for a quarantined step.
 
-### 6. `workshop_validator/evidence.py` (assertion)
+### 6. `workshop_validator/evidence.py` (documentation)
 
-**What it does**: assert that `verify_step` never upgrades a status because a step is in quarantine. The quarantine does not grant PASS.
+**What it does**: document that `verify_step` never upgrades a status because a step is in quarantine. The quarantine does not grant PASS.
 
 **Changes**:
 - Add a comment in `verify_step` above the final return: "Quarantine status: a flaky step is shown with its real status from the current run, never artificially upgraded. The FLAKY chip is added by step_board rendering only."
@@ -210,12 +212,12 @@ This is a design-only brief; no code changes happen here. A follow-on build brie
 
 | File | Change | Acceptance test |
 | --- | --- | --- |
-| `workshop_validator/flaky_detector.py` | New module: detect flaky steps by comparing runs | Synthetic 2-run test detects 1 flaky step |
+| `workshop_validator/flaky_detector.py` | New module: detect flaky steps by comparing runs, skip runs without commit | Synthetic 2-run test detects 1 flaky step |
 | `workshop_validator/quarantine_store.py` | New module: load/save/update quarantine.json | Synthetic test records 3 stable runs and archives |
-| `workshop_validator/automate.py` | Call detector after each run, store commit SHA | Smoke test creates quarantine.json after flaky run |
-| `workshop_validator/step_board.py` (report) | Add FLAKY chip and note to quarantined steps | Synthetic test confirms chip in rendered HTML |
+| `workshop_validator/automate.py` | Call detector after append_history, store commit SHA in history | Smoke test creates quarantine.json after flaky run |
+| `workshop_validator/step_board.py` (report) | Add FLAKY chip to chips list and note to reason field | Synthetic test confirms chip in rendered HTML |
 | `workshop_validator/step_board.py` (history) | Add flaky-step filter tab to history page | Synthetic test confirms tab and table row |
-| `workshop_validator/evidence.py` | Assert no quarantine logic affects verify_step | Test docstring confirms no quarantine parameter |
+| `workshop_validator/evidence.py` | Document that no quarantine logic affects verify_step | Test docstring confirms no quarantine parameter |
 | `workshop_validator/team_gates.py` | New gate: evidence.py never reads quarantine | Manual test with planted word confirms gate fails |
 
 Every test is synthetic (no live Salesforce, no real credentials, no real guide text).
