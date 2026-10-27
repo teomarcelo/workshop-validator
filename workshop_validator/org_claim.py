@@ -31,6 +31,8 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 import argparse
+import contextlib
+import fcntl
 import json
 import os
 import re
@@ -42,6 +44,10 @@ from .automate import FAILED, ORGS_NAME, SUCCESS, load_gate, load_orgs
 
 CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
+ATTEMPT = Path("team") / "claim-attempt"
+LEFT_PORTAL = "left the https portal"
+FORCE_REFUSED = "--force needs the owner at a terminal"
+ATTEMPT_REFUSED = "a claim was already tried for this run"
 
 OK, NEEDS_REVIEW_EXIT, REFUSED, INCONCLUSIVE = 0, 1, 2, 3
 
@@ -282,6 +288,16 @@ def find_detail_link(html: str) -> dict | None:
     return hits[0] if len(hits) == 1 else None
 
 
+def on_portal(url: str, portal_url: str) -> bool:
+    """True only for an https address on the portal's own host."""
+    try:
+        here, portal = urlparse(str(url or "")), urlparse(str(portal_url or ""))
+        return (here.scheme == "https" and portal.scheme == "https" and bool(here.hostname)
+                and here.hostname == portal.hostname and here.port == portal.port)
+    except ValueError:
+        return False
+
+
 def find_guide_links(html: str, base: str) -> list[str]:
     seen: list[str] = []
     for node in parse(html).walk():
@@ -316,6 +332,32 @@ def claim_allowed(root: Path) -> tuple[bool, str]:
     return True, ""
 
 
+def _attempt_path(root: Path) -> Path:
+    return Path(root) / ATTEMPT
+
+
+def last_run_id(root: Path):
+    return load_gate(Path(root)).get("last_run")
+
+
+def attempt_allowed(root: Path) -> bool:
+    """One claim per gate run: a second is refused unless the earlier one ended CLAIMED."""
+    path = _attempt_path(root)
+    if not path.exists():
+        return True
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False  # unreadable marker: assume a claim was tried
+    if not isinstance(marker, dict):
+        return False
+    return marker.get("last_run") != last_run_id(root) or marker.get("result") == "CLAIMED"
+
+
+def mark_attempt(root: Path, last_run, result: str) -> None:
+    _atomic_write(_attempt_path(root), json.dumps({"last_run": last_run, "result": result}) + "\n")
+
+
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
@@ -337,6 +379,26 @@ def _atomic_write(path: Path, text: str) -> None:
 def append_org(root: Path, username: str, password: str) -> int:
     """Append one org in the loader's format, atomically, mode 0600. Returns its number."""
     path = Path(root) / ORGS_NAME
+    with _org_lock(path):
+        return _append_locked(path, username, password)
+
+
+@contextlib.contextmanager
+def _org_lock(path: Path):
+    """An exclusive flock on a sibling lock file around read-append-replace."""
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path.parent / f".{path.name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _append_locked(path: Path, username: str, password: str) -> int:
     data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     if not isinstance(data, dict):
         raise ClaimError("the org file has an unknown format")
@@ -373,6 +435,7 @@ def save_guides(root: Path, files: list[tuple[str, bytes]]) -> int:
     """Write downloaded PDFs into the guide inbox, 0600. Returns how many were saved."""
     inbox = Path(root) / INBOX
     inbox.mkdir(mode=0o700, parents=True, exist_ok=True)
+    inbox.chmod(0o700)  # mkdir's mode is masked by umask and ignored when the folder exists
     taken = {p.name for p in inbox.iterdir()}
     saved = 0
     for url, body in files:
@@ -447,21 +510,46 @@ def _poll(page, check, timeout_s: float = 90.0, every_s: float = 2.0):
         page.wait_for_timeout(int(every_s * 1000))
 
 
-def _follow(page, target: dict) -> None:
+def _settle(page) -> None:
+    try:
+        page.wait_for_load_state("domcontentloaded", timeout=5000)
+    except Exception:
+        pass
+
+
+def _require_portal(page, portal_url: str) -> None:
+    """Stop unless the page, after redirects, is https on the portal's own host."""
+    if not on_portal(page.url, portal_url):
+        raise ClaimError(LEFT_PORTAL)
+
+
+def _goto(page, url: str, portal_url: str) -> None:
+    if not on_portal(url, portal_url):
+        raise ClaimError(LEFT_PORTAL)
+    page.goto(url, wait_until="domcontentloaded")
+    _settle(page)
+    _require_portal(page, portal_url)
+
+
+def _follow(page, target: dict, portal_url: str) -> None:
     href = target.get("href", "")
     if href and not href.startswith(("#", "javascript:")):
-        page.goto(urljoin(page.url, href), wait_until="domcontentloaded")
+        _goto(page, urljoin(page.url, href), portal_url)
         return
     page.get_by_role(target["kind"], name=target["text"], exact=True).first.click()
+    _settle(page)
+    _require_portal(page, portal_url)
 
 
 def _open_form(page, portal_url: str) -> dict:
-    page.goto(portal_url, wait_until="domcontentloaded")
+    _goto(page, portal_url, portal_url)
     link, html = _poll(page, lambda h: find_add_event(h) or (has_password_field(h) and {"signin": True}))
+    _require_portal(page, portal_url)
     if not link or link.get("signin"):
         raise ClaimError("sign-in required" if (link or sign_in_required(html)) else "no Add Event link found")
-    _follow(page, link)
+    _follow(page, link, portal_url)
     form, _ = _poll(page, find_event_form)
+    _require_portal(page, portal_url)
     if not form:
         raise ClaimError("the Add Event form has no single event-code field and submit button")
     return form
@@ -493,33 +581,53 @@ def claim(root: Path, config: dict) -> str:
     if not code:
         raise ClaimError(f"{CONFIG_NAME} has no event_code")
 
+    portal_url = config["portal_url"]
+    last_run = last_run_id(root)
+
     def run(_context, page):
-        form = _open_form(page, config["portal_url"])
+        form = _open_form(page, portal_url)
+        _require_portal(page, portal_url)
         page.locator(form["field"]).first.fill(code)
+        _require_portal(page, portal_url)
+        mark_attempt(root, last_run, "started")  # before submitting: a crash still counts
         page.get_by_role("button", name=form["button"], exact=True).first.click()
+        _settle(page)
         creds, html = _poll(page, lambda h: extract_credentials(h) or find_detail_link(h))
+        _require_portal(page, portal_url)
         if isinstance(creds, dict):
-            _follow(page, creds)
+            _follow(page, creds, portal_url)
             creds, _ = _poll(page, extract_credentials)
         if not isinstance(creds, tuple):
             return "org-claim: NEEDS_REVIEW could not read credentials"
+        _require_portal(page, portal_url)
         number = append_org(root, *creds)
+        mark_attempt(root, last_run, "CLAIMED")
         return f"org-claim: CLAIMED org {number}"
     return _browser(run)
 
 
 def guides(root: Path, config: dict) -> str:
+    portal_url = config["portal_url"]
+
     def run(context, page):
-        page.goto(config["portal_url"], wait_until="domcontentloaded")
+        _goto(page, portal_url, portal_url)
         links, html = _poll(page, lambda h: find_guide_links(h, page.url))
+        _require_portal(page, portal_url)
         if not links and sign_in_required(html):
             raise ClaimError("sign-in required")
-        files = []
+        files, skipped = [], 0
         for url in links:
+            if not on_portal(url, portal_url):
+                skipped += 1
+                continue
             response = context.request.get(url)
+            if not on_portal(getattr(response, "url", ""), portal_url):
+                skipped += 1  # redirected off the portal: the body is not kept
+                continue
             if response.ok:
                 files.append((url, response.body()))
-        return f"org-claim: GUIDES {save_guides(root, files)}"
+        line = f"org-claim: GUIDES {save_guides(root, files)}"
+        return line + (f" (skipped {skipped} off-portal links)" if skipped else "")
     return _browser(run)
 
 
@@ -530,15 +638,23 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--claim", action="store_true", help="Submit the event code and save the new org.")
     mode.add_argument("--guides", action="store_true", help="Download linked exercise-guide PDFs.")
     parser.add_argument("--force", action="store_true",
-                        help="Owner only: claim even when the org rule does not say move on.")
+                        help="Owner only, at a terminal: claim even when the org rule does not say move on.")
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     args = parser.parse_args(argv)
     root = Path(args.private_root).expanduser()
     try:
-        if args.claim and not args.force:
-            allowed, reason = claim_allowed(root)
-            if not allowed:
-                print(f"org-claim: REFUSED {reason}")
+        if args.claim:
+            if args.force:
+                if not sys.stdin.isatty():
+                    print(f"org-claim: REFUSED {FORCE_REFUSED}")
+                    return REFUSED
+            else:
+                allowed, reason = claim_allowed(root)
+                if not allowed:
+                    print(f"org-claim: REFUSED {reason}")
+                    return REFUSED
+            if not attempt_allowed(root):
+                print(f"org-claim: REFUSED {ATTEMPT_REFUSED}")
                 return REFUSED
         config = load_config(root)
         if args.claim:

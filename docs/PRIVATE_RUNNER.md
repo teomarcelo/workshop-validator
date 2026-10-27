@@ -73,15 +73,24 @@ the event code. Put it in `~/.workshop-validator/org-claim.json`, mode 0600:
   exist, then stops. Nothing is submitted.
 - `python -m workshop_validator.org_claim --claim` submits the code, opens the
   claimed org's details, reads the username and password by label, and
-  appends one org to `verification-orgs.json` (atomic write, mode 0600). It
-  prints only `org-claim: CLAIMED org <n>`. When the values are unclear it
-  writes nothing and prints `NEEDS_REVIEW`.
+  appends one org to `verification-orgs.json` (atomic write under a file
+  lock, mode 0600). It prints only `org-claim: CLAIMED org <n>`. When the
+  values are unclear it writes nothing and prints `NEEDS_REVIEW`.
 - `--claim` is refused unless the last run said move on (a success or a real
-  failure) and no unused org is left (W-043). `--force` skips that check. Only
-  the owner uses it.
+  failure) and no unused org is left (W-043). `--force` skips that check. It
+  works only when the owner runs it at a terminal.
+- One claim per run: before it submits, the tool writes
+  `~/.workshop-validator/team/claim-attempt` (mode 0600) with the gate's last
+  run id. A second `--claim` for the same run is refused unless the first one
+  ended `CLAIMED`.
 - `--guides` downloads the guide PDFs linked on the portal into
-  `~/.workshop-validator/team/guide-inbox/` (mode 0600) and prints the count.
+  `~/.workshop-validator/team/guide-inbox/` (folder 0700, files 0600) and
+  prints the count. Only https links on the portal's host are fetched; others
+  are skipped and counted.
 
+The browser stays on https and on the portal's host. After every page load,
+redirects included, and again before it types the code or saves an org, it
+checks the address. Anywhere else it stops with `left the https portal`.
 The tool never prints page text, credentials, the portal address or the code.
 Exit codes: 0 done, 1 needs review, 2 refused, 3 stopped (for example sign-in
 required).
