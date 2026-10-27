@@ -1992,16 +1992,104 @@ class OwnValueTests(unittest.TestCase):
             def fill(self, *args, **kwargs):
                 raise AssertionError("an own value must not be typed")
 
+        # Prefilled field -> PASS
         step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
         state = SimpleNamespace(page=object())
         with patch.object(g, "labeled", return_value=Field("ada@example.test")):
             result = g._act_own(state, step, "Email")
         self.assertEqual(result.status, "PASS")
         self.assertEqual(result.evidence_ids, ("s1:already-set:Email",))
+
+        # Empty optional field -> NOT_RUN
         with patch.object(g, "labeled", return_value=Field("")):
-            self.assertEqual(g._act_own(state, step, "Email").status, "NEEDS_REVIEW")
+            result = g._act_own(state, step, "Email")
+            self.assertEqual(result.status, "NOT_RUN")
+            self.assertFalse(result.freeze)
+
+        # Empty mandatory field -> NEEDS_REVIEW with freeze
+        mandatory_step = g.GuideStep("s2", 1, None, None, "i", "Email is required: (your email)", (0, 0, 0, 0), "p", ())
+        with patch.object(g, "labeled", return_value=Field("")):
+            result = g._act_own(state, mandatory_step, "Email")
+            self.assertEqual(result.status, "NEEDS_REVIEW")
+            self.assertTrue(result.freeze)
+
+        # Field not found -> None
         with patch.object(g, "labeled", return_value=None):
             self.assertIsNone(g._act_own(state, step, "Email"))
+
+    def test_field_mandatory_detection(self):
+        from workshop_validator.guide_walk import _is_field_mandatory
+
+        # Positive cases: "required"
+        self.assertTrue(_is_field_mandatory("Email is required: (your email)", "Email"))
+        self.assertTrue(_is_field_mandatory("The Name field is required.", "Name"))
+
+        # Positive cases: "mandatory"
+        self.assertTrue(_is_field_mandatory("This field is mandatory.", "field"))
+        self.assertTrue(_is_field_mandatory("Enter a mandatory value.", "value"))
+
+        # Positive cases: "must" in same clause as field label
+        self.assertTrue(_is_field_mandatory("You must enter your Email.", "Email"))
+        self.assertTrue(_is_field_mandatory("The Name must be filled.", "Name"))
+
+        # Negative cases: "must" about a different field
+        self.assertFalse(_is_field_mandatory("You must click Save. Email: (your email)", "Email"))
+        self.assertFalse(_is_field_mandatory("Name must be filled. Address: (your address)", "Address"))
+
+        # Negative cases: no mandatory markers
+        self.assertFalse(_is_field_mandatory("Email: (your email)", "Email"))
+        self.assertFalse(_is_field_mandatory("Enter your Name.", "Name"))
+        self.assertFalse(_is_field_mandatory("Fill in the Address field.", "Address"))
+
+    def test_optional_empty_field_does_not_freeze(self):
+        """Optional empty field returns NOT_RUN without freeze."""
+        from workshop_validator import guide_walk as g
+
+        class Field:
+            def __init__(self, value):
+                self.value = value
+            def count(self):
+                return 1
+            def nth(self, index):
+                return self
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return self.value
+            def fill(self, *args, **kwargs):
+                raise AssertionError("an own value must not be typed")
+
+        optional_step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=object())
+        with patch.object(g, "labeled", return_value=Field("")):
+            result = g._act_own(state, optional_step, "Email")
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertFalse(result.freeze)
+
+    def test_mandatory_empty_field_freezes_walk(self):
+        """Mandatory empty field returns NEEDS_REVIEW with freeze=True."""
+        from workshop_validator import guide_walk as g
+
+        class Field:
+            def __init__(self, value):
+                self.value = value
+            def count(self):
+                return 1
+            def nth(self, index):
+                return self
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return self.value
+            def fill(self, *args, **kwargs):
+                raise AssertionError("an own value must not be typed")
+
+        mandatory_step = g.GuideStep("s2", 1, None, None, "i", "Email is required: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=object())
+        with patch.object(g, "labeled", return_value=Field("")):
+            result = g._act_own(state, mandatory_step, "Email")
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
 
 
 class StepReadingTests(unittest.TestCase):

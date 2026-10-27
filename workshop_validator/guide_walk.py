@@ -1959,6 +1959,33 @@ OWN_VALUE_EMPTY = (
     "{label} is empty. The guide asks for the learner's own value, and the "
     "validator does not invent one."
 )
+OWN_VALUE_OPTIONAL = (
+    "{label} is empty. The guide asks for the learner's own value and does not "
+    "mark it mandatory, so it was left unchanged."
+)
+
+
+def _is_field_mandatory(step_text: str, label: str) -> bool:
+    """Check if the step text marks the field as mandatory.
+
+    Detection rules:
+    - Whole words "required" or "mandatory" anywhere in the step
+    - Word "must" when the same clause names the field label
+    """
+    text_lower = step_text.lower()
+    label_lower = label.lower()
+
+    # Check for "required" or "mandatory" as whole words
+    if re.search(r'\brequired\b', text_lower) or re.search(r'\bmandatory\b', text_lower):
+        return True
+
+    # Check for "must" in the same clause as the field label
+    # Split by sentence-ending punctuation and check each clause
+    for clause in re.split(r'[.;]', text_lower):
+        if 'must' in clause and label_lower in clause:
+            return True
+
+    return False
 
 
 def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | None:
@@ -1968,7 +1995,11 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
         return None
     if _input(target).strip():
         return passed(step, f"already-set:{label}", OWN_VALUE_NOTE.format(label=label))
-    return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), ())
+    # Empty field: check if mandatory
+    step_text = step.text or ""
+    if _is_field_mandatory(step_text, label):
+        return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), (), freeze=True)
+    return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
 def _intent_for(text: str) -> _Intent:
