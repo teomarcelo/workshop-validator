@@ -114,6 +114,14 @@ ALLOWED_BOT_EMAILS = frozenset({
 def check_commit_emails(root: Path, base_ref: str = "origin/main") -> tuple[bool, str]:
     """Check that all commits between base_ref and HEAD have allowed emails."""
     try:
+        # Check if base ref exists
+        check_base = subprocess.run(
+            ["git", "rev-parse", "--verify", base_ref],
+            cwd=root, capture_output=True, text=True
+        )
+        if check_base.returncode != 0:
+            return False, f"base ref {base_ref} not found; fetch it first"
+
         # Get commit range
         result = subprocess.run(
             ["git", "log", f"{base_ref}..HEAD", "--format=%ae%n%ce"],
@@ -122,11 +130,19 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main") -> tuple[bool
         emails = [line.strip() for line in result.stdout.splitlines() if line.strip()]
 
         # Check each email
+        bad_count = 0
         for email in emails:
+            # Empty email fails
+            if not email:
+                bad_count += 1
+                continue
             # Allow GitHub noreply emails (user-specific)
             if email.endswith("@users.noreply.github.com") or email in ALLOWED_BOT_EMAILS:
                 continue
-            return False, f"Non-GitHub noreply email found: {email.split('@')[1] if '@' in email else 'invalid'}"
+            bad_count += 1
+
+        if bad_count > 0:
+            return False, f"Found {bad_count} non-GitHub noreply email(s)"
 
         return True, f"All {len(emails)} commit emails are GitHub noreply or allowed bots"
     except subprocess.CalledProcessError:

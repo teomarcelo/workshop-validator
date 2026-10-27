@@ -21,9 +21,25 @@ LOG_NAME = "team-log.json"
 
 
 def _write_private(path: Path, text: str) -> None:
+    """Write file atomically with fsync for crash safety."""
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    path.chmod(0o600)
+    # Write to temp file in same directory for atomic os.replace
+    import tempfile
+    fd, temp_path = tempfile.mkstemp(dir=path.parent, prefix=".tmp-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(temp_path, 0o600)
+        os.replace(temp_path, path)
+    except:
+        # Clean up temp file on failure
+        try:
+            os.unlink(temp_path)
+        except:
+            pass
+        raise
 
 
 def _now_utc() -> str:

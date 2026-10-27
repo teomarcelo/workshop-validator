@@ -378,7 +378,7 @@ def _read_time_iso(value) -> datetime | None:
 VALID_DECISION_STATUSES = ("NOTED", "RESOLVED", "REVISIT", "DEFERRED")
 
 
-def append_decision(team: Path, decision_id: str, decision_status: str, text: str, now=None) -> Path:
+def append_decision(team: Path, decision_id: str, decision_status: str, text: str, repo: Path = None, now=None) -> Path:
     """Append one decision row to DECISIONS.md and render dashboard."""
     if not decision_id or not decision_id.startswith("W-"):
         raise ValueError("decision_id must start with 'W-'")
@@ -402,7 +402,9 @@ def append_decision(team: Path, decision_id: str, decision_status: str, text: st
     # Render dashboard
     from .team_dashboard import render
     plan = load_plan(team)
-    chain_state, reason = status(team.parent if (team.parent / "repo").is_dir() else Path.cwd(), team, now)
+    # Use provided repo root for status, or resolve from team path
+    repo_root = repo if repo else Path(".").resolve()
+    chain_state, reason = status(repo_root, team, now)
     # Load decisions for dashboard
     decisions = []
     for line in (existing + row).splitlines():
@@ -486,7 +488,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "decide":
         try:
-            path = append_decision(team, args.id, args.status, args.text)
+            path = append_decision(team, args.id, args.status, args.text, repo)
             print(f"Decision {args.id} appended, dashboard rendered")
             return 0
         except ValueError as exc:
