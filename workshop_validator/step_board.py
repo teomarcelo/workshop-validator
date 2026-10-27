@@ -319,6 +319,7 @@ class StepOutcome:
     status: str
     reason: str = ""
     evidence_ids: tuple[str, ...] = ()
+    suspect: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -372,6 +373,7 @@ def outcomes_from_report_steps(steps: Sequence[ReportStep]) -> dict[str, StepOut
             status=step.status,
             reason=step.note,
             evidence_ids=tuple(step.evidence_ids),
+            suspect=step.suspect,
         )
     return outcomes
 
@@ -915,6 +917,10 @@ def _detect_chips(outcome: StepOutcome) -> tuple[str, ...]:
 
     if "reviewed alias" in note or "renamed in ui" in note:
         chips.append("renamed")
+
+    # Add suspect flags as chips for quick-mode step-verifier selection
+    if outcome.suspect:
+        chips.extend(outcome.suspect)
 
     return tuple(chips)
 
