@@ -985,6 +985,247 @@ class TeamKitDecideTests(unittest.TestCase):
         self.assertNotEqual(code, 0)
 
 
+class F8DecideStatusTests(unittest.TestCase):
+    """F8: team_kit decide uses the register's statuses (W-063)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        # Create a minimal plan for dashboard rendering
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+        # Create synthetic register header
+        register = self.team / "DECISIONS.md"
+        register.write_text("Statuses: DECIDED (owner's quoted words only), RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED.\n\n")
+
+    def test_decided_status_refused_with_owner_message(self):
+        """DECIDED status should be refused with message about owner rows."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-100", "--status", "DECIDED",
+                              "--text", "Use async for background tasks"])
+        self.assertNotEqual(code, 0)
+
+    def test_recommended_status_accepted(self):
+        """RECOMMENDED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-101", "--status", "RECOMMENDED",
+                              "--text", "Recommendation text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-101", (self.team / "DECISIONS.md").read_text())
+
+    def test_noted_status_accepted(self):
+        """NOTED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-102", "--status", "NOTED",
+                              "--text", "Note text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-102", (self.team / "DECISIONS.md").read_text())
+
+    def test_open_status_accepted(self):
+        """OPEN status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-103", "--status", "OPEN",
+                              "--text", "Open question text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-103", (self.team / "DECISIONS.md").read_text())
+
+    def test_resolved_status_accepted(self):
+        """RESOLVED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-104", "--status", "RESOLVED",
+                              "--text", "Resolution text"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-104", (self.team / "DECISIONS.md").read_text())
+
+    def test_superseded_status_accepted(self):
+        """SUPERSEDED status should be accepted."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-105", "--status", "SUPERSEDED",
+                              "--text", "Superseded by W-200"])
+        self.assertEqual(code, 0)
+        self.assertIn("W-105", (self.team / "DECISIONS.md").read_text())
+
+    def test_revisit_status_refused(self):
+        """REVISIT status should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-106", "--status", "REVISIT",
+                              "--text", "Revisit text"])
+        self.assertNotEqual(code, 0)
+
+    def test_deferred_status_refused(self):
+        """DEFERRED status should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-107", "--status", "DEFERRED",
+                              "--text", "Deferred text"])
+        self.assertNotEqual(code, 0)
+
+    def test_decided_status_refused(self):
+        """DECIDED status should be refused with message about owner rows."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-108", "--status", "DECIDED",
+                              "--text", "Decision text"])
+        self.assertNotEqual(code, 0)
+
+
+class F8Fix1DecideValidationTests(unittest.TestCase):
+    """F8-fix1: decide command input validation (control chars, pipe, ID format, whitespace)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+
+    def test_refuses_newline_in_id(self):
+        """--id with newline should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-100\nW-200", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_newline_in_text(self):
+        """--text with newline should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-101", "--status", "NOTED",
+                              "--text", "Line 1\nLine 2"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_carriage_return_in_text(self):
+        """--text with CR should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-102", "--status", "NOTED",
+                              "--text", "Text with\rcarriage return"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_tab_in_id(self):
+        """--id with tab should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-103\t", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_pipe_in_id(self):
+        """--id with pipe character should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-104|extra", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_pipe_in_text(self):
+        """--text with pipe character should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-105", "--status", "NOTED",
+                              "--text", "Text | with pipe"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_malformed_id(self):
+        """--id that doesn't match W-\\d+ should be refused."""
+        for bad_id in ["W-", "W-abc", "w-123", "X-123", "W-123-extra"]:
+            with self.subTest(id=bad_id):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", bad_id, "--status", "NOTED",
+                                      "--text", "Synthetic text"])
+                self.assertNotEqual(code, 0)
+
+    def test_accepts_valid_id_format(self):
+        """--id matching W-[0-9]{3,} should be accepted."""
+        for valid_id in ["W-001", "W-123", "W-999999"]:
+            with self.subTest(id=valid_id):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", valid_id, "--status", "NOTED",
+                                      "--text", "Synthetic text"])
+                self.assertEqual(code, 0)
+
+    def test_refuses_whitespace_only_text(self):
+        """--text with only whitespace should be refused."""
+        for text in ["   ", "\t", "\n", " \t \n "]:
+            with self.subTest(text=repr(text)):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", "W-110", "--status", "NOTED",
+                                      "--text", text])
+                self.assertNotEqual(code, 0)
+
+    def test_newline_forged_row_reproduction(self):
+        """Newline in --text should not forge additional rows in DECISIONS.md."""
+        # This test verifies that a newline-forged-row attack is prevented
+        forged = "Real text\n| W-999 | 2026-10-27 | NOTED | Forged row |"
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-111", "--status", "NOTED",
+                              "--text", forged])
+        self.assertNotEqual(code, 0)
+        # Verify that if the register exists, it doesn't contain the forged row
+        register = self.team / "DECISIONS.md"
+        if register.exists():
+            content = register.read_text()
+            self.assertNotIn("W-999", content)
+
+
+class F8Fix2DecideUnicodeTests(unittest.TestCase):
+    """F8-fix2: decide refuses Unicode line/format characters and non-ASCII or short ids."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+
+    def _decide(self, decision_id, text="Synthetic text"):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                  "--id", decision_id, "--status", "NOTED", "--text", text])
+
+    def _assert_no_register_row(self, marker):
+        register = self.team / "DECISIONS.md"
+        if register.exists():
+            self.assertNotIn(marker, register.read_text(encoding="utf-8"))
+
+    def test_refuses_line_separator_u2028_in_text(self):
+        self.assertNotEqual(self._decide("W-201", "a\u2028| W-901 | forged |"), 0)
+        self._assert_no_register_row("W-901")
+
+    def test_refuses_paragraph_separator_u2029_in_text(self):
+        self.assertNotEqual(self._decide("W-202", "a\u2029b"), 0)
+
+    def test_refuses_next_line_u0085_in_text(self):
+        self.assertNotEqual(self._decide("W-203", "a\u0085b"), 0)
+
+    def test_refuses_rtl_override_u202e_in_text(self):
+        self.assertNotEqual(self._decide("W-204", "a\u202eb"), 0)
+
+    def test_refuses_zero_width_space_u200b_in_text(self):
+        self.assertNotEqual(self._decide("W-205", "a\u200bb"), 0)
+
+    def test_refuses_format_char_in_id(self):
+        self.assertNotEqual(self._decide("W-206\u200b"), 0)
+
+    def test_refuses_multiline_by_splitlines(self):
+        # U+001C..U+001E are splitlines() separators; refused either way.
+        for sep in ("\x1c", "\x1d", "\x1e", "\x0b", "\x0c"):
+            with self.subTest(sep=repr(sep)):
+                self.assertNotEqual(self._decide("W-207", "a" + sep + "b"), 0)
+
+    def test_refuses_short_id_w5(self):
+        self.assertNotEqual(self._decide("W-5"), 0)
+
+    def test_refuses_arabic_indic_digit_id(self):
+        self.assertNotEqual(self._decide("W-\u0661\u0660\u0664"), 0)
+
+    def test_refuses_trailing_newline_id(self):
+        self.assertNotEqual(self._decide("W-123\n"), 0)
+
+    def test_accepts_valid_w123(self):
+        self.assertEqual(self._decide("W-123"), 0)
+        self.assertIn("| W-123 |", (self.team / "DECISIONS.md").read_text(encoding="utf-8"))
+
+    def test_id_pattern_shared_with_team_gates(self):
+        from workshop_validator import team_gates
+        self.assertIn(team_kit.DECISION_ID_RE, team_gates.ROW_PATTERN.pattern)
+        self.assertIsNone(team_gates.ROW_PATTERN.match("| W-\u0661\u0660\u0664 | x |"))
+
+
 class SavePlanDuplicateStepTests(unittest.TestCase):
     """F6 item 2: save_plan rejects duplicate step ids."""
 
