@@ -33,10 +33,20 @@ ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 NOREPLY_PATTERN = re.compile(r"^[^@\s]+@users\.noreply\.github\.com$")
+EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+")
+TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,}")
 
 
 def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _redact_stderr(stderr: str) -> str:
+    """Redact email addresses and tokens from stderr; return first 5 lines."""
+    redacted = EMAIL_PATTERN.sub("<email>", stderr)
+    redacted = TOKEN_PATTERN.sub("<redacted>", redacted)
+    lines = redacted.splitlines()[:5]
+    return "\n".join(lines) if lines else ""
 
 
 def _git(repo: Path, *args: str, check=True, runner=None) -> str:
@@ -355,6 +365,11 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
             pass
         else:
             print(f"merge-when-green: FAIL gh pr merge exited {merged.returncode}; PR not merged or head changed")
+            if merged.stderr:
+                redacted = _redact_stderr(merged.stderr)
+                if redacted:
+                    for line in redacted.splitlines():
+                        print(f"  {line}")
             return 1
     else:
         pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit,headRefOid", runner=runner) or {}
