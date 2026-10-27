@@ -2185,6 +2185,42 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
         self.assertTrue(result.freeze)
         self.assertEqual(result.evidence_ids, ())
 
+    def test_builder_url_and_toolbox_without_a_known_canvas_needs_review(self):
+        page = Page(self.BUILDER_URL)
+        page.roles.add(("button", "Toggle Toolbox"))
+        page.roles.add(("button", "New Resource"))
+        result = guide_walk.run_record_variable(self.state(page), self.variable_step())
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
+        self.assertEqual(
+            result.note,
+            "Flow Builder looks open but its canvas was not recognised; the canvas check needs review.",
+        )
+        self.assertEqual(page.events, [])
+
+    def test_screen_flow_without_a_known_canvas_needs_review(self):
+        page = Page(self.FLOWS_URL)
+        page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Screen Flow"
+            if name == "Screen Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = self.BUILDER_URL
+                page.body = "Sample builder"
+                page.roles.add(("button", "Toggle Toolbox"))
+
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 9: Sample", "Task 1: Sample.", "2",
+            "Create a new Screen Flow.",
+        )
+        result = guide_walk.run_screen_flow(self.state(page), item)
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
+
     def test_real_builder_page_still_proceeds(self):
         page = as_builder(Page(self.BUILDER_URL))
 

@@ -2301,13 +2301,38 @@ def _flow_builder_open(page) -> bool:
     return present(page, "button", "Toggle Toolbox")
 
 
+CANVAS_UNKNOWN_NOTE = "Flow Builder looks open but its canvas was not recognised; the canvas check needs review."
+
+
+def _canvas_unrecognised(state: WalkState) -> bool:
+    """Builder URL and visible Toolbox, but the UNVERIFIED canvas selector matched nothing.
+
+    That is our selector's doubt, not a guide failure, so it must not count as one.
+    """
+    for candidate in _browser_pages(state.page):
+        url = str(getattr(candidate, "url", "") or "").lower()
+        if "flowbuilder" not in url or _promo_dialog(candidate):
+            continue
+        if _builder_canvas_visible(candidate):
+            continue
+        if present(candidate, "button", "Toggle Toolbox"):
+            return True
+    return False
+
+
+def _not_open_result(state: WalkState, note: str) -> CheckResult:
+    if _canvas_unrecognised(state):
+        return CheckResult("NEEDS_REVIEW", CANVAS_UNKNOWN_NOTE, (), freeze=True)
+    return CheckResult("UI_MISMATCH", note, (), freeze=True)
+
+
 def _builder_gate(state: WalkState, step: GuideStep) -> CheckResult | None:
     """Every Flow Builder step starts here. No builder, no action."""
     if _promo_over(state, step):
         return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if _focus_builder(state) or _flow_builder_open(state.page):
         return None
-    return CheckResult("UI_MISMATCH", "Flow Builder is not open.", (), freeze=True)
+    return _not_open_result(state, "Flow Builder is not open.")
 
 
 def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
@@ -2353,12 +2378,14 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
         "Flow Builder did not open.",
         limit=state.page_wait_s,
     )
+    if missed and missed.status == "UI_MISMATCH" and not _promo_over(state, step):
+        return _not_open_result(state, missed.note)
     if missed:
         return _stop_here(missed)
     if _promo_over(state, step):
         return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if not _flow_builder_open(state.page):
-        return CheckResult("UI_MISMATCH", "Flow Builder did not open after Create was clicked.", (), freeze=True)
+        return _not_open_result(state, "Flow Builder did not open after Create was clicked.")
     return passed(step, "screen-flow", "New Flow, Screen Flow, then Create opens Flow Builder.")
 
 
