@@ -39,10 +39,10 @@ FIXTURES = (
     (SETUP, "Task 1: Get your org credentials.", "1",
      "Open Chrome and navigate to: sforce.co/OrgClaim", "Open OrgClaim"),
     (SETUP, "Task 1: Get your org credentials.", "2",
-     "Enter the event code provided by your instructor and select Redeem Code.",
+     "Enter the event code provided by test setup and select Redeem Code.",
      "Redeem the event code"),
     (SETUP, "Task 2: Log in to your org.", "1",
-     "Select Launch from OrgClaim and a new tab will open logged in to your org.",
+     "Select Launch from OrgClaim and a new tab will open logged in to test org.",
      "Launch the org"),
     (SETUP, "Task 2: Log in to your org.", "2",
      "Alternatively, navigate to login.salesforce.com and log in with your username and password.",
@@ -53,7 +53,7 @@ FIXTURES = (
     (SETUP, "Task 3: Update your user information.", "2",
      "Update the first and last name fields with your name.", "Check first and last name"),
     (SETUP, "Task 3: Update your user information.", "3",
-     "Update the email field with your email address. Verify the company name is Acme Widgets.",
+     "Update the email field with test email address. Verify the company name is Acme Widgets.",
      "Set the company name"),
     (SETUP, "Task 3: Update your user information.", "4",
      "Select Save at the bottom of the screen.", "Save personal information"),
@@ -514,9 +514,9 @@ class WalkTests(unittest.TestCase):
             step("P003N001", SETUP, "Task 1: Get your org credentials.", "1",
                  "Open Chrome and navigate to: sforce.co/OrgClaim"),
             step("P003N002", SETUP, "Task 1: Get your org credentials.", "2",
-                 "Enter the event code provided by your instructor and select Redeem Code."),
+                 "Enter the event code provided by test setup and select Redeem Code."),
             step("P003N003", SETUP, "Task 2: Log in to your org.", "1",
-                 "Select Launch from OrgClaim and a new tab will open logged in to your org."),
+                 "Select Launch from OrgClaim and a new tab will open logged in to test org."),
             step("P003N004", SETUP, "Task 2: Log in to your org.", "2",
                  "Alternatively, navigate to login.salesforce.com and log in with your username and password."),
         )
@@ -539,7 +539,7 @@ class WalkTests(unittest.TestCase):
             step("open", SETUP, "Task 1: Get your org credentials.", "1",
                  "Open Chrome and navigate to: sforce.co/OrgClaim"),
             step("code", SETUP, "Task 1: Get your org credentials.", "2",
-                 "Enter the event code provided by your instructor and select Redeem Code."),
+                 "Enter the event code provided by test setup and select Redeem Code."),
         )
         outcome = self.walk(page, items)
         self.assertEqual(outcome.statuses["open"], "PASS")
@@ -559,7 +559,7 @@ class WalkTests(unittest.TestCase):
         )
         item = step(
             "company", SETUP, "Task 3: Update your user information.", "3",
-            "Update the email field with your email address. Verify the company name is Acme Widgets.",
+            "Update the email field with test email address. Verify the company name is Acme Widgets.",
         )
         outcome = self.walk(page, (item,))
         self.assertEqual(outcome.statuses["company"], "PASS")
@@ -571,7 +571,7 @@ class WalkTests(unittest.TestCase):
         page = Page("https://sforce.co/OrgClaim", body="Claim page")
         items = (
             step("launch", SETUP, "Task 2: Log in to your org.", "1",
-                 "Select Launch from OrgClaim and a new tab will open logged in to your org."),
+                 "Select Launch from OrgClaim and a new tab will open logged in to test org."),
             step("login", SETUP, "Task 2: Log in to your org.", "2",
                  "Alternatively, navigate to login.salesforce.com and log in with your username and password."),
         )
