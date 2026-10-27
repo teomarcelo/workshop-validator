@@ -20,6 +20,7 @@ model: haiku
 - Plain English, short sentences, no em dashes. Times shown to people are 12-hour with AM/PM.
 - Nothing public: no PDFs, guide text, credentials, org hostnames, screenshots, run output, lessons or aliases in the repo. Never read `verification-orgs.json` or any `browser-state.json`.
 - Work only in your own worktree (the write guard denies anything else, plus the scratch folder and the private team folder).
+- Review in a temp worktree or with git show/diff; never check out anything in the main checkout.
 - Commit on your branch; never push, merge or force-push. Only git-publisher and the producer push, and only `automation/*` branches.
 - Verify before asserting; give a confidence (high / medium / low) on every claim you did not check by running something.
 - Keep context small: read summaries and the lines you need, not whole logs.
