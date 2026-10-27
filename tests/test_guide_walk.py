@@ -2900,6 +2900,111 @@ class UnnamedModalTests(unittest.TestCase):
         self.assertIsNotNone(modal_title)
         self.assertIn("welcome", modal_title.lower())
 
+    def test_click_with_unnamed_modal_returns_env_blocked(self):
+        """Click step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/lightning/setup/ObjectManager/home",
+            body="Setup",
+            roles=[
+                ("dialog", "Feature Announcement\nNew features available\nLearn More"),
+                ("h2", "Feature Announcement"),
+            ],
+        )
+        # Modal with heading
+        page.children = {
+            ("dialog", "Feature Announcement\nNew features available\nLearn More"): [
+                ("h2", "Feature Announcement")
+            ]
+        }
+        # Simple click step that doesn't mention the modal
+        item = step(
+            "open-accounts", "Exercise 2: Data Model", "Task 1: Create Object", "1",
+            "Click Accounts.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertIn("Feature Announcement", outcome.notes["open-accounts"])
+        self.assertIn("modal covered the page", outcome.notes["open-accounts"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
+    def test_fill_with_unnamed_modal_returns_env_blocked(self):
+        """Fill step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/lightning/r/Contact/123/edit",
+            body="Contact Edit",
+            roles=[
+                ("dialog", "System Maintenance\nScheduled downtime notice"),
+                ("h1", "System Maintenance"),
+            ],
+        )
+        # Modal with heading
+        page.children = {
+            ("dialog", "System Maintenance\nScheduled downtime notice"): [
+                ("h1", "System Maintenance")
+            ]
+        }
+        # Fill step that doesn't mention the modal
+        item = step(
+            "fill-email", "Exercise 3: Contacts", "Task 2: Update Contact", "1",
+            "In the Email field, enter contact@example.test and click Save.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["fill-email"], "ENV_BLOCKED")
+        self.assertIn("System Maintenance", outcome.notes["fill-email"])
+        self.assertIn("modal covered the page", outcome.notes["fill-email"])
+        # No fills should happen
+        self.assertEqual(page.events, [])
+
+
+
+    def test_row_dropdown_with_unnamed_modal_returns_env_blocked(self):
+        """Row dropdown step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # Add an unnamed modal covering the page
+        page.roles.add(("dialog", "Update Available\nNew version ready\nInstall Now"))
+        page.roles.add(("h2", "Update Available"))
+        page.children = {
+            ("dialog", "Update Available\nNew version ready\nInstall Now"): [
+                ("h2", "Update Available")
+            ]
+        }
+        # Row dropdown step that doesn't mention the modal
+        item = step(
+            "download-file", "Exercise 1: Files", "Task 2: Download", "1",
+            "Click the dropdown arrow to the far right of Example File and click Download.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["download-file"], "ENV_BLOCKED")
+        self.assertIn("Update Available", outcome.notes["download-file"])
+        self.assertIn("modal covered the page", outcome.notes["download-file"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
+    def test_row_dropdown_without_modal_returns_ui_mismatch_when_not_found(self):
+        """Row dropdown step without modal returns UI_MISMATCH when row not found."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # No row with the target name
+        page.roles.add(("row", "other-document-id"))
+        page.roles.add(("link", "Other File"))
+        page.children = {
+            ("row", "other-document-id"): [("link", "Other File")]
+        }
+        # Row dropdown step looking for a different file
+        item = step(
+            "download-file", "Exercise 1: Files", "Task 2: Download", "1",
+            "Click the dropdown arrow to the far right of Example File and click Download.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return UI_MISMATCH because row not found and no modal
+        self.assertEqual(outcome.statuses["download-file"], "UI_MISMATCH")
+        self.assertIn("Example File", outcome.notes["download-file"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()
