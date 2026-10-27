@@ -22,7 +22,9 @@ The step rules are shared with Cursor; read them, they are binding:
 - Already set by the provisioned org (toggle on, field filled): do not click,
   record PASS with `already-set:` evidence. Unknown state is never clicked.
 - A value in parentheses ("First Name: (your first name)") is the learner's own.
-  Never type the description, never invent a value.
+  Never type the description, never invent a value. An empty own-value field the
+  guide does not mark mandatory is left unchanged as NOT_RUN and the walk
+  continues; a mandatory one stops as NEEDS_REVIEW.
 - Never change the org password or security answer; those steps, and the Save
   that submits that form, stay NOT_RUN.
 - HTTP 429 is Option A: keep running independent steps; blocked and dependent
