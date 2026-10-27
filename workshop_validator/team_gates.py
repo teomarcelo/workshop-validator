@@ -516,6 +516,21 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                             remove_reason = "pr-ancestor"
                             break
 
+            # merged-pr-ancestor: For worktree-agent-* branches, check if tip is ancestor of any merged PR head
+            if not safe_to_delete and branch.startswith("worktree-agent-"):
+                for pr in all_merged_prs:
+                    pr_oid = pr.get("headRefOid")
+                    if pr_oid and is_valid_oid(pr_oid):
+                        # Try to fetch the oid (may fail if it's been GC'd)
+                        _git(repo, "fetch", "origin", pr_oid, check=False, runner=runner)
+                        # Check if branch_oid is ancestor of pr_oid
+                        run = runner or _default_runner
+                        result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
+                        if result.returncode == 0:
+                            safe_to_delete = True
+                            remove_reason = "merged-pr-ancestor"
+                            break
+
             # tree-in-main: Check tree match (squash-merges won't be ancestors)
             if not safe_to_delete:
                 run = runner or _default_runner
