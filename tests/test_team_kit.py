@@ -954,7 +954,8 @@ new file mode 100644
             (lambda c: c[:3] == ["git", "show"], 0, ""),  # File is new in head
             # The test passes on base code
             (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
-             "test_new_feature (tests.test_new_feature.NewFeatureTests) ... ok\n"),
+             "test_new_feature (tests.test_new_feature.NewFeatureTests.test_new_feature)\n"
+             "docstring ... ok\n"),
         ])
 
         out = io.StringIO()
@@ -963,7 +964,7 @@ new file mode 100644
 
         self.assertFalse(result)
         self.assertIn("FAIL", out.getvalue())
-        self.assertIn("no failing test for workshop_validator/new_feature.py", out.getvalue())
+        self.assertIn("no tests failed on base", out.getvalue())
 
     def test_new_test_failing_on_base_passes(self):
         """A new test that fails on base code should PASS."""
@@ -989,7 +990,8 @@ new file mode 100644
             (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
             # The test fails on base code
             (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
-             "test_new_behavior (tests.test_feature.FeatureTests) ... FAIL\n"),
+             "test_new_behavior (tests.test_feature.FeatureTests.test_new_behavior)\n"
+             "docstring ... FAIL\n"),
         ])
 
         out = io.StringIO()
@@ -1083,7 +1085,8 @@ new file mode 100644
             (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
             # The test is skipped
             (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
-             "test_new_skipped (tests.test_feature.FeatureTests) ... skipped 'not ready'\n"),
+             "test_new_skipped (tests.test_feature.FeatureTests.test_new_skipped)\n"
+             "docstring ... skipped 'not ready'\n"),
         ])
 
         out = io.StringIO()
@@ -1121,8 +1124,10 @@ new file mode 100644
             (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
             # One passes (regression test), one fails (proves new behavior)
             (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
-             "test_new_regression (tests.test_feature.FeatureTests) ... ok\n"
-             "test_new_behavior (tests.test_feature.FeatureTests) ... FAIL\n"),
+             "test_new_regression (tests.test_feature.FeatureTests.test_new_regression)\n"
+             "docstring ... ok\n"
+             "test_new_behavior (tests.test_feature.FeatureTests.test_new_behavior)\n"
+             "docstring ... FAIL\n"),
         ])
 
         out = io.StringIO()

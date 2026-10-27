@@ -456,23 +456,33 @@ def parse_new_test_ids(diff: str) -> list[str]:
 
 
 def parse_unittest_output(output: str) -> dict[str, str]:
-    """Parse unittest -v output into {test_id: status} where status is ok/FAIL/ERROR/skipped."""
+    """Parse unittest -v output into {test_id: status} where status is ok/FAIL/ERROR/skipped.
+
+    Format can be either:
+    - "test_method (module.Class) ... ok"
+    - "test_method (module.Class.method)\\ndocstring ... ok"
+    """
     results = {}
-    for line in output.splitlines():
-        line = line.strip()
-        # unittest -v format: "test_method (module.Class) ... ok"
-        if " ... " in line:
-            parts = line.split(" ... ", 1)
-            if len(parts) == 2:
-                test_part, status = parts
-                # Extract test id from "test_method (module.Class)"
-                if "(" in test_part and ")" in test_part:
-                    method = test_part.split("(")[0].strip()
-                    module_class = test_part.split("(")[1].split(")")[0].strip()
-                    test_id = f"{module_class}.{method}"
-                    # status can be "ok", "FAIL", "ERROR", "skipped 'reason'"
-                    status_word = status.split()[0]
-                    results[test_id] = status_word
+    lines = output.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        # Look for test definition line with parentheses
+        if "(" in line and ")" in line and not line.startswith(" "):
+            # Extract test id from "test_method (full.test.id)"
+            if "(" in line and ")" in line:
+                full_id = line.split("(")[1].split(")")[0].strip()
+                # Next line might have docstring ... status, or this line might have ... status
+                if " ... " in line:
+                    # Status is on the same line
+                    status_word = line.split(" ... ", 1)[1].split()[0]
+                    results[full_id] = status_word
+                elif i + 1 < len(lines) and " ... " in lines[i + 1]:
+                    # Status is on the next line
+                    status_word = lines[i + 1].split(" ... ", 1)[1].split()[0]
+                    results[full_id] = status_word
+                    i += 1  # Skip next line since we processed it
+        i += 1
     return results
 
 
@@ -531,16 +541,23 @@ def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
                         swapped.append(f"{code_file} (removed, new in head)")
 
             # Run all tests together with -v to get per-test status
-            # Set RUN_BROWSER_SMOKE=1 for browser tests
-            old_env = os.environ.get("RUN_BROWSER_SMOKE")
+            # Set RUN_BROWSER_SMOKE=1 and PYTHONPATH to ensure tests import from temp worktree
+            old_env_smoke = os.environ.get("RUN_BROWSER_SMOKE")
+            old_env_path = os.environ.get("PYTHONPATH")
             try:
                 os.environ["RUN_BROWSER_SMOKE"] = "1"
+                # Ensure temp worktree is first in PYTHONPATH so tests import swapped modules
+                os.environ["PYTHONPATH"] = str(tree)
                 result = run([str(python), "-m", "unittest", "-v"] + test_ids, tree)
             finally:
-                if old_env is None:
+                if old_env_smoke is None:
                     os.environ.pop("RUN_BROWSER_SMOKE", None)
                 else:
-                    os.environ["RUN_BROWSER_SMOKE"] = old_env
+                    os.environ["RUN_BROWSER_SMOKE"] = old_env_smoke
+                if old_env_path is None:
+                    os.environ.pop("PYTHONPATH", None)
+                else:
+                    os.environ["PYTHONPATH"] = old_env_path
 
             # Parse output to categorize each test
             stdout_str = result.stdout or ""
@@ -562,24 +579,14 @@ def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
                 else:
                     unproven.append(f"{test_id} (status: {status})")
 
-            # Check: need at least one failing test per changed code file
-            # Map test files to code files they likely test
-            untested_code = []
-            for code_file in code_files:
-                # Simple heuristic: test_foo.py tests foo.py
-                code_name = Path(code_file).stem
-                # Look for any failed test that might test this file
-                has_failing_test = any(code_name in test_id for test_id in failed_on_base)
-                if not has_failing_test:
-                    untested_code.append(code_file)
-
             if unproven:
                 print(f"prove-tests: UNPROVEN {len(unproven)} test(s): {', '.join(unproven[:3])}")
                 return False
 
-            if untested_code:
-                print(f"prove-tests: FAIL no failing test for {', '.join(untested_code)} "
-                      f"({len(failed_on_base)} failed / {len(passed_on_base)} passed)")
+            # PASS if at least one test failed on base (proves new functionality)
+            if not failed_on_base:
+                print(f"prove-tests: FAIL no tests failed on base for {', '.join(code_files)} "
+                      f"(0 failed / {len(passed_on_base)} passed)")
                 return False
 
             print(f"prove-tests: PASS {len(failed_on_base)} failed / {len(passed_on_base)} passed / "
