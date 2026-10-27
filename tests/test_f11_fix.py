@@ -344,5 +344,77 @@ class PreMergeEmailCheckTests(unittest.TestCase):
         self.assertIn("FAIL", output)
 
 
+class F11Fix2Tests(unittest.TestCase):
+    """F11 fix round 2: normalized SHA, merged-but-unreadable SHA, author-fail CI timeout."""
+
+    NOREPLY = "teomarcelo@users.noreply.github.com"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.team = Path(self.tmp.name) / "team"
+        self.repo.mkdir()
+        for role, verdict in (("code-reviewer", "APPROVE"), ("safety-scanner", "CLEAR")):
+            team_kit.save_review(self.team, 5, role, OID, f"notes\nVERDICT: {verdict}")
+
+    def runner(self, merge_oid, api_out):
+        return FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, self.NOREPLY + "\n"),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "files" in " ".join(c), 0, json.dumps(GOOD_PR)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            (lambda c: c[:3] == ["gh", "pr", "merge"], 0, ""),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": merge_oid}, "headRefOid": OID})),
+            (lambda c: c[:2] == ["gh", "api"], 0, api_out),
+            (lambda c: c[:3] == ["gh", "pr", "create"], 0, "https://github.com/test/test/pull/99\n"),
+        ])
+
+    def merge(self, runner, ci):
+        out = io.StringIO()
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value=ci) as wait, \
+             mock.patch.object(team_gates.time, "sleep", side_effect=AssertionError("real sleep")), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        return code, out.getvalue(), wait
+
+    def test_normalized_sha_goes_to_gh_api_ci_and_git_revert(self):
+        raw = "  " + "B" * 40 + "\n"
+        runner = self.runner(raw, "bad@example.com\n")
+        code, out, wait = self.merge(runner, "failure")
+        self.assertEqual(code, 1, out)
+        api = runner.find("gh", "api")
+        self.assertEqual(api[0][0][2], "repos/{owner}/{repo}/commits/" + "b" * 40)
+        self.assertEqual(wait.call_args.args[1], "b" * 40)
+        self.assertEqual(runner.find("git", "revert")[0][0], ["git", "revert", "--no-edit", "b" * 40])
+
+    def test_unreadable_sha_says_already_merged_check_ci_by_hand(self):
+        for oid in ("", "not-a-valid-sha"):
+            with self.subTest(oid=oid):
+                runner = self.runner(oid, self.NOREPLY + "\n")
+                code, out, wait = self.merge(runner, "success")
+                self.assertEqual(code, 1)
+                self.assertIn("FAIL", out)
+                self.assertIn("already merged", out)
+                self.assertIn("check main CI by hand", out)
+                self.assertFalse(runner.find("gh", "api"))
+                wait.assert_not_called()
+
+    def test_author_fail_with_ci_timeout_prints_not_finished(self):
+        for api_out, problem in (("bad@example.com\n", "non-noreply author"),
+                                 ("", "cannot read merge commit author")):
+            with self.subTest(problem=problem):
+                runner = self.runner("b" * 40, api_out)
+                code, out, _ = self.merge(runner, "timeout")
+                self.assertEqual(code, 1)
+                self.assertIn(problem, out)
+                self.assertIn("main CI not finished", out)
+                self.assertNotIn("@", out)
+                self.assertFalse(runner.find("git", "revert"))
+
+
 if __name__ == "__main__":
     unittest.main()

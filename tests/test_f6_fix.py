@@ -75,8 +75,8 @@ class MergeStateAndOidTests(unittest.TestCase):
 
     def test_merged_but_head_changed_fails(self):
         """State MERGED but headRefOid doesn't match reviewed head - should fail."""
-        merge_oid = "m" * 40
-        different_oid = "d" * 40
+        merge_oid = "a" * 40
+        different_oid = "d" * 40  # valid hex, differs from OID
         noreply_email = "teomarcelo@users.noreply.github.com"
         runner = FakeRunner([
             (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),

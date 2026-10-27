@@ -359,32 +359,32 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     else:
         pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit,headRefOid", runner=runner) or {}
 
-    sha = (pr_view.get("mergeCommit") or {}).get("oid", "")
-    # Validate SHA before using it (fail closed)
-    if not sha or not is_valid_oid(sha):
-        print("merge-when-green: FAIL cannot read merge commit SHA")
+    sha = str((pr_view.get("mergeCommit") or {}).get("oid") or "").strip().lower()
+    # Validate SHA before using it (fail closed). The PR is already merged here.
+    if not is_valid_oid(sha):
+        print(f"merge-when-green: FAIL PR #{pr} is already merged but the merge commit SHA "
+              "cannot be read; check main CI by hand with `gh run list --branch main`")
         return 1
 
-    # Check that the merge commit author email is a noreply address (plain text, not JSON)
+    # Check that the merge commit author email is a noreply address (gh --jq prints plain text)
     author_result = run(["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{sha}",
                         "--jq", ".commit.author.email"], repo)
-    if author_result.returncode or not author_result.stdout.strip():
-        print("merge-when-green: FAIL cannot read merge commit author")
-        # Continue to CI wait and revert path (fail closed but still clean up)
+    author_email = author_result.stdout.strip() if not author_result.returncode else ""
+    if not author_email:
+        author_problem = "cannot read merge commit author"
+    elif not NOREPLY_PATTERN.match(author_email):
+        author_problem = "merge commit has non-noreply author"
+    else:
+        author_problem = ""
+    if author_problem:
+        print(f"merge-when-green: FAIL {author_problem}")
+        # Still wait for main CI and revert when red (fail closed, still clean up)
         result = wait_main_ci(repo, sha, runner=runner)
         if result == "failure":
             revert_by_pr(repo, pr, sha, runner=runner)
-        return 1
-
-    merge_author_email = author_result.stdout.strip()
-    # Full-match regex check
-    author_ok = NOREPLY_PATTERN.match(merge_author_email)
-    if not author_ok:
-        print("merge-when-green: FAIL merge commit has non-noreply author")
-        # Continue to CI wait and revert path
-        result = wait_main_ci(repo, sha, runner=runner)
-        if result == "failure":
-            revert_by_pr(repo, pr, sha, runner=runner)
+        elif result == "timeout":
+            print(f"merge-when-green: MERGED PR #{pr}, main CI not finished; "
+                  "check `gh run list --branch main`")
         return 1
 
     result = wait_main_ci(repo, sha, runner=runner)
