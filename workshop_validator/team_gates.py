@@ -32,6 +32,7 @@ PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+NOREPLY_PATTERN = re.compile(r"^[^@\s]+@users\.noreply\.github\.com$")
 
 
 def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -316,8 +317,9 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         print("merge-when-green: FAIL cannot read git config user.email")
         return 1
     user_email = user_email_result.stdout.strip()
-    if not user_email.endswith("@users.noreply.github.com"):
-        print(f"merge-when-green: FAIL user.email must end with @users.noreply.github.com, not {user_email}")
+    # Full-match regex: non-empty local part, no spaces, @users.noreply.github.com
+    if not NOREPLY_PATTERN.match(user_email):
+        print("merge-when-green: FAIL user.email must be a noreply address")
         return 1
     checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket",
                       runner=runner) or []
@@ -358,16 +360,34 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit,headRefOid", runner=runner) or {}
 
     sha = (pr_view.get("mergeCommit") or {}).get("oid", "")
-    # Check that the merge commit author email is a noreply address
-    if sha:
-        merge_author_json = _gh_json(repo, "api", f"repos/{{owner}}/{{repo}}/commits/{sha}",
-                                     "--jq", ".commit.author.email", runner=runner)
-        # The result is a JSON string (with quotes), or might be the string directly
-        merge_author_email = str(merge_author_json).strip().strip('"')
-        if merge_author_email and not merge_author_email.endswith("@users.noreply.github.com"):
-            print(f"merge-when-green: FAIL main merge commit exposes a non-noreply author email: {merge_author_email}")
-            return 1
-    result = wait_main_ci(repo, sha, runner=runner) if sha else "timeout"
+    # Validate SHA before using it (fail closed)
+    if not sha or not is_valid_oid(sha):
+        print("merge-when-green: FAIL cannot read merge commit SHA")
+        return 1
+
+    # Check that the merge commit author email is a noreply address (plain text, not JSON)
+    author_result = run(["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{sha}",
+                        "--jq", ".commit.author.email"], repo)
+    if author_result.returncode or not author_result.stdout.strip():
+        print("merge-when-green: FAIL cannot read merge commit author")
+        # Continue to CI wait and revert path (fail closed but still clean up)
+        result = wait_main_ci(repo, sha, runner=runner)
+        if result == "failure":
+            revert_by_pr(repo, pr, sha, runner=runner)
+        return 1
+
+    merge_author_email = author_result.stdout.strip()
+    # Full-match regex check
+    author_ok = NOREPLY_PATTERN.match(merge_author_email)
+    if not author_ok:
+        print("merge-when-green: FAIL merge commit has non-noreply author")
+        # Continue to CI wait and revert path
+        result = wait_main_ci(repo, sha, runner=runner)
+        if result == "failure":
+            revert_by_pr(repo, pr, sha, runner=runner)
+        return 1
+
+    result = wait_main_ci(repo, sha, runner=runner)
     if result == "success":
         # Delete remote branch after successful merge (only for automation/*)
         if head.startswith("automation/"):
