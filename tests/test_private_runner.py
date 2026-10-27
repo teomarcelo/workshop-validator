@@ -7,6 +7,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
 from workshop_validator.browser_worker import UIAssertion
 from workshop_validator.evidence import AssertionSpec, Observation
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
@@ -151,6 +156,7 @@ class _Page:
             raise AssertionError("still on the login host")
 
 
+@unittest.skipUnless(sync_playwright is not None, "Playwright required for login adapter tests")
 class LoginAdapterTests(unittest.TestCase):
     def test_username_first_form_clicks_before_password(self):
         page = _Page(combined_form=False)
@@ -543,6 +549,7 @@ def _state_playwright(harness):
     return sync_playwright
 
 
+@unittest.skipUnless(sync_playwright is not None, "Playwright required for session storage tests")
 class StoredSessionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

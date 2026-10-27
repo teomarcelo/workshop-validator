@@ -21,6 +21,11 @@ try:
 except ImportError:
     canvas = None
 
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
 
 VIDEO_BYTES = b"fake-session-video"
 
@@ -144,6 +149,7 @@ def fake_playwright(harness):
     return sync_playwright
 
 
+@unittest.skipUnless(sync_playwright is not None, "Playwright required for session video tests")
 class SessionVideoTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
