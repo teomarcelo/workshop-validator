@@ -55,8 +55,9 @@ def from_session(page, *, timeout_ms: int = 15000) -> dict | None:
             params={"q": SOQL},
             headers={"Authorization": f"Bearer {sid}", "Accept": "application/json"},
             timeout=timeout_ms,
+            max_redirects=0,
         )
-        if not response.ok:
+        if not response.ok or 300 <= response.status < 400:
             return None
         records = response.json().get("records") or []
     except Exception:
