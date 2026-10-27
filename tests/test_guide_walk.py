@@ -1992,6 +1992,12 @@ class OwnValueTests(unittest.TestCase):
             def fill(self, *args, **kwargs):
                 raise AssertionError("an own value must not be typed")
 
+            def get_attribute(self, name):
+                return "textbox" if name == "role" else None
+
+            def evaluate(self, script):
+                return "input"
+
         # Prefilled field -> PASS
         step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
         state = SimpleNamespace(page=object())
@@ -2058,6 +2064,10 @@ class OwnValueTests(unittest.TestCase):
                 return self.value
             def fill(self, *args, **kwargs):
                 raise AssertionError("an own value must not be typed")
+            def get_attribute(self, name):
+                return "textbox" if name == "role" else None
+            def evaluate(self, script):
+                return "input"
 
         optional_step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
         state = SimpleNamespace(page=object())
@@ -2083,6 +2093,10 @@ class OwnValueTests(unittest.TestCase):
                 return self.value
             def fill(self, *args, **kwargs):
                 raise AssertionError("an own value must not be typed")
+            def get_attribute(self, name):
+                return "textbox" if name == "role" else None
+            def evaluate(self, script):
+                return "input"
 
         mandatory_step = g.GuideStep("s2", 1, None, None, "i", "Email is required: (your email)", (0, 0, 0, 0), "p", ())
         state = SimpleNamespace(page=object())
@@ -2090,6 +2104,51 @@ class OwnValueTests(unittest.TestCase):
             result = g._act_own(state, mandatory_step, "Email")
         self.assertEqual(result.status, "NEEDS_REVIEW")
         self.assertTrue(result.freeze)
+
+    def test_skips_non_editable_elements_with_same_label(self):
+        """Non-editable header before editable input: input is used."""
+        from workshop_validator import guide_walk as g
+
+        class NonEditableHeader:
+            """A header or label element that looks like 'Email' but is not editable."""
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return ""  # Non-input elements return empty
+            def get_attribute(self, name):
+                return None  # No role
+            def evaluate(self, script):
+                return "div"  # Not an input tag
+
+        class EditableInput:
+            """The actual input field with a value."""
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return "user@example.test"
+            def get_attribute(self, name):
+                return "textbox" if name == "role" else None
+            def evaluate(self, script):
+                return "input"
+            def fill(self, *args, **kwargs):
+                raise AssertionError("an own value must not be typed")
+
+        class MultipleElements:
+            """Locator that returns multiple elements: first non-editable, second editable."""
+            def count(self):
+                return 2
+            def nth(self, index):
+                return NonEditableHeader() if index == 0 else EditableInput()
+
+        step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=object())
+        with patch.object(g, "labeled", return_value=MultipleElements()):
+            result = g._act_own(state, step, "Email")
+
+        # Should find the editable input and keep its value
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("already-set:Email", result.evidence_ids[0])
+        self.assertIn("left as is", result.note)
 
 
 class StepReadingTests(unittest.TestCase):

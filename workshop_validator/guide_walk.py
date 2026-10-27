@@ -1988,11 +1988,55 @@ def _is_field_mandatory(step_text: str, label: str) -> bool:
     return False
 
 
+def _is_editable_field(target) -> bool:
+    """Check if a target is an editable input field (not a header or label)."""
+    try:
+        # Check role first (textbox, combobox are editable)
+        role = target.get_attribute("role")
+        if role in ("textbox", "combobox"):
+            return True
+    except Exception:
+        # If we can't read the role, don't assume it's editable
+        pass
+
+    try:
+        # Check tag name (input, textarea are editable)
+        tag = target.evaluate("el => el.tagName.toLowerCase()")
+        if tag in ("input", "textarea"):
+            return True
+    except Exception:
+        # If we can't read the tag, don't assume it's editable
+        pass
+
+    return False
+
+
 def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | None:
     field = labeled(state.page, label)
-    target = None if field is None else _visible_match(field)
+    if field is None:
+        return None
+
+    # Find the first visible AND editable match
+    count = _count(field)
+    if count == 0:
+        return None
+    nth = getattr(field, "nth", None)
+    candidates = [nth(i) for i in range(min(count, 8))] if callable(nth) else [_first(field)]
+
+    target = None
+    for candidate in candidates:
+        try:
+            if hasattr(candidate, "is_visible") and not candidate.is_visible():
+                continue
+        except Exception:
+            continue
+        if _is_editable_field(candidate):
+            target = candidate
+            break
+
     if target is None:
         return None
+
     if _input(target).strip():
         return passed(step, f"already-set:{label}", OWN_VALUE_NOTE.format(label=label))
     # Empty field: check if mandatory
