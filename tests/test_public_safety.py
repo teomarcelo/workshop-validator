@@ -1,3 +1,4 @@
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -103,9 +104,56 @@ class PublicSafetyAuthorEmailTests(unittest.TestCase):
 
     def test_non_github_noreply_email_rejected(self):
         """Commits with non-GitHub noreply emails should be rejected."""
-        # This will be tested in the main() function which checks git log
-        # For now, test the email validation function when implemented
-        pass
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create base commit on origin/main
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Change email and create a new commit
+            subprocess.run(["git", "config", "user.email", "someone@host.internal.example"], cwd=repo, check=True, capture_output=True)
+            (repo / "test.txt").write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test"], cwd=repo, check=True, capture_output=True)
+
+            # Check should fail
+            from workshop_validator.public_safety import check_commit_emails
+            ok, msg = check_commit_emails(repo, "origin_main")
+            self.assertFalse(ok)
+            self.assertIn("internal.example", msg)
+
+    def test_github_noreply_email_accepted(self):
+        """Commits with GitHub noreply emails should be accepted."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "base@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create base commit on origin/main
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Create a new commit with GitHub noreply email
+            subprocess.run(["git", "config", "user.email", "1+x@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+            (repo / "test.txt").write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "test"], cwd=repo, check=True, capture_output=True)
+
+            # Check should pass
+            from workshop_validator.public_safety import check_commit_emails
+            ok, msg = check_commit_emails(repo, "origin_main")
+            self.assertTrue(ok)
 
 
 class PublicSafetyMainCleanTests(unittest.TestCase):
@@ -113,8 +161,45 @@ class PublicSafetyMainCleanTests(unittest.TestCase):
 
     def test_main_clean_mode_fails_with_untracked_files(self):
         """--main-clean should fail when untracked files exist."""
-        # This will be tested with the --main-clean CLI flag
-        pass
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create initial commit
+            (repo / "tracked.txt").write_text("tracked")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+
+            # Add untracked file
+            (repo / "untracked.txt").write_text("untracked")
+
+            # Check should fail
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(repo)
+            self.assertFalse(ok)
+            self.assertIn("untracked or modified", msg)
+
+    def test_main_clean_mode_passes_on_clean_tree(self):
+        """--main-clean should pass when tree is clean."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            # Initialize git repo
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create initial commit
+            (repo / "tracked.txt").write_text("tracked")
+            subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, capture_output=True)
+
+            # Check should pass
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(repo)
+            self.assertTrue(ok)
 
 
 if __name__ == "__main__":

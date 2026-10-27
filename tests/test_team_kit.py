@@ -1007,63 +1007,61 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
         """After non-zero gh pr merge, read PR state; if MERGED, continue."""
         merge_oid = "m" * 40
         runner = FakeRunner([
-            # First pr view call in merge_when_green
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefOid" in c and "mergeCommit" not in c, 0,
+            # Initial pr view call for info
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefOid" in " ".join(c), 0,
              json.dumps(GOOD_PR)),
             # pr checks call
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
-            # fetch call
-            (lambda c: c[:2] == ["git", "fetch"], 0, ""),
-            # merge-base call for merged_tree_gates
+            # merge-base for gates
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
-            # worktree add/remove for merged_tree_gates
-            (lambda c: c[:3] == ["git", "worktree", "add"], 0, ""),
-            (lambda c: c[:2] == ["git", "merge"], 0, ""),
-            (lambda c: c[:3] == ["git", "worktree", "remove"], 0, ""),
-            # prove_tests - use mock.patch instead
             # gh pr merge - returns non-zero
             (lambda c: c[:3] == ["gh", "pr", "merge"], 1, ""),
             # Second pr view call after non-zero merge (with state check)
-            (lambda c: c[:3] == ["gh", "pr", "view"] and ("state" in c or "mergeCommit" in c), 0,
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED"})),
             # run list for CI check
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": merge_oid, "status": "completed", "conclusion": "success"}])),
             # git push to delete branch
-            (lambda c: c[:3] == ["git", "push", "origin"], 0, ""),
+            (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
         out = io.StringIO()
-        with mock.patch.object(team_gates, "prove_tests", return_value=True):
-            with contextlib.redirect_stdout(out):
-                code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
 
         # Should continue and succeed since PR is MERGED
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 0, f"Output: {out.getvalue()}")
         self.assertIn("MERGED", out.getvalue())
 
     def test_merge_deletes_remote_branch_after_merge_not_local_in_worktree(self):
         """Should delete remote branch with git push origin --delete after merge, not local in worktree."""
         merge_oid = "m" * 40
         runner = FakeRunner([
-            # pr view calls
-            (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(GOOD_PR)),
+            # Initial pr view call
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefOid" in " ".join(c), 0,
+             json.dumps(GOOD_PR)),
+            # pr checks call
             (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
-            (lambda c: c[:2] == ["git", "fetch"], 0, ""),
+            # merge-base
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
-            (lambda c: c[:3] == ["git", "worktree", "add"], 0, ""),
-            (lambda c: c[:2] == ["git", "merge"], 0, ""),
-            (lambda c: c[:3] == ["git", "worktree", "remove"], 0, ""),
+            # gh pr merge - succeeds
             (lambda c: c[:3] == ["gh", "pr", "merge"], 0, ""),
-            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c, 0,
+            # pr view after merge
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}})),
+            # run list for CI
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": merge_oid, "status": "completed", "conclusion": "success"}])),
-            (lambda c: c[:3] == ["git", "push", "origin"], 0, ""),
+            # git push to delete branch
+            (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
 
-        with mock.patch.object(team_gates, "prove_tests", return_value=True):
-            with contextlib.redirect_stdout(io.StringIO()):
-                team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             contextlib.redirect_stdout(io.StringIO()):
+            team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
 
         # Should NOT use --delete-branch flag
         merge_calls = runner.find("gh", "pr", "merge")
