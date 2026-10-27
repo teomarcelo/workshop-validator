@@ -112,6 +112,33 @@ ALLOWED_BOT_EMAILS = frozenset({
 })
 
 
+def _count_bad_emails(git_log_output: str) -> int:
+    """Count non-GitHub-noreply emails in git log output.
+
+    Input format: git log --format=%ae%x00%ce output (NUL-separated author and committer
+    emails per commit, newline-separated commits). Empty emails are counted as bad.
+
+    Returns count of bad (non-noreply or empty) emails.
+    """
+    bad_count = 0
+    # Split on newline to get per-commit records
+    email_pairs = git_log_output.split('\n')
+    for pair in email_pairs:
+        if pair:
+            # Split on NUL to get author and committer emails
+            emails = pair.split('\x00')
+            for email in emails:
+                # Empty email is bad
+                if not email:
+                    bad_count += 1
+                    continue
+                # Allow GitHub noreply emails (user-specific)
+                if email.endswith("@users.noreply.github.com") or email in ALLOWED_BOT_EMAILS:
+                    continue
+                bad_count += 1
+    return bad_count
+
+
 def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str = "HEAD") -> tuple[bool, str]:
     """Check that all commits between base_ref and head_ref have allowed emails.
 
@@ -153,29 +180,14 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str
             cwd=root, capture_output=True, text=True, check=True
         )
 
-        # Split on NUL to preserve empty emails
-        email_pairs = result.stdout.split('\n')
-        emails = []
-        for pair in email_pairs:
-            if pair:
-                emails.extend(pair.split('\x00'))
-
-        # Check each email
-        bad_count = 0
-        for email in emails:
-            # Empty email fails (now detectable since we split on NUL)
-            if not email:
-                bad_count += 1
-                continue
-            # Allow GitHub noreply emails (user-specific)
-            if email.endswith("@users.noreply.github.com") or email in ALLOWED_BOT_EMAILS:
-                continue
-            bad_count += 1
+        bad_count = _count_bad_emails(result.stdout)
 
         if bad_count > 0:
             return False, f"Found {bad_count} non-GitHub noreply email(s)"
 
-        return True, f"All {len(emails)} commit emails are GitHub noreply or allowed bots"
+        # Count total emails for success message
+        email_count = sum(len(pair.split('\x00')) for pair in result.stdout.split('\n') if pair)
+        return True, f"All {email_count} commit emails are GitHub noreply or allowed bots"
     except subprocess.CalledProcessError:
         return False, "Could not check commit emails"
 

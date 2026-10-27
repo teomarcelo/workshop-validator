@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest import mock
 
 from workshop_validator import team_gates, team_kit
-from workshop_validator.public_safety import check_commit_emails
+from workshop_validator.public_safety import check_commit_emails, _count_bad_emails
 
 
 OID = "a" * 40
@@ -301,6 +301,34 @@ class SyntheticMergeCommitTests(unittest.TestCase):
 
 class EmptyEmailDetectionTests(unittest.TestCase):
     """Security re-review: Empty email detection with NUL-separated format."""
+
+    def test_count_bad_emails_with_empty_author(self):
+        """Empty author email should be counted as bad."""
+        # Format: author\x00committer per commit, newline-separated
+        # Empty author, good committer
+        git_output = "\x00good@users.noreply.github.com"
+        bad_count = _count_bad_emails(git_output)
+        self.assertEqual(bad_count, 1, "Empty author should be counted as bad")
+
+    def test_count_bad_emails_with_empty_committer(self):
+        """Empty committer email should be counted as bad."""
+        # Good author, empty committer
+        git_output = "good@users.noreply.github.com\x00"
+        bad_count = _count_bad_emails(git_output)
+        self.assertEqual(bad_count, 1, "Empty committer should be counted as bad")
+
+    def test_count_bad_emails_all_good(self):
+        """All good noreply emails should return 0 bad count."""
+        # Two commits, all noreply emails
+        git_output = "author1@users.noreply.github.com\x00committer1@users.noreply.github.com\nauthor2@users.noreply.github.com\x00committer2@users.noreply.github.com"
+        bad_count = _count_bad_emails(git_output)
+        self.assertEqual(bad_count, 0, "All noreply emails should be good")
+
+    def test_count_bad_emails_with_non_noreply(self):
+        """Non-noreply emails should be counted as bad."""
+        git_output = "bad@example.com\x00good@users.noreply.github.com"
+        bad_count = _count_bad_emails(git_output)
+        self.assertEqual(bad_count, 1, "Non-noreply email should be counted as bad")
 
     def test_empty_email_detected_with_nul_format(self):
         """Empty author or committer email should be detected using NUL-separated format."""
