@@ -4017,11 +4017,19 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     done: list[str] = []
     renamed: CheckResult | None = None
     for name in names:
-        if norm(name) in {"ok", "okay"} and not _control_visible(state.page, name):
+        if norm(name) in {"ok", "okay"} and _locator_for_name(state.page, name) is None:
             if _words_visible(state.page, "successfully saved"):
-                note = "Clicked " + " then ".join(done) + "."
-                note += " The page showed your settings have been successfully saved."
-                return passed(step, "clicked", note)
+                page_text = _read_page_text(state.page)
+                lines = [ln.strip() for ln in page_text.split("\n") if "saved" in norm(ln)]
+                banner_text = lines[0] if lines else "successfully saved"
+                evidence_token = re.sub(r"[^A-Za-z0-9_.:-]+", "-", banner_text).strip("-")
+                evidence_ids = (f"{step.step_id}:{evidence_token}",)
+                prefix = "Clicked " + " then ".join(done) + ". " if done else ""
+                note = (
+                    f"{prefix}The guide expects a popup with {name}, but the page shows an inline "
+                    f"saved message: {_snippet(banner_text)}"
+                )
+                return CheckResult("UI_MISMATCH", note, evidence_ids, freeze=False)
         result = _finish_attempt(state, step, _Intent("click", name))
         if result.status == "UI_MISMATCH" and not result.freeze and result.evidence_ids:
             renamed = renamed or result
