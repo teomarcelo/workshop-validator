@@ -435,7 +435,12 @@ def build_board(
         1 for section in sections
         for task in section.tasks
         for step in task.steps
-        if step.status == "PASS" and ("presence-only" in step.chips or "no-screen-change" in step.chips)
+        if step.status == "PASS" and any(
+            flag in step.chips for flag in (
+                "presence-only", "no-screen-change", "weak-evidence",
+                "url-only-evidence", "unexpected-change"
+            )
+        )
     )
     if failed:
         tone = "failed"
@@ -950,6 +955,21 @@ def _render_step(step: StepView) -> str:
                     "<span class='chip suspect' title='URL, page title, and headings did not change after the action'>"
                     "Screen did not change</span>"
                 )
+            elif chip == "weak-evidence":
+                chip_items.append(
+                    "<span class='chip suspect' title='Evidence is based only on a click action, with no visible confirmation'>"
+                    "Weak evidence</span>"
+                )
+            elif chip == "url-only-evidence":
+                chip_items.append(
+                    "<span class='chip suspect' title='Evidence is the URL only'>"
+                    "Evidence is the URL only</span>"
+                )
+            elif chip == "unexpected-change":
+                chip_items.append(
+                    "<span class='chip suspect' title='The page changed in an unexpected way'>"
+                    "Unexpected page change</span>"
+                )
         if chip_items:
             chips_html = f"<div class='chips'>{''.join(chip_items)}</div>"
     return (
@@ -1108,7 +1128,12 @@ def render_run_report(
     renamed_count = sum("renamed" in step.chips for step in steps)
     suspect_pass_count = sum(
         1 for step in steps
-        if step.status == "PASS" and ("presence-only" in step.chips or "no-screen-change" in step.chips)
+        if step.status == "PASS" and any(
+            flag in step.chips for flag in (
+                "presence-only", "no-screen-change", "weak-evidence",
+                "url-only-evidence", "unexpected-change"
+            )
+        )
     )
 
     stats_parts = [
@@ -1276,6 +1301,12 @@ def render_run_report(
                             chips_html.append("<span class='chip suspect' title='Evidence based only on element presence, not visible text'>Weak evidence: element only</span>")
                         elif chip == "no-screen-change":
                             chips_html.append("<span class='chip suspect' title='URL, page title, and headings did not change after the action'>Screen did not change</span>")
+                        elif chip == "weak-evidence":
+                            chips_html.append("<span class='chip suspect' title='Evidence is based only on a click action, with no visible confirmation'>Weak evidence</span>")
+                        elif chip == "url-only-evidence":
+                            chips_html.append("<span class='chip suspect' title='Evidence is the URL only'>Evidence is the URL only</span>")
+                        elif chip == "unexpected-change":
+                            chips_html.append("<span class='chip suspect' title='The page changed in an unexpected way'>Unexpected page change</span>")
                     if chips_html:
                         sections_html.append("<div class='chips'>" + "".join(chips_html) + "</div>")
 
