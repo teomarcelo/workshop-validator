@@ -34,3 +34,4 @@ verification-orgs.json
 gate.json
 history.json
 .claude/worktrees/
+.claude/scheduled_tasks.json

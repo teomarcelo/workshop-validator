@@ -7,7 +7,8 @@
       "Bash(git push origin main*)",
       "Bash(git push --force*)",
       "Bash(git push -f*)",
-      "Bash(cat ~/.workshop-validator/verification-orgs.json*)"
+      "Bash(cat ~/.workshop-validator/verification-orgs.json*)",
+      "Bash(gh pr merge*--admin*)"
     ],
     "allow": [
       "Bash(.venv/bin/python -m unittest*)",
@@ -45,14 +46,13 @@
       "Bash(.venv/bin/python -m workshop_validator.team_kit*)",
       "Bash(.venv/bin/python -m workshop_validator.team_gates*)",
       "Bash(.venv/bin/python -m workshop_validator.team_dashboard*)",
-      "Bash(gh pr merge*)",
       "Bash(gh pr list*)",
       "Bash(gh run list*)",
-      "Bash(git revert*)",
-      "Bash(git worktree*)",
       "Bash(git fetch*)",
       "Bash(git add briefs/*)",
-      "Bash(git add .github/*)"
+      "Bash(git add .github/*)",
+      "Bash(git worktree add*)",
+      "Bash(git worktree list*)"
     ]
   },
   "hooks": {
