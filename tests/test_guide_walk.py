@@ -2040,9 +2040,12 @@ class OwnValueTests(unittest.TestCase):
             self.assertEqual(result.status, "NEEDS_REVIEW")
             self.assertTrue(result.freeze)
 
-        # Field not found -> None
-        with patch.object(g, "labeled", return_value=None):
-            self.assertIsNone(g._act_own(state, step, "Email"))
+        # Field not found -> NOT_RUN for optional field
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=None):
+                result = g._act_own(state, step, "Email")
+                self.assertEqual(result.status, "NOT_RUN")
+                self.assertFalse(result.freeze)
 
     def test_field_mandatory_detection(self):
         from workshop_validator.guide_walk import _is_field_mandatory
@@ -2170,6 +2173,139 @@ class OwnValueTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS")
         self.assertIn("already-set:Email", result.evidence_ids[0])
         self.assertIn("left as is", result.note)
+
+    def test_optional_field_not_on_page_returns_not_run(self):
+        """Optional own-value field not found -> NOT_RUN with reason."""
+        from workshop_validator import guide_walk as g
+
+        optional_step = g.GuideStep("s1", 1, None, None, "i", "Custom Field: (your value)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=SimpleNamespace())
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=None):
+                result = g._act_own(state, optional_step, "Custom Field")
+
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertFalse(result.freeze)
+        self.assertIn("Custom Field", result.note)
+        self.assertIn("no element with this label", result.note)
+        self.assertIn("does not mark it mandatory", result.note)
+        self.assertIn("left unchanged", result.note)
+
+    def test_optional_only_noneditable_header_returns_not_run(self):
+        """Optional field with only non-editable header -> NOT_RUN."""
+        from workshop_validator import guide_walk as g
+
+        class NonEditableHeader:
+            def is_visible(self):
+                return True
+            def get_attribute(self, name):
+                return None
+            def evaluate(self, script):
+                return "div"
+
+        class HeaderLocator:
+            def count(self):
+                return 1
+            def nth(self, index):
+                return NonEditableHeader()
+
+        optional_step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=SimpleNamespace())
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=HeaderLocator()):
+                result = g._act_own(state, optional_step, "Email")
+
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertFalse(result.freeze)
+        self.assertIn("Email", result.note)
+        self.assertIn("no editable element", result.note)
+
+    def test_mandatory_field_not_found_freezes(self):
+        """Mandatory own-value field not found -> UI_MISMATCH with freeze."""
+        from workshop_validator import guide_walk as g
+
+        mandatory_step = g.GuideStep("s2", 1, None, None, "i", "Email is required: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=SimpleNamespace())
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=None):
+                result = g._act_own(state, mandatory_step, "Email")
+
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertIn("Email", result.note)
+        self.assertIn("no element with this label", result.note)
+        self.assertIn("marks it mandatory", result.note)
+
+    def test_is_editable_checks_fallback_when_reads_raise(self):
+        """Field where tag/role read raises but is_editable() is True -> found."""
+        from workshop_validator import guide_walk as g
+
+        class FallbackEditableField:
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return "preset@example.test"
+            def get_attribute(self, name):
+                raise RuntimeError("attribute read failed")
+            def evaluate(self, script):
+                raise RuntimeError("evaluate failed")
+            def is_editable(self):
+                return True
+
+        class FieldLocator:
+            def count(self):
+                return 1
+            def nth(self, index):
+                return FallbackEditableField()
+
+        step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=SimpleNamespace())
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=FieldLocator()):
+                result = g._act_own(state, step, "Email")
+
+        # Should find the field and see it's already set
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("already-set:Email", result.evidence_ids[0])
+
+    def test_many_noneditable_before_textbox_finds_textbox(self):
+        """9 non-editable elements then textbox -> textbox found (cap raised to 20)."""
+        from workshop_validator import guide_walk as g
+
+        class NonEditableDiv:
+            def is_visible(self):
+                return True
+            def get_attribute(self, name):
+                return None
+            def evaluate(self, script):
+                return "div"
+
+        class EditableInput:
+            def is_visible(self):
+                return True
+            def input_value(self, timeout=None):
+                return "user@example.test"
+            def get_attribute(self, name):
+                return "textbox" if name == "role" else None
+            def evaluate(self, script):
+                return "input"
+
+        class ManyElementsLocator:
+            def count(self):
+                return 10
+            def nth(self, index):
+                # First 9 are non-editable, 10th is editable
+                return NonEditableDiv() if index < 9 else EditableInput()
+
+        step = g.GuideStep("s1", 1, None, None, "i", "Email: (your email)", (0, 0, 0, 0), "p", ())
+        state = SimpleNamespace(page=SimpleNamespace())
+        with patch.object(g, "_roots", return_value=[state.page]):
+            with patch.object(g, "labeled", return_value=ManyElementsLocator()):
+                result = g._act_own(state, step, "Email")
+
+        # Should find the editable input at index 9 (was capped at 8 before fix)
+        self.assertEqual(result.status, "PASS")
+        self.assertIn("already-set:Email", result.evidence_ids[0])
 
 
 class StepReadingTests(unittest.TestCase):

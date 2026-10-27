@@ -2216,34 +2216,103 @@ def _is_editable_field(target) -> bool:
         # If we can't read the tag, don't assume it's editable
         pass
 
+    # If both checks failed but is_editable() is available, use it
+    try:
+        if hasattr(target, "is_editable") and target.is_editable():
+            return True
+    except Exception:
+        pass
+
     return False
 
 
 def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | None:
-    field = labeled(state.page, label)
-    if field is None:
-        return None
-
-    # Find the first visible AND editable match
-    count = _count(field)
-    if count == 0:
-        return None
-    nth = getattr(field, "nth", None)
-    candidates = [nth(i) for i in range(min(count, 8))] if callable(nth) else [_first(field)]
-
+    # Try textbox role first (more specific)
     target = None
-    for candidate in candidates:
+    for root in _roots(state.page):
         try:
-            if hasattr(candidate, "is_visible") and not candidate.is_visible():
-                continue
+            textbox = root.get_by_role("textbox", name=label, exact=True)
+            if textbox and _count(textbox) > 0:
+                candidate = _visible_match(textbox)
+                if candidate and _is_editable_field(candidate):
+                    target = candidate
+                    break
         except Exception:
             continue
-        if _is_editable_field(candidate):
-            target = candidate
-            break
 
+    # Fall back to label lookup
     if target is None:
-        return None
+        field = labeled(state.page, label)
+        if field is None:
+            # No element with this label
+            step_text = step.text or ""
+            mandatory = _is_field_mandatory(step_text, label)
+            reason = "no element with this label"
+            note = (f"{label}: the guide asks for the learner's own value "
+                   f"{'and marks it mandatory' if mandatory else 'and does not mark it mandatory'}, "
+                   f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
+                   f"The field was not read ({reason}).")
+            if mandatory:
+                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+            return CheckResult("NOT_RUN", note, ())
+
+        # Find the first visible AND editable match
+        count = _count(field)
+        if count == 0:
+            # No visible element
+            step_text = step.text or ""
+            mandatory = _is_field_mandatory(step_text, label)
+            reason = "no visible element"
+            note = (f"{label}: the guide asks for the learner's own value "
+                   f"{'and marks it mandatory' if mandatory else 'and does not mark it mandatory'}, "
+                   f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
+                   f"The field was not read ({reason}).")
+            if mandatory:
+                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+            return CheckResult("NOT_RUN", note, ())
+
+        nth = getattr(field, "nth", None)
+        # Try up to 20 candidates when looking for an editable field
+        candidates = [nth(i) for i in range(min(count, 20))] if callable(nth) else [_first(field)]
+
+        visible_candidates = []
+        for candidate in candidates:
+            try:
+                if hasattr(candidate, "is_visible") and not candidate.is_visible():
+                    continue
+            except Exception:
+                continue
+            visible_candidates.append(candidate)
+            if _is_editable_field(candidate):
+                target = candidate
+                break
+
+        if target is None:
+            # No editable element found
+            step_text = step.text or ""
+            mandatory = _is_field_mandatory(step_text, label)
+            # Collect tag/role info from visible candidates (max 3)
+            tag_role_info = []
+            for cand in visible_candidates[:3]:
+                try:
+                    tag = cand.evaluate("el => el.tagName.toLowerCase()")
+                    role = cand.get_attribute("role") or "no-role"
+                    tag_role_info.append(f"{tag}/{role}")
+                except Exception:
+                    pass
+
+            if tag_role_info:
+                reason = f"no editable element (found: {' x '.join(tag_role_info)} x {len(visible_candidates)})"
+            else:
+                reason = "no editable element"
+
+            note = (f"{label}: the guide asks for the learner's own value "
+                   f"{'and marks it mandatory' if mandatory else 'and does not mark it mandatory'}, "
+                   f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
+                   f"The field was not read ({reason}).")
+            if mandatory:
+                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+            return CheckResult("NOT_RUN", note, ())
 
     if _input(target).strip():
         return passed(step, f"already-set:{label}", OWN_VALUE_NOTE.format(label=label))
