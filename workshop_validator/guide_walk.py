@@ -243,16 +243,15 @@ def click_role(page, role: str, name: str) -> bool:
     if not _guide_allows_control(page, name):
         return False
     for root in _roots(page):
-        for exact in (True, False):
-            loc = _by_role(root, role, name, exact=exact)
-            target = None if loc is None else _visible_match(loc)
-            if target is None:
-                continue
-            try:
-                target.click(timeout=8000)
-                return True
-            except Exception:
-                continue
+        loc = _by_role(root, role, name, exact=True)
+        target = None if loc is None else _visible_match(loc)
+        if target is None:
+            continue
+        try:
+            target.click(timeout=8000)
+            return True
+        except Exception:
+            continue
     return False
 
 
@@ -1778,17 +1777,16 @@ def _locator_for_name(page, name: str):
         f"button[aria-label='{quoted}']",
         f"[aria-label='{quoted}']",
     )
-    for exact in (True, False):
-        for root in _roots(page):
-            for role in roles:
-                loc = _by_role(root, role, name, exact=exact)
-                if loc is not None and _visible(loc):
-                    return loc
+    for root in _roots(page):
+        for role in roles:
+            loc = _by_role(root, role, name, exact=True)
+            if loc is not None and _visible(loc):
+                return loc
     for root in _roots(page):
         title_of = getattr(root, "get_by_title", None)
         if callable(title_of):
             try:
-                loc = title_of(name, exact=False)
+                loc = title_of(name, exact=True)
             except TypeError:
                 try:
                     loc = title_of(name)
@@ -1806,7 +1804,7 @@ def _locator_for_name(page, name: str):
             if _visible(loc):
                 return loc
         try:
-            loc = root.get_by_text(name, exact=False)
+            loc = root.get_by_text(name, exact=True)
         except Exception:
             loc = None
         if loc is not None and _visible(loc):
@@ -2187,10 +2185,9 @@ def _click_choice(page, name: str) -> bool:
         if click_role(candidate, "button", name) or click_role(candidate, "link", name):
             return True
         for root in _roots(candidate):
-            for exact in (True, False):
-                loc = _text_choice(root, name, exact)
-                if loc is not None and _visible(loc) and _click_locator(loc):
-                    return True
+            loc = _text_choice(root, name, exact=True)
+            if loc is not None and _visible(loc) and _click_locator(loc):
+                return True
     return False
 
 
@@ -2468,19 +2465,20 @@ def _leave_copy_mode(page) -> None:
         if click_role(page, "button", name):
             return
     for root in _roots(page):
-        try:
-            text = root.get_by_text("want to copy", exact=False)
-        except Exception:
-            continue
-        if not _visible(text):
-            continue
-        try:
-            button = text.locator("xpath=ancestor::*[.//button][1]//button").last
-            if _visible(button):
-                button.click(timeout=8000)
-                return
-        except Exception:
-            continue
+        for phrase in ("elements you want to copy", "Elements you want to copy"):
+            try:
+                text = root.get_by_text(phrase, exact=True)
+            except Exception:
+                continue
+            if not _visible(text):
+                continue
+            try:
+                button = text.locator("xpath=ancestor::*[.//button][1]//button").last
+                if _visible(button):
+                    button.click(timeout=8000)
+                    return
+            except Exception:
+                continue
     try:
         page.keyboard.press("Escape")
     except Exception:
@@ -2611,11 +2609,10 @@ def _screen_item(page):
     """The Screen element. The Start node named Screen Flow is not that element."""
     if _automation_dialog(page):
         return None
-    pattern = re.compile(r"^Screen\b", re.I)
     for root in _roots(page):
         for role in ("option", "menuitem", "treeitem", "listitem", "button", "link"):
             try:
-                loc = root.get_by_role(role, name=pattern)
+                loc = root.get_by_role(role, name="Screen", exact=True)
             except Exception:
                 continue
             if loc is None:
@@ -2696,21 +2693,22 @@ def _type_screen_search(page) -> bool:
         finder = getattr(root, "get_by_placeholder", None)
         if not callable(finder):
             continue
-        try:
-            loc = finder(re.compile(r"search", re.I))
-        except Exception:
-            continue
-        count = min(_count(loc), 6)
-        for index in range(count):
-            item = loc.nth(index)
-            hint = _input_hint(item)
-            if not _is_element_search(hint) or not _visible(item):
-                continue
+        for placeholder in ("Search", "search"):
             try:
-                item.fill("Screen")
-                return True
+                loc = finder(placeholder, exact=True)
             except Exception:
                 continue
+            count = min(_count(loc), 6)
+            for index in range(count):
+                item = loc.nth(index)
+                hint = _input_hint(item)
+                if not _is_element_search(hint) or not _visible(item):
+                    continue
+                try:
+                    item.fill("Screen")
+                    return True
+                except Exception:
+                    continue
     return False
 
 
@@ -2910,7 +2908,7 @@ def _start_box(root) -> dict | None:
     for name in ("Screen Flow", "Start"):
         locs = []
         for role in ("button", "link", "group"):
-            locs.append(_by_role(root, role, name, exact=False))
+            locs.append(_by_role(root, role, name, exact=True))
         locs.append(_text_choice(root, name, exact=True))
         for loc in locs:
             if loc is None or not _visible(loc):
@@ -2967,13 +2965,6 @@ def _open_add_element(page) -> None:
             _mark_plus(page)
             return
     for root in _roots(page):
-        try:
-            named = root.get_by_role("button", name=re.compile(r"add element", re.I))
-        except Exception:
-            named = None
-        if named is not None and _visible(named) and _click_locator(named):
-            _mark_plus(page)
-            return
         locate = getattr(root, "locator", None)
         if not callable(locate):
             continue
