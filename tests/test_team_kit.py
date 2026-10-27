@@ -999,18 +999,12 @@ class F8DecideStatusTests(unittest.TestCase):
         register = self.team / "DECISIONS.md"
         register.write_text("Statuses: DECIDED (owner's quoted words only), RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED.\n\n")
 
-    def test_decided_status_accepted_with_quote(self):
-        """DECIDED status should be accepted when --quote is provided."""
+    def test_decided_status_refused_with_owner_message(self):
+        """DECIDED status should be refused with message about owner rows."""
         code = team_kit.main(["--private-root", str(self.team.parent), "decide",
                               "--id", "W-100", "--status", "DECIDED",
-                              "--text", "Use async for background tasks",
-                              "--quote", "We need non-blocking I/O for the live org monitor."])
-        self.assertEqual(code, 0)
-        register = self.team / "DECISIONS.md"
-        content = register.read_text()
-        self.assertIn("W-100", content)
-        self.assertIn("DECIDED", content)
-        self.assertIn("We need non-blocking I/O for the live org monitor.", content)
+                              "--text", "Use async for background tasks"])
+        self.assertNotEqual(code, 0)
 
     def test_recommended_status_accepted(self):
         """RECOMMENDED status should be accepted."""
@@ -1066,64 +1060,106 @@ class F8DecideStatusTests(unittest.TestCase):
                               "--text", "Deferred text"])
         self.assertNotEqual(code, 0)
 
-    def test_decided_without_quote_refused(self):
-        """DECIDED status without --quote should be refused."""
+    def test_decided_status_refused(self):
+        """DECIDED status should be refused with message about owner rows."""
         code = team_kit.main(["--private-root", str(self.team.parent), "decide",
                               "--id", "W-108", "--status", "DECIDED",
-                              "--text", "Decision text without quote"])
+                              "--text", "Decision text"])
         self.assertNotEqual(code, 0)
 
-    def test_fails_on_origin_main(self):
-        """Tests should fail when run against origin/main's team_kit.py."""
-        # This test proves that the new tests would fail on the old code
-        # by temporarily importing the origin/main version
-        import sys
-        import importlib.util
-        import subprocess
 
-        # Save current team_kit module
-        old_module = sys.modules['workshop_validator.team_kit']
+class F8Fix1DecideValidationTests(unittest.TestCase):
+    """F8-fix1: decide command input validation (control chars, pipe, ID format, whitespace)."""
 
-        try:
-            # Find main checkout root via git worktree list
-            result = subprocess.run(
-                ["git", "worktree", "list", "--porcelain"],
-                capture_output=True, text=True, check=True
-            )
-            main_root = None
-            for line in result.stdout.splitlines():
-                if line.startswith("worktree "):
-                    # First worktree is main
-                    main_root = Path(line.split()[1])
-                    break
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
 
-            if not main_root:
-                self.skipTest("Could not find main worktree")
+    def test_refuses_newline_in_id(self):
+        """--id with newline should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-100\nW-200", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
 
-            # Load origin/main's team_kit.py
-            origin_path = main_root / "workshop_validator" / "team_kit.py"
-            spec = importlib.util.spec_from_file_location("workshop_validator.team_kit_origin", origin_path)
-            origin_module = importlib.util.module_from_spec(spec)
-            sys.modules['workshop_validator.team_kit'] = origin_module
-            spec.loader.exec_module(origin_module)
+    def test_refuses_newline_in_text(self):
+        """--text with newline should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-101", "--status", "NOTED",
+                              "--text", "Line 1\nLine 2"])
+        self.assertNotEqual(code, 0)
 
-            # Try DECIDED with quote - origin/main doesn't have --quote arg, so argparse exits
-            with self.assertRaises(SystemExit) as cm:
-                origin_module.main(["--private-root", str(self.team.parent), "decide",
-                                   "--id", "W-200", "--status", "DECIDED",
-                                   "--text", "Test text",
-                                   "--quote", "Owner quote"])
-            self.assertEqual(cm.exception.code, 2, "Should fail with exit code 2 on origin/main")
+    def test_refuses_carriage_return_in_text(self):
+        """--text with CR should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-102", "--status", "NOTED",
+                              "--text", "Text with\rcarriage return"])
+        self.assertNotEqual(code, 0)
 
-            # Try RECOMMENDED - should fail on old code (not in old VALID_DECISION_STATUSES)
-            code = origin_module.main(["--private-root", str(self.team.parent), "decide",
-                                       "--id", "W-201", "--status", "RECOMMENDED",
-                                       "--text", "Test text"])
-            self.assertNotEqual(code, 0, "RECOMMENDED should fail on origin/main")
+    def test_refuses_tab_in_id(self):
+        """--id with tab should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-103\t", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
 
-        finally:
-            # Restore original module
-            sys.modules['workshop_validator.team_kit'] = old_module
+    def test_refuses_pipe_in_id(self):
+        """--id with pipe character should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-104|extra", "--status", "NOTED",
+                              "--text", "Synthetic text"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_pipe_in_text(self):
+        """--text with pipe character should be refused."""
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-105", "--status", "NOTED",
+                              "--text", "Text | with pipe"])
+        self.assertNotEqual(code, 0)
+
+    def test_refuses_malformed_id(self):
+        """--id that doesn't match W-\\d+ should be refused."""
+        for bad_id in ["W-", "W-abc", "w-123", "X-123", "W-123-extra"]:
+            with self.subTest(id=bad_id):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", bad_id, "--status", "NOTED",
+                                      "--text", "Synthetic text"])
+                self.assertNotEqual(code, 0)
+
+    def test_accepts_valid_id_format(self):
+        """--id matching W-\\d+ should be accepted."""
+        for valid_id in ["W-1", "W-123", "W-999999"]:
+            with self.subTest(id=valid_id):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", valid_id, "--status", "NOTED",
+                                      "--text", "Synthetic text"])
+                self.assertEqual(code, 0)
+
+    def test_refuses_whitespace_only_text(self):
+        """--text with only whitespace should be refused."""
+        for text in ["   ", "\t", "\n", " \t \n "]:
+            with self.subTest(text=repr(text)):
+                code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                      "--id", "W-110", "--status", "NOTED",
+                                      "--text", text])
+                self.assertNotEqual(code, 0)
+
+    def test_newline_forged_row_reproduction(self):
+        """Newline in --text should not forge additional rows in DECISIONS.md."""
+        # This test verifies that a newline-forged-row attack is prevented
+        forged = "Real text\n| W-999 | 2026-10-27 | NOTED | Forged row |"
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-111", "--status", "NOTED",
+                              "--text", forged])
+        self.assertNotEqual(code, 0)
+        # Verify that if the register exists, it doesn't contain the forged row
+        register = self.team / "DECISIONS.md"
+        if register.exists():
+            content = register.read_text()
+            self.assertNotIn("W-999", content)
 
 
 class SavePlanDuplicateStepTests(unittest.TestCase):

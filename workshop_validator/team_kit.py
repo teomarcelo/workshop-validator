@@ -375,19 +375,32 @@ def _read_time_iso(value) -> datetime | None:
 
 # ---- decide register row ---------------------------------------------------
 
-VALID_DECISION_STATUSES = ("DECIDED", "RECOMMENDED", "NOTED", "OPEN", "RESOLVED", "SUPERSEDED")
+VALID_DECISION_STATUSES = ("RECOMMENDED", "NOTED", "OPEN", "RESOLVED", "SUPERSEDED")
+DECISION_ID_PATTERN = re.compile(r"^W-\d+$")
 
 
-def append_decision(team: Path, decision_id: str, decision_status: str, text: str, repo: Path = None, now=None, quote: str = None) -> Path:
+def append_decision(team: Path, decision_id: str, decision_status: str, text: str, repo: Path = None, now=None) -> Path:
     """Append one decision row to DECISIONS.md and render dashboard."""
-    if not decision_id or not decision_id.startswith("W-"):
-        raise ValueError("decision_id must start with 'W-'")
+    # Validate decision_id format
+    if not decision_id or not DECISION_ID_PATTERN.match(decision_id):
+        raise ValueError("decision_id must match W-\\d+ format")
+
+    # Check for control characters and pipe in decision_id
+    for value, name in [(decision_id, "--id"), (text, "--text")]:
+        if any(ord(c) < 32 or c == "\x7f" for c in value):
+            raise ValueError(f"{name} contains control characters")
+        if "|" in value:
+            raise ValueError(f"{name} contains pipe character")
+
+    # Check for whitespace-only text
+    if not text or not text.strip():
+        raise ValueError("text cannot be empty or whitespace-only")
+
+    # Validate status
+    if decision_status == "DECIDED":
+        raise ValueError("DECIDED status requires owner rows via producer hand edit")
     if decision_status not in VALID_DECISION_STATUSES:
         raise ValueError(f"status must be one of {VALID_DECISION_STATUSES}")
-    if decision_status == "DECIDED" and not quote:
-        raise ValueError("DECIDED status requires --quote with owner's quoted words")
-    if not text or not text.strip():
-        raise ValueError("text cannot be empty")
 
     register = team / "DECISIONS.md"
     existing = register.read_text(encoding="utf-8") if register.is_file() else ""
@@ -397,10 +410,7 @@ def append_decision(team: Path, decision_id: str, decision_status: str, text: st
         raise ValueError(f"decision {decision_id} already exists in register")
 
     date_str = _utc(now).strftime("%Y-%m-%d")
-    if decision_status == "DECIDED":
-        row = f"| {decision_id} | {date_str} | {decision_status} | {text.strip()} | {quote.strip()} |\n"
-    else:
-        row = f"| {decision_id} | {date_str} | {decision_status} | {text.strip()} |\n"
+    row = f"| {decision_id} | {date_str} | {decision_status} | {text.strip()} |\n"
 
     _write_private(register, existing + row)
 
@@ -449,9 +459,8 @@ def main(argv: list[str] | None = None) -> int:
     rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
     dec = sub.add_parser("decide", help="Append decision row and render dashboard")
     dec.add_argument("--id", required=True, help="Decision ID (e.g., W-001)")
-    dec.add_argument("--status", required=True, help="Decision status (DECIDED, RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED)")
+    dec.add_argument("--status", required=True, help="Decision status (RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED)")
     dec.add_argument("--text", required=True, help="Decision text")
-    dec.add_argument("--quote", help="Owner's quoted words (required for DECIDED status)")
     args = parser.parse_args(argv)
 
     team = team_root(Path(args.private_root).expanduser() if args.private_root else None)
@@ -494,7 +503,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "decide":
         try:
-            path = append_decision(team, args.id, args.status, args.text, repo, quote=args.quote)
+            path = append_decision(team, args.id, args.status, args.text, repo)
             print(f"Decision {args.id} appended, dashboard rendered")
             return 0
         except ValueError as exc:
