@@ -293,9 +293,9 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     from . import public_safety
     try:
         clean_ok, clean_msg = public_safety.check_main_clean(repo, check_dirty=False)
-    except OSError as exc:
-        # Catch any OSError from check_main_clean and report as STALLED (no crash)
-        clean_ok, clean_msg = False, f"OSError checking main checkout: {exc}"
+    except Exception as exc:
+        # Catch any Exception from check_main_clean and report as STALLED (no crash)
+        clean_ok, clean_msg = False, f"Exception checking main checkout: {exc}"
     if not clean_ok:
         # Treat as STALLED and run through watchdog_action
         state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."

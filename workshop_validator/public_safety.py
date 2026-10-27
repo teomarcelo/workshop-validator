@@ -277,7 +277,7 @@ def main(argv: list[str] | None = None) -> int:
             ["git", "ls-files", "--cached", "-z"], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
         ).stdout
-        tracked_names = [part.decode("utf-8") for part in tracked_listing.split(bytes([0])) if part]
+        tracked_names = [part.decode("utf-8", errors="replace") for part in tracked_listing.split(bytes([0])) if part]
         if not tracked_names:
             raise ValueError("No tracked files")
 
@@ -286,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
             ["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True,
         ).stdout
-        untracked_names = [part.decode("utf-8") for part in untracked_listing.split(bytes([0])) if part]
+        untracked_names = [part.decode("utf-8", errors="replace") for part in untracked_listing.split(bytes([0])) if part]
 
         all_names = tracked_names + untracked_names
         problems = inspect_tracked(root, all_names)
