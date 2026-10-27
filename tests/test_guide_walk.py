@@ -209,6 +209,10 @@ class Loc:
     def nth(self, index):
         return self
 
+    def element_handle(self, timeout=None):
+        """The fake element is keyed by (kind, name), so it is its own handle."""
+        return self
+
     def locator(self, selector):
         """Controls inside this element, from page.children."""
         inside = self.page.children.get((self.kind, self.name), ())
@@ -290,6 +294,19 @@ class _MultiLoc:
         return len(self.items) > 0
 
 
+class _Keyboard:
+    """Records key presses in page.keys and calls page.on_key, like a real keyboard reaching the page."""
+
+    def __init__(self, page):
+        self.page = page
+
+    def press(self, key):
+        self.page.keys.append(key)
+        react = getattr(self.page, "on_key", None)
+        if react is not None:
+            react(key)
+
+
 class Page:
     def __init__(self, url, body="", roles=(), values=None):
         self.url = url
@@ -311,6 +328,8 @@ class Page:
         self.snapshots = []
         self.reveal_state_after = 1
         self._frames = None
+        self.keys = []
+        self.keyboard = _Keyboard(self)
 
     @property
     def frames(self):
@@ -3187,18 +3206,16 @@ class UnnamedModalTests(unittest.TestCase):
         self.assertIn("modal covered the page", result.note)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class UnrelatedPopupCloseTests(unittest.TestCase):
     """Owner rule W-080: an unrelated pop-up is closed with its own dismiss control, then the step is retried."""
 
-    def walk(self, page, items):
+    def walk(self, page, items, **waits):
         clock = Clock()
+        self.clock = clock
         return walk_guide(
             page, inventory_of(*items),
-            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep, **waits,
         )
 
     @staticmethod
@@ -3271,7 +3288,8 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
                 shown.append(self.add_popup(page, f"Tip {len(shown) + 1}", "Close"))
 
         page.on_click = react
-        outcome = self.walk(page, (self.accounts_step(),))
+        # Short waits so three closes fit inside the one time cap for the step.
+        outcome = self.walk(page, (self.accounts_step(),), page_wait_s=4, page_poll_s=1)
         self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
         self.assertEqual(self.clicks(page), [("click", "button", "Close")] * 3)
         self.assertEqual(outcome.notes["open-accounts"].count("W-080"), 3)
@@ -3306,3 +3324,286 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
             ("click", "button", "View profile"),
             ("click", "link", "Settings"),
         ])
+
+    # V19 fix round 1: resume only the action that missed; a pop-up never becomes a real failure.
+
+    @staticmethod
+    def fills(page):
+        return [event for event in page.events if event[0] == "fill"]
+
+    def test_escape_closes_dialog_and_step_resumes_with_note(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "Get started")
+
+        def on_key(key):
+            if key == "Escape":
+                page.roles.discard(dialog)
+                page.roles.add(("link", "Accounts"))
+
+        def react(kind, name):
+            if name == "Accounts":
+                page.url = "https://example.lightning.force.com/lightning/o/Account/home"
+                page.page_title = "Accounts"
+                page.body = "Accounts Recently Viewed"
+                page.roles.add(("heading", "Accounts"))
+
+        page.on_key = on_key
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "PASS")
+        self.assertEqual(page.keys, ["Escape"])
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["open-accounts"])
+        self.assertEqual(self.clicks(page), [("click", "link", "Accounts")])
+
+    def test_escape_fails_stays_env_blocked_and_get_started_never_clicked(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        self.add_popup(page, "Welcome Tour", "Get started")
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertEqual(page.keys, ["Escape"])
+        self.assertIn('"Welcome Tour" modal covered the page', outcome.notes["open-accounts"])
+        self.assertNotIn("W-080", outcome.notes["open-accounts"])
+        self.assertEqual(self.clicks(page), [])
+
+    def save_done_page(self, form_closes):
+        page = Page("https://example.lightning.force.com/lightning/r/Widget/new", body="New Widget")
+        page.roles.add(("button", "Save"))
+        shown = []
+
+        def react(kind, name):
+            if name == "Save":
+                page.roles.discard(("button", "Save"))
+                shown.append(self.add_popup(page, "Welcome Tour", "Close"))
+            elif name == "Close":
+                page.roles.discard(shown[-1])
+                if not form_closes:
+                    page.roles.add(("button", "Done"))
+            elif name == "Done":
+                page.url = "https://example.lightning.force.com/lightning/r/Widget/view"
+                page.page_title = "Widget Saved"
+                page.body = "Widget Saved"
+                page.roles.add(("heading", "Widget Saved"))
+
+        page.on_click = react
+        return page
+
+    def save_done_step(self):
+        return step("save-done", "Exercise 3: Sample Records", "Task 2: Save it", "4", 'Click "Save", then click "Done".')
+
+    def test_save_then_done_with_popup_after_save_clicks_save_once_then_done(self):
+        page = self.save_done_page(form_closes=False)
+        outcome = self.walk(page, (self.save_done_step(),))
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "Save"),
+            ("click", "button", "Close"),
+            ("click", "button", "Done"),
+        ])
+        self.assertNotIn(outcome.statuses["save-done"], ("UI_MISMATCH", "FUNCTIONAL_FAIL"))
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["save-done"])
+
+    def test_form_closing_after_save_and_popup_is_env_blocked_not_ui_mismatch(self):
+        page = self.save_done_page(form_closes=True)
+        outcome = self.walk(page, (self.save_done_step(),))
+        self.assertEqual(outcome.statuses["save-done"], "ENV_BLOCKED")
+        self.assertIn("not counted against the guide", outcome.notes["save-done"])
+        self.assertNotIn("Could not find", outcome.notes["save-done"])
+        self.assertEqual(
+            [event for event in self.clicks(page) if event[2] == "Save"], [("click", "button", "Save")],
+        )
+
+    def test_popup_covering_save_then_form_closing_is_env_blocked_not_ui_mismatch(self):
+        page = Page("https://example.lightning.force.com/lightning/r/Widget/new", body="New Widget")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(dialog)  # The form behind the pop-up closed too: no Save.
+
+        page.on_click = react
+        item = step("save", "Exercise 3: Sample Records", "Task 2: Save it", "4", "Click Save.")
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["save"], "ENV_BLOCKED")
+        self.assertIn("not counted against the guide", outcome.notes["save"])
+        self.assertEqual(self.clicks(page), [("click", "button", "Close")])
+
+    def test_fill_then_click_fills_once_and_saves_once(self):
+        page = Page("https://example.lightning.force.com/lightning/r/Widget/new", body="New Widget")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(dialog)
+                page.values["Widget Name"] = ""  # The field shows once the pop-up is closed.
+                page.roles.add(("button", "Save"))
+
+        page.on_click = react
+        fill = step("fill", "Exercise 3: Sample Records", "Task 2: Save it", "3", "Widget Name: Sample Widget")
+        save = step("save", "Exercise 3: Sample Records", "Task 2: Save it", "4", "Click Save.")
+        outcome = self.walk(page, (fill, save))
+        self.assertEqual(outcome.statuses["fill"], "PASS")
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["fill"])
+        self.assertEqual(self.fills(page), [("fill", "Widget Name", "Sample Widget")])
+        self.assertEqual(
+            [event for event in self.clicks(page) if event[2] == "Save"], [("click", "button", "Save")],
+        )
+        self.assertNotIn("W-080", outcome.notes.get("save", ""))
+
+    def row_page(self, close_shuts_menu):
+        page = Page("https://example.lightning.force.com/lightning/o/Report/home", body="Reports")
+        row, button = ("row", "Report Alpha"), ("button", "Show actions")
+        page.roles.update({row, button})
+        page.children[row] = [button]
+        page.has_popup.add(button)
+        menu, delete = ("menu", "Actions"), ("menuitem", "Delete")
+        shown = []
+
+        def react(kind, name):
+            if (kind, name) == button:
+                if menu in page.roles:  # The row dropdown toggles: a second click closes it.
+                    page.roles.difference_update({menu, delete})
+                    return
+                page.roles.add(menu)
+                if not shown:
+                    shown.append(self.add_popup(page, "Welcome Tour", "Close"))
+                else:
+                    page.roles.add(delete)
+            elif name == "Close":
+                page.roles.discard(shown[-1])
+                if close_shuts_menu:
+                    page.roles.discard(menu)
+                else:
+                    page.roles.add(delete)
+
+        page.on_click = react
+        return page
+
+    def row_step(self):
+        return step(
+            "row", EX12, "Task 1: Tidy up", "2",
+            "Click the dropdown arrow to the far right of Report Alpha and click Delete.",
+        )
+
+    def test_toggling_row_dropdown_already_open_is_not_clicked_again(self):
+        page = self.row_page(close_shuts_menu=False)
+        outcome = self.walk(page, (self.row_step(),))
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "Show actions"),
+            ("click", "button", "Close"),
+            ("click", "menuitem", "Delete"),
+        ])
+        self.assertEqual(outcome.statuses["row"], "NEEDS_REVIEW")
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["row"])
+
+    def test_row_dropdown_is_clicked_again_only_when_its_menu_closed(self):
+        page = self.row_page(close_shuts_menu=True)
+        outcome = self.walk(page, (self.row_step(),))
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "Show actions"),
+            ("click", "button", "Close"),
+            ("click", "button", "Show actions"),
+            ("click", "menuitem", "Delete"),
+        ])
+        self.assertEqual(outcome.statuses["row"], "NEEDS_REVIEW")
+
+    def test_profile_panel_already_open_after_close_clicks_view_profile_once(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+        page.roles.add(("button", "View profile"))
+        shown = []
+
+        def react(kind, name):
+            if name == "View profile":
+                shown.append(self.add_popup(page, "Help Agent", "Close"))
+            elif name == "Close":
+                page.roles.discard(shown[-1])
+                page.roles.add(("link", "Settings"))  # The panel opened behind the pop-up.
+            elif name == "Settings":
+                page.values["First Name"] = "Synthetic"
+
+        page.on_click = react
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["settings"], "PASS")
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "View profile"),
+            ("click", "button", "Close"),
+            ("click", "link", "Settings"),
+        ])
+
+    def test_closes_and_resumes_stay_inside_one_time_cap_for_the_step(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        shown = [self.add_popup(page, "Tip 1", "Close")]
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(shown[-1])
+                shown.append(self.add_popup(page, f"Tip {len(shown) + 1}", "Close"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertLessEqual(self.clock.now, min(PAGE_WAIT_S + 30, 120))
+
+    def test_dialog_is_tracked_by_element_not_by_position(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        first = self.add_popup(page, "Tip A", "Close")
+
+        class Positional:
+            """Like a real locator: nth(i) is whatever dialog is at index i when it is read."""
+
+            def __init__(self, index=None):
+                self.index = index
+
+            def _now(self):
+                items = sorted(item for item in page.roles if item[0] == "dialog")
+                if self.index is not None and self.index < len(items):
+                    return Loc(page, *items[self.index])
+                return Loc(page, "dialog", "")
+
+            def count(self):
+                return len([item for item in page.roles if item[0] == "dialog"])
+
+            def nth(self, index):
+                return Positional(index)
+
+            def __getattr__(self, name):
+                return getattr(self._now(), name)
+
+        plain = page.locator
+        page.locator = lambda selector: Positional() if selector == "[role='dialog']" else plain(selector)
+
+        def react(kind, name):
+            if name == "Close" and first in page.roles:
+                page.roles.discard(first)
+                self.add_popup(page, "Tip B", "Close")  # A new dialog takes index 0.
+                page.roles.add(("link", "Accounts"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertIn('closed "Tip A" pop-up', outcome.notes["open-accounts"])
+        self.assertIn(("click", "link", "Accounts"), page.events)
+
+    def test_ok_is_clicked_only_when_it_is_the_only_button(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        self.add_popup(page, "Welcome Tour", "Get started", "OK")
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertEqual(self.clicks(page), [])
+
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "OK")
+
+        def react(kind, name):
+            if name == "OK":
+                page.roles.discard(dialog)
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(self.clicks(page)[0], ("click", "button", "OK"))
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["open-accounts"])
+
+
+if __name__ == "__main__":
+    unittest.main()

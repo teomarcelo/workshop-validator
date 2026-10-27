@@ -22,8 +22,8 @@ The step rules are shared with Cursor; read them, they are binding:
 - Already set by the provisioned org (toggle on, field filled): do not click,
   record PASS with `already-set:` evidence. Unknown state is never clicked.
 - An unrelated welcome or help pop-up the guide does not mention is closed with
-  its own dismiss control, noted on the step, and the step is retried (W-080).
-  Closing is never PASS evidence.
+  its own dismiss control, or Escape, noted on the step, and only the action it
+  blocked is resumed (W-080, W-081). Closing is never PASS evidence.
 - A value in parentheses ("First Name: (your first name)") is the learner's own.
   Never type the description, never invent a value. An empty own-value field the
   guide does not mark mandatory is left unchanged as NOT_RUN and the walk
