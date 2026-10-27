@@ -296,11 +296,19 @@ def on_portal(url: str, portal_url: str) -> bool:
 
 def _https_origin(url: str) -> tuple[str, int] | None:
     """(host, port) of an https address, host lowercased, default port 443. None otherwise."""
+    # Reject URLs with backslash or @ that can be parsed differently by browser vs urlparse
+    raw = str(url or "")
+    if "\\" in raw or "@" in raw:
+        return None
     try:
-        parts = urlparse(str(url or ""))
+        parts = urlparse(raw)
         if parts.scheme.lower() != "https" or not parts.hostname:
             return None
-        return parts.hostname.lower(), parts.port or 443
+        # Reject explicit port 0 or any non-443 explicit port
+        port = parts.port or 443
+        if parts.port is not None and port != 443:
+            return None
+        return parts.hostname.lower(), port
     except ValueError:  # a malformed port
         return None
 
@@ -649,7 +657,7 @@ def guides(root: Path, config: dict) -> str:
             if not on_portal(url, portal_url):
                 skipped += 1
                 continue
-            response = context.request.get(url)
+            response = context.request.get(url, max_redirects=0)
             if not on_portal(getattr(response, "url", ""), portal_url):
                 skipped += 1  # redirected off the portal: the body is not kept
                 continue
