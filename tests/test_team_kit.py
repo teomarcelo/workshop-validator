@@ -932,29 +932,29 @@ class ProveTestsTests(unittest.TestCase):
         self.repo.mkdir()
 
     def test_new_test_passing_on_base_fails(self):
-        """A new test that passes on base code should FAIL."""
-        # Simulate a diff with a new test
-        diff = """diff --git a/tests/test_new.py b/tests/test_new.py
+        """A new test that passes on base code with no failing test should FAIL."""
+        diff = """diff --git a/tests/test_new_feature.py b/tests/test_new_feature.py
 new file mode 100644
 --- /dev/null
-+++ b/tests/test_new.py
++++ b/tests/test_new_feature.py
 @@ -0,0 +1,5 @@
 +import unittest
 +
-+class NewTests(unittest.TestCase):
++class NewFeatureTests(unittest.TestCase):
 +    def test_new_feature(self):
 +        self.assertTrue(True)
 """
-        # Simulate file structure
         code_files = "workshop_validator/new_feature.py\n"
 
         runner = FakeRunner([
-            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_new.py\n"),
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
+            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_new_feature.py\n"),
             (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
             (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
             (lambda c: c[:3] == ["git", "show"], 0, ""),  # File is new in head
-            # The test passes on base code (returns 0)
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"], 0, ""),
+            # The test passes on base code
+            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
+             "test_new_feature (tests.test_new_feature.NewFeatureTests) ... ok\n"),
         ])
 
         out = io.StringIO()
@@ -963,7 +963,7 @@ new file mode 100644
 
         self.assertFalse(result)
         self.assertIn("FAIL", out.getvalue())
-        self.assertIn("passed on base", out.getvalue())
+        self.assertIn("no failing test for workshop_validator/new_feature.py", out.getvalue())
 
     def test_new_test_failing_on_base_passes(self):
         """A new test that fails on base code should PASS."""
@@ -982,12 +982,14 @@ new file mode 100644
         code_files = "workshop_validator/feature.py\n"
 
         runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
             (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
             (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
             (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
             (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
-            # The test fails on base code (returns non-zero)
-            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"], 1, "FAILED\n"),
+            # The test fails on base code
+            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
+             "test_new_behavior (tests.test_feature.FeatureTests) ... FAIL\n"),
         ])
 
         out = io.StringIO()
@@ -996,11 +998,12 @@ new file mode 100644
 
         self.assertTrue(result)
         self.assertIn("PASS", out.getvalue())
-        self.assertIn("fail on base", out.getvalue())
+        self.assertIn("1 failed", out.getvalue())
 
     def test_docs_only_pr_skips(self):
         """A PR that only changes docs should SKIP."""
         runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
             (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, ""),
             (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, ""),
         ])
@@ -1015,6 +1018,7 @@ new file mode 100644
     def test_no_new_tests_skips(self):
         """A PR that changes code but adds no tests should SKIP."""
         runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
             (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, ""),
             (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, "workshop_validator/x.py\n"),
             (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, ""),
@@ -1040,6 +1044,7 @@ new file mode 100644
 +        pass
 """
         runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
             (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_x.py\n"),
             (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, "workshop_validator/x.py\n"),
             (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
@@ -1053,6 +1058,81 @@ new file mode 100644
         # Verify worktree remove was called
         removes = runner.find("git", "worktree", "remove")
         self.assertEqual(len(removes), 1)
+
+    def test_skipped_test_is_unproven(self):
+        """A skipped test should result in UNPROVEN, not PASS."""
+        diff = """diff --git a/tests/test_feature.py b/tests/test_feature.py
+--- a/tests/test_feature.py
++++ b/tests/test_feature.py
+@@ -3,3 +3,7 @@ import unittest
+
+ class FeatureTests(unittest.TestCase):
+     def test_old(self):
+         pass
++
++    def test_new_skipped(self):
++        self.skipTest("not ready")
+"""
+        code_files = "workshop_validator/feature.py\n"
+
+        runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
+            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
+            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
+            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
+            (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
+            # The test is skipped
+            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 0,
+             "test_new_skipped (tests.test_feature.FeatureTests) ... skipped 'not ready'\n"),
+        ])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
+
+        self.assertFalse(result)
+        self.assertIn("UNPROVEN", out.getvalue())
+        self.assertIn("skipped", out.getvalue())
+
+    def test_one_of_two_tests_fails_on_base_passes(self):
+        """When 1 of 2 new tests fails on base, that's enough proof (PASS)."""
+        diff = """diff --git a/tests/test_feature.py b/tests/test_feature.py
+--- a/tests/test_feature.py
++++ b/tests/test_feature.py
+@@ -3,3 +3,10 @@ import unittest
+
+ class FeatureTests(unittest.TestCase):
+     def test_old(self):
+         pass
++
++    def test_new_regression(self):
++        self.assertTrue(True)
++
++    def test_new_behavior(self):
++        self.assertFalse(True)
+"""
+        code_files = "workshop_validator/feature.py\n"
+
+        runner = FakeRunner([
+            (lambda c: "chromium.executable_path" in " ".join(c), 0, "/path/to/chromium\n"),
+            (lambda c: "diff" in c and "--name-only" in c and "tests/" in c, 0, "tests/test_feature.py\n"),
+            (lambda c: "diff" in c and "--name-only" in c and "workshop_validator/" in c, 0, code_files),
+            (lambda c: "diff" in c and "tests/" in c and "--name-only" not in c, 0, diff),
+            (lambda c: c[:3] == ["git", "show"], 0, "# old code\n"),
+            # One passes (regression test), one fails (proves new behavior)
+            (lambda c: len(c) > 3 and c[1:3] == ["-m", "unittest"] and "-v" in c, 1,
+             "test_new_regression (tests.test_feature.FeatureTests) ... ok\n"
+             "test_new_behavior (tests.test_feature.FeatureTests) ... FAIL\n"),
+        ])
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            result = team_gates.prove_tests(self.repo, "base", "head", runner=runner)
+
+        self.assertTrue(result)
+        self.assertIn("PASS", out.getvalue())
+        self.assertIn("1 failed", out.getvalue())
+        self.assertIn("1 passed", out.getvalue())
 
 
 if __name__ == "__main__":

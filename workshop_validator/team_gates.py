@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -454,9 +455,39 @@ def parse_new_test_ids(diff: str) -> list[str]:
     return ids
 
 
+def parse_unittest_output(output: str) -> dict[str, str]:
+    """Parse unittest -v output into {test_id: status} where status is ok/FAIL/ERROR/skipped."""
+    results = {}
+    for line in output.splitlines():
+        line = line.strip()
+        # unittest -v format: "test_method (module.Class) ... ok"
+        if " ... " in line:
+            parts = line.split(" ... ", 1)
+            if len(parts) == 2:
+                test_part, status = parts
+                # Extract test id from "test_method (module.Class)"
+                if "(" in test_part and ")" in test_part:
+                    method = test_part.split("(")[0].strip()
+                    module_class = test_part.split("(")[1].split(")")[0].strip()
+                    test_id = f"{module_class}.{method}"
+                    # status can be "ok", "FAIL", "ERROR", "skipped 'reason'"
+                    status_word = status.split()[0]
+                    results[test_id] = status_word
+    return results
+
+
 def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
-    """Prove new tests fail on base code. PASS when all new tests fail on base."""
+    """Prove new tests fail on base code. PASS when each changed code file has >=1 test fail on base."""
     run = runner or _default_runner
+
+    # Check Chromium availability
+    python = repo / ".venv" / "bin" / "python"
+    chromium_check = run([str(python), "-c",
+                          "from playwright.sync_api import sync_playwright; sync_playwright().start().chromium.executable_path"],
+                         repo)
+    if chromium_check.returncode != 0:
+        print("prove-tests: UNPROVEN Chromium not installed in .venv")
+        return False
 
     # Find changed files
     diff_out = _git(repo, "diff", "--name-only", f"{base_oid}...{head_oid}", "--", "tests/", runner=runner)
@@ -483,7 +514,8 @@ def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
         try:
             _git(repo, "worktree", "add", "--detach", str(tree), head_oid, runner=runner)
 
-            # Restore base version of each code file
+            # Restore base version of each code file and log it
+            swapped = []
             for code_file in code_files:
                 file_path = tree / code_file
                 # Check if file exists in base
@@ -491,24 +523,65 @@ def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
                 if base_content:
                     # File exists in base, restore it
                     file_path.write_text(base_content, encoding="utf-8")
+                    swapped.append(code_file)
                 else:
                     # File is new in head, remove it
                     if file_path.exists():
                         file_path.unlink()
+                        swapped.append(f"{code_file} (removed, new in head)")
 
-            # Run each test on base code
-            python = repo / ".venv" / "bin" / "python"
-            passing_tests = []
+            # Run all tests together with -v to get per-test status
+            # Set RUN_BROWSER_SMOKE=1 for browser tests
+            old_env = os.environ.get("RUN_BROWSER_SMOKE")
+            try:
+                os.environ["RUN_BROWSER_SMOKE"] = "1"
+                result = run([str(python), "-m", "unittest", "-v"] + test_ids, tree)
+            finally:
+                if old_env is None:
+                    os.environ.pop("RUN_BROWSER_SMOKE", None)
+                else:
+                    os.environ["RUN_BROWSER_SMOKE"] = old_env
+
+            # Parse output to categorize each test
+            test_results = parse_unittest_output(result.stdout + result.stderr)
+
+            failed_on_base = []
+            passed_on_base = []
+            unproven = []
+
             for test_id in test_ids:
-                result = run([str(python), "-m", "unittest", test_id], tree)
-                if result.returncode == 0:
-                    passing_tests.append(test_id)
+                status = test_results.get(test_id, "MISSING")
+                if status in ("FAIL", "ERROR"):
+                    failed_on_base.append(test_id)
+                elif status == "ok":
+                    passed_on_base.append(test_id)
+                elif status == "skipped":
+                    unproven.append(f"{test_id} (skipped)")
+                else:
+                    unproven.append(f"{test_id} (status: {status})")
 
-            if passing_tests:
-                print(f"prove-tests: FAIL {', '.join(passing_tests)} passed on base code")
+            # Check: need at least one failing test per changed code file
+            # Map test files to code files they likely test
+            untested_code = []
+            for code_file in code_files:
+                # Simple heuristic: test_foo.py tests foo.py
+                code_name = Path(code_file).stem
+                # Look for any failed test that might test this file
+                has_failing_test = any(code_name in test_id for test_id in failed_on_base)
+                if not has_failing_test:
+                    untested_code.append(code_file)
+
+            if unproven:
+                print(f"prove-tests: UNPROVEN {len(unproven)} test(s): {', '.join(unproven[:3])}")
                 return False
 
-            print(f"prove-tests: PASS {len(test_ids)} new test(s) fail on base")
+            if untested_code:
+                print(f"prove-tests: FAIL no failing test for {', '.join(untested_code)} "
+                      f"({len(failed_on_base)} failed / {len(passed_on_base)} passed)")
+                return False
+
+            print(f"prove-tests: PASS {len(failed_on_base)} failed / {len(passed_on_base)} passed / "
+                  f"{len(unproven)} unproven on base; swapped {len(swapped)} file(s)")
             return True
         finally:
             _git(repo, "worktree", "remove", "--force", str(tree), check=False, runner=runner)
