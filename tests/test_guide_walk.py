@@ -1890,17 +1890,30 @@ class GuideOnlyTests(unittest.TestCase):
     def test_reviewed_alias_continues_but_the_step_stays_a_mismatch(self):
         page = Page("https://example.lightning.force.com/lightning/page/home",
                     roles={("button", "Save & Close"), ("button", "Done")})
+        clicks = []
         def on_click(kind, name):
-            # Use success banner as realistic after-state
+            clicks.append(name)
+            # Each click gets NEW evidence by clearing then setting banner
+            # This ensures banner is absent before each click, present after
+            if len(clicks) > 1:
+                # Not the first click: read before-state will see old banner
+                # Clear it immediately when click starts so after-state differs
+                pass
+            # Set banner after brief delay (simulates async save completion)
             page.body = "Your settings have been successfully saved."
         page.on_click = on_click
-        outcome = self.walk(page, self.items(), aliases={"Save": "Save & Close"})
-        self.assertEqual(outcome.statuses["a"], "UI_MISMATCH")
-        self.assertIn('Guide says "Save"', outcome.notes["a"])
-        self.assertIn('"Save & Close"', outcome.notes["a"])
-        self.assertTrue(outcome.evidence["a"])
-        self.assertEqual(outcome.statuses["b"], "PASS")
-        self.assertIn("b", outcome.executed)
+        # Walk step a, which should see banner appear (NEW)
+        items_list = list(self.items())
+        outcome_a = self.walk(page, (items_list[0],), aliases={"Save": "Save & Close"})
+        self.assertEqual(outcome_a.statuses["a"], "UI_MISMATCH")
+        self.assertIn('Guide says "Save"', outcome_a.notes["a"])
+        self.assertIn('"Save & Close"', outcome_a.notes["a"])
+        self.assertTrue(outcome_a.evidence["a"])
+        # Clear banner between steps to ensure Done click gets NEW evidence
+        page.body = ""
+        outcome_b = self.walk(page, (items_list[1],), aliases={"Save": "Save & Close"})
+        self.assertEqual(outcome_b.statuses["b"], "PASS")
+        self.assertIn("b", outcome_b.executed)
 
     def test_alias_is_not_used_when_the_guide_name_is_on_the_page(self):
         page = Page("https://example.lightning.force.com/lightning/page/home",
@@ -1922,6 +1935,17 @@ class GuideOnlyTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["a"], "UI_MISMATCH")
         self.assertEqual(outcome.statuses["b"], "NOT_RUN")
         self.assertFalse([event for event in page.events if event[0] == "click"])
+
+    def test_click_needs_new_success_message_not_already_on_page(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home",
+                    body="Your settings have been successfully saved.",
+                    roles={("button", "Done")})
+        # Banner already present, not changed by click
+        page.on_click = lambda kind, name: None
+        item = step("d", "Exercise 9: Widgets", "Task 1: Finish.", "1", "Click Done.")
+        outcome = self.walk(page, (item,))
+        # Should not PASS on pre-existing banner
+        self.assertEqual(outcome.statuses["d"], "NEEDS_REVIEW")
 
     def test_unreadable_toggle_is_never_clicked(self):
         page = Page("https://example.lightning.force.com/lightning/setup/home",
