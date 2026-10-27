@@ -2900,6 +2900,64 @@ class UnnamedModalTests(unittest.TestCase):
         self.assertIsNotNone(modal_title)
         self.assertIn("welcome", modal_title.lower())
 
+    def test_click_with_unnamed_modal_returns_env_blocked(self):
+        """Click step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/lightning/setup/ObjectManager/home",
+            body="Setup",
+            roles=[
+                ("dialog", "Feature Announcement\nNew features available\nLearn More"),
+                ("h2", "Feature Announcement"),
+            ],
+        )
+        # Modal with heading
+        page.children = {
+            ("dialog", "Feature Announcement\nNew features available\nLearn More"): [
+                ("h2", "Feature Announcement")
+            ]
+        }
+        # Simple click step that doesn't mention the modal
+        item = step(
+            "open-accounts", "Exercise 2: Data Model", "Task 1: Create Object", "1",
+            "Click Accounts.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertIn("Feature Announcement", outcome.notes["open-accounts"])
+        self.assertIn("modal covered the page", outcome.notes["open-accounts"])
+        # No clicks should happen
+        self.assertEqual(page.events, [])
+
+    def test_fill_with_unnamed_modal_returns_env_blocked(self):
+        """Fill step with unnamed modal returns ENV_BLOCKED, not UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/lightning/r/Contact/123/edit",
+            body="Contact Edit",
+            roles=[
+                ("dialog", "System Maintenance\nScheduled downtime notice"),
+                ("h1", "System Maintenance"),
+            ],
+        )
+        # Modal with heading
+        page.children = {
+            ("dialog", "System Maintenance\nScheduled downtime notice"): [
+                ("h1", "System Maintenance")
+            ]
+        }
+        # Fill step that doesn't mention the modal
+        item = step(
+            "fill-email", "Exercise 3: Contacts", "Task 2: Update Contact", "1",
+            "In the Email field, enter contact@example.test and click Save.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED because unnamed modal covers the page
+        self.assertEqual(outcome.statuses["fill-email"], "ENV_BLOCKED")
+        self.assertIn("System Maintenance", outcome.notes["fill-email"])
+        self.assertIn("modal covered the page", outcome.notes["fill-email"])
+        # No fills should happen
+        self.assertEqual(page.events, [])
+
 
 if __name__ == "__main__":
     unittest.main()

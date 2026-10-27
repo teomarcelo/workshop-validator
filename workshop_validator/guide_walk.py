@@ -4342,6 +4342,15 @@ def _freeze_result(state: WalkState, step: GuideStep, target: str, suggestion: s
         note = (f"The validator could not read one control name from this step ({_snippet(label)}), "
                 "so the miss is not proof the guide is wrong. " + note)
         return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+    # Check if an unnamed modal is blocking the page
+    modal_title = _unnamed_modal_title(state.page, step.text or "")
+    if modal_title:
+        return CheckResult(
+            "ENV_BLOCKED",
+            f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+            (),
+            freeze=True,
+        )
     return CheckResult("UI_MISMATCH", note, (), freeze=True)
 
 
