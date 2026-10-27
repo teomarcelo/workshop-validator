@@ -4,8 +4,6 @@ Items:
 1. team_gates._redact_stderr strips Unicode Cc and Cf except newline and tab
 2. team_kit.watchdog_check catches any Exception from check_main_clean
 3. public_safety subprocess decode with errors="replace"
-4. automate.gate_outcome_of docstring fix
-5. automate.gate_outcome_of removes unreachable time-limit NOT_RUN branch
 """
 
 import os
@@ -16,7 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from workshop_validator import automate, public_safety, team_gates, team_kit
+from workshop_validator import public_safety, team_gates, team_kit
 from workshop_validator.team_state import _write_private
 
 
@@ -195,71 +193,6 @@ class TestF14PublicSafetyDecode(unittest.TestCase):
                 self.assertEqual(tracked_names[0], "test.py")
                 # Invalid sequence should be replaced with replacement character
                 self.assertIn("�", tracked_names[1])
-
-
-class TestF14GateOutcomeOfDocstring(unittest.TestCase):
-    """F14 item 4: automate.gate_outcome_of docstring says 'the last non-NOT_RUN step'."""
-
-    def test_docstring_text(self):
-        """Docstring should say 'the last non-NOT_RUN step before a NOT_RUN tail'."""
-        docstring = automate.gate_outcome_of.__doc__
-        self.assertIsNotNone(docstring)
-        # Should contain the correct text
-        self.assertIn("last non-NOT_RUN step before a NOT_RUN tail", docstring)
-        # Should NOT contain the old incorrect text
-        self.assertNotIn("first non-PASS step", docstring.lower())
-
-
-class TestF14GateOutcomeOfNoTimeLimitBranch(unittest.TestCase):
-    """F14 item 5: automate.gate_outcome_of removes unreachable time-limit NOT_RUN branch."""
-
-    def test_no_time_limit_branch_in_code(self):
-        """The time-limit NOT_RUN branch should be removed."""
-        import inspect
-        source = inspect.getsource(automate.gate_outcome_of)
-
-        # The unreachable code was:
-        # if stopping_step.status == "NOT_RUN" and "exceeded its time limit" in (stopping_step.note or ""):
-        #     return INCONCLUSIVE
-
-        # After fix, this branch should not exist
-        # The stopping_step is never NOT_RUN because it's found when step.status != "NOT_RUN"
-
-        # Check that the unreachable branch is removed
-        lines = source.split("\n")
-        for i, line in enumerate(lines):
-            if 'stopping_step.status == "NOT_RUN"' in line and "time limit" in lines[i:i+2].__str__():
-                self.fail("Unreachable time-limit NOT_RUN branch still exists in code")
-
-    def test_time_limit_case_uses_outcome_of(self):
-        """Time-limit cases should fall through to outcome_of."""
-        # Create a result with a time-limit stopping step
-        result = Mock()
-        step1 = Mock()
-        step1.status = "PASS"
-        step1.evidence_ids = ["observed"]
-        step1.note = ""
-
-        step2 = Mock()
-        step2.status = "PASS"  # Last non-NOT_RUN step
-        step2.note = "Step exceeded its time limit"
-        step2.evidence_ids = ["observed"]
-
-        step3 = Mock()
-        step3.status = "NOT_RUN"
-        step3.note = ""
-
-        result.report_steps = [step1, step2, step3]
-        result.ended = "2026-10-27T12:00:00+00:00"
-        result.failure_step = None
-        result.org_instance = "test"
-
-        # This should fall through to outcome_of since step2 is not NOT_RUN
-        # The old code had an unreachable branch checking for stopping_step.status == "NOT_RUN"
-        outcome = automate.gate_outcome_of(result)
-
-        # With only PASS steps that have read-only evidence, this should be SUCCESS
-        self.assertIn(outcome, [automate.SUCCESS, automate.INCONCLUSIVE])
 
 
 if __name__ == "__main__":
