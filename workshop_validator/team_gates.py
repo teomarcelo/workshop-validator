@@ -543,7 +543,9 @@ def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
                     os.environ["RUN_BROWSER_SMOKE"] = old_env
 
             # Parse output to categorize each test
-            test_results = parse_unittest_output(result.stdout + result.stderr)
+            stdout_str = result.stdout or ""
+            stderr_str = result.stderr or ""
+            test_results = parse_unittest_output(stdout_str + stderr_str)
 
             failed_on_base = []
             passed_on_base = []
