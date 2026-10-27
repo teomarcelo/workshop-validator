@@ -3005,6 +3005,178 @@ class UnnamedModalTests(unittest.TestCase):
         # No clicks should happen
         self.assertEqual(page.events, [])
 
+    def test_launch_with_unnamed_modal_returns_env_blocked(self):
+        """run_launch with unnamed modal returns ENV_BLOCKED when Launch not clickable."""
+        from workshop_validator.guide_walk import WalkState, run_launch
+        page = Page("https://sforce.co/OrgClaim", body="Event code\nRedeem")
+        page.roles.add(("button", "Launch"))
+        page.roles.add(("dialog", "Session Timeout\nYour session expired\nOK"))
+        page.roles.add(("h2", "Session Timeout"))
+        page.children = {
+            ("dialog", "Session Timeout\nYour session expired\nOK"): [("h2", "Session Timeout")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "button" and name == "Launch":
+                raise Exception("Click blocked by modal")
+
+        page.on_click = on_click_fail
+        clock = Clock()
+        state = WalkState(page, clock.now, clock.sleep, 0, 1, {}, None, None)
+        item = step("launch-org", "Setup", "Task 1", "1", "Click Launch to open the org.")
+        result = run_launch(state, item)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Session Timeout", result.note)
+        self.assertIn("modal covered the page", result.note)
+
+    def test_view_profile_with_unnamed_modal_returns_env_blocked(self):
+        """run_personal with unnamed modal returns ENV_BLOCKED when View profile not clickable."""
+        page = Page("https://example.lightning.force.com/home")
+        # Add View profile button
+        page.roles.add(("button", "View profile"))
+        # Add unnamed modal
+        page.roles.add(("dialog", "News Flash\nNew features available\nClose"))
+        page.roles.add(("h1", "News Flash"))
+        page.children = {
+            ("dialog", "News Flash\nNew features available\nClose"): [("h1", "News Flash")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "button" and name == "View profile":
+                raise Exception("Click blocked by modal")
+
+        page.on_click = on_click_fail
+        item = step("open-settings", SETUP, "Task 1", "1", "Click your profile picture and select Settings.")
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["open-settings"], "ENV_BLOCKED")
+        self.assertIn("News Flash", outcome.notes["open-settings"])
+        self.assertIn("modal covered the page", outcome.notes["open-settings"])
+
+    def test_settings_click_with_unnamed_modal_returns_env_blocked(self):
+        """run_personal with unnamed modal returns ENV_BLOCKED when Settings not clickable."""
+        page = Page("https://example.lightning.force.com/home")
+        # Add View profile button
+        page.roles.add(("button", "View profile"))
+
+        def on_click(kind, name):
+            if kind == "button" and name == "View profile":
+                # After clicking View profile, add Settings and unnamed modal
+                page.roles.add(("link", "Settings"))
+                page.roles.add(("dialog", "Update Required\nPlease update now\nDismiss"))
+                page.roles.add(("h2", "Update Required"))
+                page.children = {
+                    ("dialog", "Update Required\nPlease update now\nDismiss"): [("h2", "Update Required")]
+                }
+            elif kind == "link" and name == "Settings":
+                # Settings click fails due to modal
+                raise Exception("Click blocked by modal")
+
+        page.on_click = on_click
+        item = step("open-settings", SETUP, "Task 1", "1", "Click your profile picture and select Settings.")
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["open-settings"], "ENV_BLOCKED")
+        self.assertIn("Update Required", outcome.notes["open-settings"])
+        self.assertIn("modal covered the page", outcome.notes["open-settings"])
+
+    def test_select_user_with_unnamed_modal_returns_env_blocked(self):
+        """run_select_user with unnamed modal returns ENV_BLOCKED when Select User not clickable."""
+        from workshop_validator.guide_walk import WalkState, run_select_user
+        flows = Page("https://example.lightning.force.com/builder/Example")
+        flows.roles.add(("button", "Select User"))
+        flows.roles.add(("dialog", "Warning Message\nImportant notice\nContinue"))
+        flows.roles.add(("h1", "Warning Message"))
+        flows.children = {
+            ("dialog", "Warning Message\nImportant notice\nContinue"): [("h1", "Warning Message")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "button" and name == "Select User":
+                raise Exception("Click blocked by modal")
+
+        flows.on_click = on_click_fail
+        clock = Clock()
+        state = WalkState(flows, clock.now, clock.sleep, 0, 1, {}, None, None)
+        state.studio = flows  # Set studio so _needs_studio doesn't block
+        item = step("select-user", EX11, "Task 2", "1", "Click Select User in the Agent User section.")
+        result = run_select_user(state, item)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Warning Message", result.note)
+        self.assertIn("modal covered the page", result.note)
+
+    def test_choose_einstein_with_unnamed_modal_returns_env_blocked(self):
+        """run_choose_einstein with unnamed modal returns ENV_BLOCKED when agent user not clickable."""
+        flows = Page("https://example.lightning.force.com/builder/Example")
+        # Add agent user option
+        flows.roles.add(("option", "EinsteinServiceAgent User"))
+        # Add unnamed modal
+        flows.roles.add(("dialog", "Notification\nSystem maintenance\nOK"))
+        flows.roles.add(("h2", "Notification"))
+        flows.children = {
+            ("dialog", "Notification\nSystem maintenance\nOK"): [("h2", "Notification")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "option" and name == "EinsteinServiceAgent User":
+                raise Exception("Click blocked by modal")
+
+        flows.on_click = on_click_fail
+        flows._frames = [flows]  # Mark as studio page
+        item = step("choose-einstein", EX11, "Task 2", "2", "Select EinsteinServiceAgent User from the list.")
+        outcome = self.walk(flows, (item,))
+        self.assertEqual(outcome.statuses["choose-einstein"], "ENV_BLOCKED")
+        self.assertIn("Notification", outcome.notes["choose-einstein"])
+        self.assertIn("modal covered the page", outcome.notes["choose-einstein"])
+
+    def test_save_user_with_unnamed_modal_returns_env_blocked(self):
+        """run_save_user with unnamed modal returns ENV_BLOCKED when Save not clickable."""
+        from workshop_validator.guide_walk import WalkState, run_save_user
+        flows = Page("https://example.lightning.force.com/builder/Example")
+        flows.roles.add(("button", "Save"))
+        flows.roles.add(("dialog", "Connection Lost\nRetrying connection\nRetry"))
+        flows.roles.add(("h1", "Connection Lost"))
+        flows.children = {
+            ("dialog", "Connection Lost\nRetrying connection\nRetry"): [("h1", "Connection Lost")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "button" and name == "Save":
+                raise Exception("Click blocked by modal")
+
+        flows.on_click = on_click_fail
+        clock = Clock()
+        state = WalkState(flows, clock.now, clock.sleep, 0, 1, {}, None, None)
+        state.studio = flows  # Set studio so _needs_studio doesn't block
+        item = step("save-user", EX11, "Task 2", "3", "Click Save to save the agent user selection.")
+        result = run_save_user(state, item)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Connection Lost", result.note)
+        self.assertIn("modal covered the page", result.note)
+
+    def test_preview_with_unnamed_modal_returns_env_blocked(self):
+        """run_preview with unnamed modal returns ENV_BLOCKED when Preview not clickable."""
+        from workshop_validator.guide_walk import WalkState, run_preview
+        flows = Page("https://example.lightning.force.com/builder/Example")
+        flows.roles.add(("tab", "Preview"))
+        flows.roles.add(("dialog", "Storage Full\nClear cache\nDismiss"))
+        flows.roles.add(("h2", "Storage Full"))
+        flows.children = {
+            ("dialog", "Storage Full\nClear cache\nDismiss"): [("h2", "Storage Full")]
+        }
+
+        def on_click_fail(kind, name):
+            if kind == "tab" and name == "Preview":
+                raise Exception("Click blocked by modal")
+
+        flows.on_click = on_click_fail
+        clock = Clock()
+        state = WalkState(flows, clock.now, clock.sleep, 0, 1, {}, None, None)
+        state.studio = flows  # Set studio so _needs_studio doesn't block
+        item = step("open-preview", EX11, "Task 3", "1", "Click the Preview tab to test your agent.")
+        result = run_preview(state, item)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Storage Full", result.note)
+        self.assertIn("modal covered the page", result.note)
+
 
 if __name__ == "__main__":
     unittest.main()

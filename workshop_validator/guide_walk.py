@@ -539,6 +539,14 @@ def run_launch(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not (click_role(state.page, "button", "Launch") or click_role(state.page, "link", "Launch")):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult("UI_MISMATCH", "Launch was not on the OrgClaim page.", ())
     missed = require(
         state,
@@ -821,6 +829,14 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
         return _stop_here(missed)
     _mark_shown_before(state.page)
     if not click_role(state.page, "button", "View profile"):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult("UI_MISMATCH", "The profile menu did not open.", (), freeze=True)
 
     # The wait and the click read the same helper, so they cannot disagree.
@@ -866,6 +882,14 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
         except Exception:
             clicked = False
     if not clicked:
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult(
             "UI_MISMATCH", "Settings did not open. " + _settings_diagnostic(state.page), (), freeze=True,
         )
@@ -1578,6 +1602,14 @@ def run_select_user(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not click_role(page, "button", "Select User"):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult("UI_MISMATCH", "Select User was not in the builder.", ())
     return passed(step, "select-user", "Select User opened.")
 
@@ -1598,6 +1630,14 @@ def run_choose_einstein(state: WalkState, step: GuideStep) -> CheckResult:
         click_role(page, "option", "EinsteinServiceAgent User")
         or click_role(page, "link", "EinsteinServiceAgent User")
     ):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult("UI_MISMATCH", "EinsteinServiceAgent User was not in the agent user list.", ())
     return passed(step, "agent-user", "EinsteinServiceAgent User was selected.")
 
@@ -1611,6 +1651,14 @@ def run_save_user(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not _click_save(page):
+        modal_title = _unnamed_modal_title(state.page, step.text or "")
+        if modal_title:
+            return CheckResult(
+                "ENV_BLOCKED",
+                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                (),
+                freeze=True,
+            )
         return CheckResult("UI_MISMATCH", "Save was not on the user dialog.", ())
     return passed(step, "user-saved", "Save completed after the agent user was selected.")
 
@@ -1641,6 +1689,14 @@ def run_preview(state: WalkState, step: GuideStep) -> CheckResult:
         if missed:
             return missed
         if not (click_role(page, "tab", "Preview") or click_role(page, "button", "Preview")):
+            modal_title = _unnamed_modal_title(state.page, step.text or "")
+            if modal_title:
+                return CheckResult(
+                    "ENV_BLOCKED",
+                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                    (),
+                    freeze=True,
+                )
             return CheckResult("UI_MISMATCH", "Preview was not in the builder.", ())
     missed = require(state, lambda: _preview_ready(page), "Preview did not open Live Test.")
     if missed:
