@@ -295,6 +295,82 @@ class StepBoardTests(unittest.TestCase):
         self.assertIn("Welcome message is shown: FAIL", text)
         self.assertIn("Live Test shows Let's chat.", text)
 
+    def test_presence_only_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+        )
+        self.assertIn("Weak evidence: element only", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("Evidence based only on element presence", page)
+
+    def test_no_screen_change_chip_renders(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Open the page"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("no-screen-change",))},
+        )
+        self.assertIn("Screen did not change", page)
+        self.assertIn("class='chip suspect'", page)
+        self.assertIn("URL, page title, and headings did not change", page)
+
+    def test_suspect_pass_counter_shows_for_flagged_passes(self):
+        page, _board = html_for(
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Open the page"),
+            ),
+            {
+                "a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",)),
+                "b": StepOutcome("PASS", evidence_ids=("evidence-2",), suspect=("no-screen-change",)),
+            },
+        )
+        self.assertIn("2", page)
+        self.assertIn("passes need a check", page)
+        self.assertIn("class='metric pending'", page)
+
+    def test_suspect_pass_counter_singular_form(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+        )
+        self.assertIn("1", page)
+        self.assertIn("pass needs a check", page)
+        self.assertNotIn("passes need", page)
+
+    def test_suspect_pass_counter_hidden_when_no_flags(self):
+        page, _board = html_for(
+            (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+            {"a": StepOutcome("PASS", evidence_ids=("evidence-1",))},
+        )
+        self.assertNotIn("pass needs a check", page)
+        self.assertNotIn("passes need a check", page)
+
+    def test_suspect_chip_uses_theme_tokens(self):
+        """Verify that suspect chip CSS reads colors from theme.py, not hardcoded values."""
+        from unittest.mock import patch
+        from workshop_validator import theme
+
+        # Replace existing values only. patch.dict would silently add a
+        # missing key, so first require the keys to exist in theme.py.
+        sentinel_bg = "#ff00ff"  # Magenta
+        sentinel_fg = "#00ff00"  # Green
+        for key in ("chip_suspect_bg", "chip_suspect"):
+            self.assertIn(key, theme.COLORS_LIGHT, f"theme.COLORS_LIGHT must define {key}")
+
+        with patch.dict(theme.COLORS_LIGHT, {"chip_suspect_bg": sentinel_bg, "chip_suspect": sentinel_fg}):
+            page, _board = html_for(
+                (step("a", "Exercise 1", "Task 1: Start", "1", "Click Save"),),
+                {"a": StepOutcome("PASS", evidence_ids=("evidence-1",), suspect=("presence-only",))},
+            )
+
+        # Verify sentinel colors appear in the CSS
+        self.assertIn(sentinel_bg, page, "Suspect chip background color should come from theme.COLORS_LIGHT")
+        self.assertIn(sentinel_fg, page, "Suspect chip foreground color should come from theme.COLORS_LIGHT")
+
+        # Verify the old hardcoded colors are not present
+        self.assertNotIn("#fff4e0", page, "Should not have hardcoded background color")
+        self.assertNotIn("#9a6700", page, "Should not have hardcoded foreground color")
+
 
 if __name__ == "__main__":
     unittest.main()

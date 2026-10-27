@@ -36,6 +36,8 @@ COLORS_LIGHT = {
     "chip_already_set_bg": "#f3f0ff",
     "chip_renamed": "#0969da",
     "chip_renamed_bg": "#e7f2ff",
+    "chip_suspect": "#9a6700",
+    "chip_suspect_bg": "#fff4e0",
     # Banner colors
     "banner_verified": "#0d7a4f",
     "banner_verified_bg": "#d7f3e5",
@@ -71,6 +73,8 @@ COLORS_DARK = {
     "chip_already_set_bg": "#2e1f47",
     "chip_renamed": "#4493f8",
     "chip_renamed_bg": "#0c2d6b",
+    "chip_suspect": "#e09b13",
+    "chip_suspect_bg": "#3d2d00",
     # Banner colors
     "banner_verified": "#57ab5a",
     "banner_verified_bg": "#0a3818",
@@ -335,6 +339,11 @@ details[open] > summary {{
   color: {COLORS_LIGHT["chip_renamed"]};
 }}
 
+.chip.suspect {{
+  background: {COLORS_LIGHT["chip_suspect_bg"]};
+  color: {COLORS_LIGHT["chip_suspect"]};
+}}
+
 .pill {{
   display: inline-block;
   font: 700 0.6875rem/1 {FONT_SYSTEM};
@@ -523,6 +532,11 @@ th {{
   .chip.renamed {{
     background: {COLORS_DARK["chip_renamed_bg"]};
     color: {COLORS_DARK["chip_renamed"]};
+  }}
+
+  .chip.suspect {{
+    background: {COLORS_DARK["chip_suspect_bg"]};
+    color: {COLORS_DARK["chip_suspect"]};
   }}
 
   .pill.pass {{
