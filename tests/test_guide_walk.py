@@ -1893,13 +1893,7 @@ class GuideOnlyTests(unittest.TestCase):
         clicks = []
         def on_click(kind, name):
             clicks.append(name)
-            # Each click gets NEW evidence by clearing then setting banner
-            # This ensures banner is absent before each click, present after
-            if len(clicks) > 1:
-                # Not the first click: read before-state will see old banner
-                # Clear it immediately when click starts so after-state differs
-                pass
-            # Set banner after brief delay (simulates async save completion)
+            # Set banner after click (simulates async save completion)
             page.body = "Your settings have been successfully saved."
         page.on_click = on_click
         # Walk step a, which should see banner appear (NEW)
