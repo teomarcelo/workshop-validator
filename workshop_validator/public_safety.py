@@ -169,25 +169,98 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str
         return False, "Could not check commit emails"
 
 
-def check_main_clean(root: Path) -> tuple[bool, str]:
-    """Check that main checkout has no untracked or modified files."""
+def get_main_checkout(root: Path) -> Path | None:
+    """Return the main checkout path (first `git worktree list` entry), or None on any failure."""
     try:
-        # Check for modified or untracked files
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "worktree", "list", "--porcelain"],
             cwd=root, capture_output=True, text=True, check=True
         )
-        if result.stdout.strip():
-            return False, "Main checkout has untracked or modified files"
+    except (subprocess.CalledProcessError, OSError):
+        return None
+    # First worktree entry is the main checkout
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            return Path(line.split(" ", 1)[1])
+    return None
+
+
+def _short_reason(text: str, returncode: int) -> str:
+    """First non-empty line of git's error output, trimmed, or the exit code."""
+    for line in (text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line[:120]
+    return f"git exited {returncode}"
+
+
+def check_main_clean(root: Path, check_dirty: bool = True) -> tuple[bool, str]:
+    """Check that main checkout is on branch main, and optionally check for dirty files.
+
+    Args:
+        root: Repository root path
+        check_dirty: If True, also check for untracked or modified files (default: True)
+
+    Returns (True, msg) if not in a git repo (skip check for test environments).
+    """
+    try:
+        # Check if this is a git repo at all
+        git_check = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=root, capture_output=True, text=True
+        )
+        if git_check.returncode != 0:
+            error_text = (git_check.stderr or "") + (git_check.stdout or "")
+            if "not a git repository" in error_text.lower():
+                # Not a git repo, skip check (test environments)
+                return True, "Not a git repo, check skipped"
+            return False, f"Could not check main checkout status: {_short_reason(error_text, git_check.returncode)}"
+
+        # Find the main checkout (first worktree entry)
+        main_checkout = get_main_checkout(root)
+        if main_checkout is None:
+            return False, "Could not check main checkout status: git worktree list failed"
+
+        # Check if on branch main or detached
+        head_result = subprocess.run(
+            ["git", "symbolic-ref", "-q", "HEAD"],
+            cwd=main_checkout, capture_output=True, text=True
+        )
+        if head_result.returncode != 0:
+            # HEAD is detached, get the SHA
+            sha_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=main_checkout, capture_output=True, text=True, check=True
+            )
+            sha = sha_result.stdout.strip()
+            return False, f"Main checkout HEAD is detached at {sha}"
+
+        # Check if the branch is main
+        branch = head_result.stdout.strip()
+        if branch != "refs/heads/main":
+            branch_name = branch.replace("refs/heads/", "")
+            return False, f"Main checkout is on branch {branch_name}, not main"
+
+        # Check for modified or untracked files (only if requested)
+        if check_dirty:
+            result = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=main_checkout, capture_output=True, text=True, check=True
+            )
+            if result.stdout.strip():
+                return False, "Main checkout has untracked or modified files"
         return True, "Main checkout is clean"
-    except subprocess.CalledProcessError:
-        return False, "Could not check main checkout status"
+    except FileNotFoundError:
+        return False, "git binary not found"
+    except subprocess.CalledProcessError as exc:
+        stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+        return False, f"Could not check main checkout status: {_short_reason(stderr, exc.returncode)}"
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Public safety gate for tracked files and commits.")
     parser.add_argument("--main-clean", action="store_true",
-                        help="Also check that main checkout has no untracked or modified files")
+                        help="Also check that main checkout is on main branch and has no untracked or modified files")
     parser.add_argument("--check-emails", action="store_true", default=True,
                         help="Check commit author/committer emails (default: true)")
     args = parser.parse_args(argv)
