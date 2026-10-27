@@ -752,42 +752,38 @@ class WriteGuardF3Fix1Tests(unittest.TestCase):
     """F3-fix1: split allow and deny containment in the write guard."""
 
     def test_case_sensitive_layout_denies_miscased_workspace(self):
-        """On simulated case-sensitive layout, base/REPO/x NOT allowed when workspace is base/repo."""
+        """Workspace base/repo does not grant writes to base/REPO/x.py (no mocks).
+
+        On a case-sensitive volume base/REPO is a different folder; on a
+        case-insensitive one it is the same folder spelled differently. Either
+        way an allow decision must not depend on casefold.
+        """
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp).resolve()
             home = base / "home"
-            home.mkdir(parents=True)
+            home.mkdir()
+            repo = base / "repo"
+            repo.mkdir()
+            (base / "REPO").mkdir(exist_ok=True)  # same folder on case-insensitive volumes
+            target = base / "REPO" / "x.py"
+            allowed, reason = guard_decision(
+                {"cwd": str(repo), "tool_input": {"file_path": str(target)}},
+                home=home, git_root=lambda c: repo, scratch=[],
+                main_root=lambda c: None)
+            self.assertFalse(allowed)
+            self.assertIn("outside this agent's workspace", reason)
 
-            # Mock Path.resolve to simulate case-sensitive filesystem behavior
-            # where /tmp/base/repo and /tmp/base/REPO are different directories
-            def mock_resolve(self):
-                # Get the actual resolved path
-                parts = list(self.parts)
-                # Preserve case in parts that contain repo/REPO
-                for i, part in enumerate(parts):
-                    if part.lower() == "repo":
-                        # Keep the original case from the path
-                        pass  # parts already has it
-                # Return a path with the original case preserved
-                return Path(*parts) if len(parts) > 1 else Path(parts[0]) if parts else Path()
+    def test_inside_allow_is_case_exact(self):
+        """_inside_allow never matches a path that differs from the root only in case."""
+        base = Path(tempfile.gettempdir()).resolve() / "wv-case-helper"
+        self.assertFalse(team_hooks._inside_allow(base / "REPO" / "x.py", base / "repo"))
+        self.assertTrue(team_hooks._inside_allow(base / "repo" / "x.py", base / "repo"))
 
-            with mock.patch.object(Path, 'resolve', mock_resolve):
-                # On case-sensitive FS: these would be different directories
-                repo_lower = base / "repo"
-                repo_upper = base / "REPO"
-                target = repo_upper / "x.py"
-
-                # Workspace is repo (lowercase)
-                def git_root_lookup(c):
-                    return repo_lower
-
-                allowed, _ = guard_decision(
-                    {"cwd": str(repo_lower), "tool_input": {"file_path": str(target)}},
-                    home=home, git_root=git_root_lookup, scratch=[]
-                )
-
-                # Should be denied - target is in REPO, workspace is repo
-                self.assertFalse(allowed)
+    def test_inside_deny_is_case_insensitive(self):
+        """_inside_deny matches a path that differs from the root only in case."""
+        base = Path(tempfile.gettempdir()).resolve() / "wv-case-helper"
+        self.assertTrue(team_hooks._inside_deny(base / "REPO" / "x.py", base / "repo"))
+        self.assertFalse(team_hooks._inside_deny(base / "repox" / "x.py", base / "repo"))
 
     def test_miscased_root_denied_with_clear_reason(self):
         """Miscased root target should be denied with clear reason, not ValueError."""
