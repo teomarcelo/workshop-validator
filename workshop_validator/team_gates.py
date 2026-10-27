@@ -2,6 +2,7 @@
 
     python -m workshop_validator.team_gates all [--base origin/main] [--private]
     python -m workshop_validator.team_gates em-dash|decision-rows|register|clock12
+    python -m workshop_validator.team_gates prove-tests <pr>
     python -m workshop_validator.team_gates merge-when-green <pr> [--dry-run]
     python -m workshop_validator.team_gates worktree-cleanup [--dry-run]
 
@@ -314,6 +315,10 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         return 1
     if not merged_tree_gates(repo, head_oid, runner=runner):
         return 1
+    # Run prove-tests gate
+    base_oid = _git(repo, "rev-parse", "origin/main", runner=runner).strip()
+    if not prove_tests(repo, base_oid, head_oid, runner=runner):
+        return 1
     if dry_run:
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
         return 0
@@ -404,6 +409,111 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
     return 0
 
 
+# ---- prove-tests -----------------------------------------------------------
+
+def parse_new_test_ids(diff: str) -> list[str]:
+    """Extract full test ids (module.Class.method) from def test_* lines in added hunks."""
+    ids = []
+    current_file = None
+    current_class = None
+    lines = diff.splitlines()
+
+    for i, line in enumerate(lines):
+        if line.startswith("+++ b/"):
+            current_file = line[6:]
+            current_class = None
+        elif line.startswith("@@"):
+            # Reset class context at new hunk, we'll find it as we go
+            current_class = None
+        elif current_file and current_file.startswith("tests/"):
+            # Track class definitions in both added and context lines
+            if line.startswith(("+", " ")) and "class " in line:
+                stripped = line[1:].strip() if line.startswith("+") else line.strip()
+                if stripped.startswith("class "):
+                    current_class = stripped.split("(")[0].replace("class ", "").replace(":", "").strip()
+            # Look for new test methods
+            elif line.startswith("+"):
+                stripped = line[1:].strip()
+                if stripped.startswith("def test_"):
+                    method = stripped.split("(")[0].replace("def ", "")
+                    module = current_file.replace("/", ".").replace(".py", "")
+                    if current_class:
+                        ids.append(f"{module}.{current_class}.{method}")
+                    else:
+                        # If no class context, look backwards in the diff for class definition
+                        for j in range(i - 1, -1, -1):
+                            prev = lines[j]
+                            if prev.startswith("@@"):
+                                break
+                            if "class " in prev:
+                                cls_line = prev[1:].strip() if prev.startswith(("+", " ", "-")) else prev.strip()
+                                if cls_line.startswith("class "):
+                                    found_class = cls_line.split("(")[0].replace("class ", "").replace(":", "").strip()
+                                    ids.append(f"{module}.{found_class}.{method}")
+                                    break
+    return ids
+
+
+def prove_tests(repo: Path, base_oid: str, head_oid: str, runner=None) -> bool:
+    """Prove new tests fail on base code. PASS when all new tests fail on base."""
+    run = runner or _default_runner
+
+    # Find changed files
+    diff_out = _git(repo, "diff", "--name-only", f"{base_oid}...{head_oid}", "--", "tests/", runner=runner)
+    test_files = [f for f in diff_out.splitlines() if f.startswith("tests/") and f.endswith(".py")]
+
+    code_out = _git(repo, "diff", "--name-only", f"{base_oid}...{head_oid}", "--", "workshop_validator/", runner=runner)
+    code_files = [f for f in code_out.splitlines() if f.endswith(".py")]
+
+    if not code_files:
+        print("prove-tests: SKIP no code change")
+        return True
+
+    # Get the full diff to parse new test ids
+    full_diff = _git(repo, "diff", f"{base_oid}...{head_oid}", "--", "tests/", runner=runner)
+    test_ids = parse_new_test_ids(full_diff)
+
+    if not test_ids:
+        print("prove-tests: SKIP no new tests")
+        return True
+
+    # Create temp worktree
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp) / "prove"
+        try:
+            _git(repo, "worktree", "add", "--detach", str(tree), head_oid, runner=runner)
+
+            # Restore base version of each code file
+            for code_file in code_files:
+                file_path = tree / code_file
+                # Check if file exists in base
+                base_content = _git(tree, "show", f"{base_oid}:{code_file}", check=False, runner=runner)
+                if base_content:
+                    # File exists in base, restore it
+                    file_path.write_text(base_content, encoding="utf-8")
+                else:
+                    # File is new in head, remove it
+                    if file_path.exists():
+                        file_path.unlink()
+
+            # Run each test on base code
+            python = repo / ".venv" / "bin" / "python"
+            passing_tests = []
+            for test_id in test_ids:
+                result = run([str(python), "-m", "unittest", test_id], tree)
+                if result.returncode == 0:
+                    passing_tests.append(test_id)
+
+            if passing_tests:
+                print(f"prove-tests: FAIL {', '.join(passing_tests)} passed on base code")
+                return False
+
+            print(f"prove-tests: PASS {len(test_ids)} new test(s) fail on base")
+            return True
+        finally:
+            _git(repo, "worktree", "remove", "--force", str(tree), check=False, runner=runner)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Producer-team merge gates.")
     parser.add_argument("--repo", default=".")
@@ -416,6 +526,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--private", action="store_true", help="Also run the private-data gates")
     sub.add_parser("register")
     sub.add_parser("clock12")
+    pt = sub.add_parser("prove-tests")
+    pt.add_argument("pr", type=int)
     mwg = sub.add_parser("merge-when-green")
     mwg.add_argument("pr", type=int)
     mwg.add_argument("--dry-run", action="store_true")
@@ -433,6 +545,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if gate_register(team) else 1
     if args.cmd == "clock12":
         return 0 if gate_clock12(team) else 1
+    if args.cmd == "prove-tests":
+        info = _gh_json(repo, "pr", "view", str(args.pr), "--json", "headRefOid,baseRefOid")
+        head_oid = info.get("headRefOid") if info else None
+        base_oid = info.get("baseRefOid") if info else None
+        if not head_oid or not base_oid:
+            base_oid = _merge_base(repo, "origin/main")
+            head_oid = _git(repo, "rev-parse", "HEAD").strip()
+        return 0 if prove_tests(repo, base_oid, head_oid) else 1
     if args.cmd == "merge-when-green":
         return merge_when_green(repo, team, args.pr, args.dry_run)
     if args.cmd == "worktree-cleanup":

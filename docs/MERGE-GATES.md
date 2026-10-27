@@ -11,6 +11,7 @@ summary line, plus a fresh reviewer verdict where judgment is needed.
 | Code | unit tests, `compileall` | rule-auditor when `workshop_validator/`, `.claude/`, `.cursor/` or CLAUDE.md change | CI |
 | Browser | synthetic Chromium smoke | | CI |
 | Merged tree | tests, `public_safety`, `compileall` on origin/main merged with the PR head | | `merge-when-green` |
+| New tests | `team_gates prove-tests` (new tests fail on base code, proving they test the new functionality) | | `merge-when-green` |
 | Report render | | visual-qa (score 8 or more), accessibility-auditor, instructor-panel for big changes | brief |
 | Claims | | evidence-auditor | brief |
 | Private data | | privacy-reviewer (Opus) | brief |
