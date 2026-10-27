@@ -1893,16 +1893,20 @@ def _row_menu_button(page, row: str):
                         rows.append(item)
                 except Exception:
                     continue
-        # Fallback: find rows containing the text when accessible name doesn't match
-        if len(rows) == 0:
+    # Fallback: find rows containing the text when accessible name doesn't match
+    # Run across ALL roots and only use if exactly one match total
+    if len(rows) == 0:
+        for root in _roots(page):
             try:
                 text_rows = root.get_by_role("row").filter(has_text=row)
-                text_count = _count(text_rows)
-                # Only use if exactly one match
-                if text_count == 1:
-                    item = _first(text_rows)
-                    if item.is_visible():
-                        rows.append(item)
+                nth = getattr(text_rows, "nth", None)
+                for i in range(min(_count(text_rows), 8)):
+                    item = nth(i) if callable(nth) else _first(text_rows)
+                    try:
+                        if item.is_visible():
+                            rows.append(item)
+                    except Exception:
+                        continue
             except Exception:
                 pass
     if len(rows) != 1:
@@ -3798,7 +3802,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
-    # wait for a delayed banner. Other buttons: old behavior (can be pre-existing).
+    # wait for a delayed banner. Other buttons: also require NEW success messages (V11).
     is_save_submit = norm(name) in _SAVE_SUBMIT_NAMES
     if not evidence_desc:
         if is_save_submit:
