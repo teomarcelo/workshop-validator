@@ -32,6 +32,7 @@ PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
+NOREPLY_PATTERN = re.compile(r"^[^@\s]+@users\.noreply\.github\.com$")
 
 
 def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
@@ -310,6 +311,16 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     if not head.startswith("automation/"):
         print("merge-when-green: REFUSED head branch is not automation/*")
         return 2
+    # Check that user.email is a noreply address
+    user_email_result = run(["git", "config", "user.email"], repo)
+    if user_email_result.returncode:
+        print("merge-when-green: FAIL cannot read git config user.email")
+        return 1
+    user_email = user_email_result.stdout.strip()
+    # Full-match regex: non-empty local part, no spaces, @users.noreply.github.com
+    if not NOREPLY_PATTERN.match(user_email):
+        print("merge-when-green: FAIL user.email must be a noreply address")
+        return 1
     checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket",
                       runner=runner) or []
     changed = [f["path"] for f in info.get("files", [])]
@@ -333,7 +344,8 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
         return 0
     merged = run(["gh", "pr", "merge", str(pr), "--squash",
-                  "--match-head-commit", head_oid], repo)
+                  "--match-head-commit", head_oid,
+                  "--author-email", user_email], repo)
     if merged.returncode:
         # Read PR state to check if it was merged despite non-zero exit
         pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "state,mergeCommit,headRefOid", runner=runner) or {}
@@ -347,8 +359,35 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     else:
         pr_view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit,headRefOid", runner=runner) or {}
 
-    sha = (pr_view.get("mergeCommit") or {}).get("oid", "")
-    result = wait_main_ci(repo, sha, runner=runner) if sha else "timeout"
+    sha = str((pr_view.get("mergeCommit") or {}).get("oid") or "").strip().lower()
+    # Validate SHA before using it (fail closed). The PR is already merged here.
+    if not is_valid_oid(sha):
+        print(f"merge-when-green: FAIL PR #{pr} is already merged but the merge commit SHA "
+              "cannot be read; check main CI by hand with `gh run list --branch main`")
+        return 1
+
+    # Check that the merge commit author email is a noreply address (gh --jq prints plain text)
+    author_result = run(["gh", "api", f"repos/{{owner}}/{{repo}}/commits/{sha}",
+                        "--jq", ".commit.author.email"], repo)
+    author_email = author_result.stdout.strip() if not author_result.returncode else ""
+    if not author_email:
+        author_problem = "cannot read merge commit author"
+    elif not NOREPLY_PATTERN.match(author_email):
+        author_problem = "merge commit has non-noreply author"
+    else:
+        author_problem = ""
+    if author_problem:
+        print(f"merge-when-green: FAIL {author_problem}")
+        # Still wait for main CI and revert when red (fail closed, still clean up)
+        result = wait_main_ci(repo, sha, runner=runner)
+        if result == "failure":
+            revert_by_pr(repo, pr, sha, runner=runner)
+        elif result == "timeout":
+            print(f"merge-when-green: MERGED PR #{pr}, main CI not finished; "
+                  "check `gh run list --branch main`")
+        return 1
+
+    result = wait_main_ci(repo, sha, runner=runner)
     if result == "success":
         # Delete remote branch after successful merge (only for automation/*)
         if head.startswith("automation/"):
