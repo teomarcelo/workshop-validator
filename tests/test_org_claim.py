@@ -235,6 +235,34 @@ class ClaimGateTests(unittest.TestCase):
             self.assertIn("REFUSED a claim was already tried for this run", out)
             claim.assert_not_called()
 
+    def test_the_marker_is_reserved_before_the_browser_opens(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            first, _, claim = self._claim(folder)  # claim() mocked: no browser, no marker from it
+            second, out, again = self._claim(folder)
+            self.assertEqual((first, second), (0, org_claim.REFUSED))
+            self.assertIn("REFUSED a claim was already tried for this run", out)
+            again.assert_not_called()
+            marker = Path(folder) / "team" / "claim-attempt"
+            self.assertEqual(json.loads(marker.read_text()), {"last_run": "run-1", "result": "started"})
+            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+
+    def test_only_one_of_many_concurrent_claims_reserves_the_attempt(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._marker(folder, "run-0", "CLAIMED")
+            start, results = threading.Barrier(8), []
+
+            def go():
+                start.wait()
+                results.append(org_claim.reserve_attempt(Path(folder)))
+            workers = [threading.Thread(target=go) for _ in range(8)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+            self.assertEqual(sorted(results), [False] * 7 + [True])
+
     def test_claim_is_allowed_after_a_claimed_attempt_or_for_a_new_run(self):
         for marker_run, result in (("run-1", "CLAIMED"), ("run-0", "started")):
             with tempfile.TemporaryDirectory() as folder:
@@ -318,6 +346,25 @@ def _to_details(url):
 
 class PortalBoundaryTests(unittest.TestCase):
     """The browser never leaves the https portal host, redirects included."""
+
+    def test_default_port_443_matches_in_both_directions(self):
+        self.assertTrue(org_claim.on_portal("https://portal.example.test:443/x", "https://portal.example.test/home"))
+        self.assertTrue(org_claim.on_portal("https://portal.example.test/x", "https://portal.example.test:443/home"))
+        self.assertTrue(org_claim.on_portal("https://PORTAL.example.test/x", "https://portal.example.test/home"))
+
+    def test_other_ports_hosts_and_http_are_refused(self):
+        portal = "https://portal.example.test/home"
+        for url in ("https://portal.example.test:8443/x", "http://portal.example.test/x",
+                    "http://portal.example.test:443/x", "https://portal.example.test.other.test/x",
+                    "https://sub.portal.example.test/x", "https://portal.example.test:bad/x", ""):
+            self.assertFalse(org_claim.on_portal(url, portal), url)
+        self.assertFalse(org_claim.on_portal("https://portal.example.test:443/x",
+                                             "https://portal.example.test:8443/home"))
+        self.assertFalse(org_claim.on_portal("http://portal.example.test/x", "http://portal.example.test/home"))
+
+    def test_a_redirect_that_adds_port_443_does_not_stop_the_form(self):
+        page = FakePage(_routes("https://portal.example.test:443/events/new"))
+        self.assertEqual(org_claim._open_form(page, PORTAL_URL)["button"], "Submit")
 
     def _claim(self, root, page):
         with mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(None, page)):

@@ -289,13 +289,20 @@ def find_detail_link(html: str) -> dict | None:
 
 
 def on_portal(url: str, portal_url: str) -> bool:
-    """True only for an https address on the portal's own host."""
+    """True only for an https address on the portal's own host and port (none means 443)."""
+    here, portal = _https_origin(url), _https_origin(portal_url)
+    return here is not None and here == portal
+
+
+def _https_origin(url: str) -> tuple[str, int] | None:
+    """(host, port) of an https address, host lowercased, default port 443. None otherwise."""
     try:
-        here, portal = urlparse(str(url or "")), urlparse(str(portal_url or ""))
-        return (here.scheme == "https" and portal.scheme == "https" and bool(here.hostname)
-                and here.hostname == portal.hostname and here.port == portal.port)
-    except ValueError:
-        return False
+        parts = urlparse(str(url or ""))
+        if parts.scheme.lower() != "https" or not parts.hostname:
+            return None
+        return parts.hostname.lower(), parts.port or 443
+    except ValueError:  # a malformed port
+        return None
 
 
 def find_guide_links(html: str, base: str) -> list[str]:
@@ -352,6 +359,28 @@ def attempt_allowed(root: Path) -> bool:
     if not isinstance(marker, dict):
         return False
     return marker.get("last_run") != last_run_id(root) or marker.get("result") == "CLAIMED"
+
+
+def reserve_attempt(root: Path) -> bool:
+    """Create the attempt marker with O_EXCL before the browser opens.
+
+    Under a flock, an earlier marker that ended CLAIMED (or belongs to another
+    run) is removed first. Of two concurrent claims only one can create it.
+    """
+    path = _attempt_path(root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with _org_lock(path):
+        if path.exists():
+            if not attempt_allowed(root):
+                return False
+            path.unlink()
+        try:
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            return False
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps({"last_run": last_run_id(root), "result": "started"}) + "\n")
+    return True
 
 
 def mark_attempt(root: Path, last_run, result: str) -> None:
@@ -653,7 +682,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not allowed:
                     print(f"org-claim: REFUSED {reason}")
                     return REFUSED
-            if not attempt_allowed(root):
+            if not reserve_attempt(root):
                 print(f"org-claim: REFUSED {ATTEMPT_REFUSED}")
                 return REFUSED
         config = load_config(root)

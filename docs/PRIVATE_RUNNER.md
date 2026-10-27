@@ -79,9 +79,9 @@ the event code. Put it in `~/.workshop-validator/org-claim.json`, mode 0600:
 - `--claim` is refused unless the last run said move on (a success or a real
   failure) and no unused org is left (W-043). `--force` skips that check. It
   works only when the owner runs it at a terminal.
-- One claim per run: before it submits, the tool writes
-  `~/.workshop-validator/team/claim-attempt` (mode 0600) with the gate's last
-  run id. A second `--claim` for the same run is refused unless the first one
+- One claim per run: before the browser opens, the tool creates
+  `~/.workshop-validator/team/claim-attempt` (exclusive create, mode 0600)
+  with the gate's last run id. Two claims at once cannot both start. A second `--claim` for the same run is refused unless the first one
   ended `CLAIMED`.
 - `--guides` downloads the guide PDFs linked on the portal into
   `~/.workshop-validator/team/guide-inbox/` (folder 0700, files 0600) and
