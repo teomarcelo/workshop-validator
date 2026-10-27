@@ -3802,8 +3802,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if not evidence_desc and not before_has_saved and _words_visible(state.page, "successfully saved"):
                 evidence_desc = "after-state: success message visible"
         else:
-            # Other buttons: old behavior, accept pre-existing success messages
-            if _words_visible(state.page, "successfully saved"):
+            # Other buttons: also require NEW success messages (V11)
+            if not before_has_saved and _words_visible(state.page, "successfully saved"):
                 evidence_desc = "after-state: success message visible"
 
     # Check if clicked element has aria-selected/pressed/expanded = true
