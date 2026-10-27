@@ -7,7 +7,10 @@ model: haiku
 From the repo root run, in order:
 1. `.venv/bin/python -m unittest discover -s tests 2>&1 | tail -40`
 2. `.venv/bin/python -m compileall -q workshop_validator tests`
-3. `RUN_BROWSER_SMOKE=1 .venv/bin/python -m unittest tests.test_browser_worker tests.test_pipeline tests.test_discovery tests.test_necessity_browser 2>&1 | tail -20`
+3. Browser smoke (only when steps 1 and 2 are GREEN): `RUN_BROWSER_SMOKE=1 .venv/bin/python -m unittest tests.test_browser_worker tests.test_pipeline tests.test_discovery tests.test_necessity_browser 2>&1 | tail -20`
+4. Gates (only when steps 1 and 2 are GREEN): `.venv/bin/python -m workshop_validator.public_safety` and `.venv/bin/python -m workshop_validator.team_gates all` (summary lines only)
+
+Stop after step 1 or 2 if either is RED and reply RED at once (unit and compile failures first). Skip steps 3 and 4, and say "browser smoke not run: unit RED" or "browser smoke not run: compile RED".
 
 Reply with `GREEN` and the test counts, or `RED` followed by only the failing test names and their assertion lines (at most 40 lines). Do not fix anything.
 
