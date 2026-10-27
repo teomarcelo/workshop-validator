@@ -832,6 +832,15 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
     )
     if missed:
         if missed.status == "UI_MISMATCH":
+            # Check if an unnamed modal is blocking the page
+            modal_title = _unnamed_modal_title(state.page, step.text or "")
+            if modal_title:
+                return CheckResult(
+                    "ENV_BLOCKED",
+                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+                    (),
+                    freeze=True,
+                )
             missed = CheckResult(
                 missed.status, f"{missed.note} {_settings_diagnostic(state.page)}", missed.evidence_ids,
             )
@@ -2791,6 +2800,49 @@ def _promo_dialog(page, allowed: str = "") -> bool:
 
 def _promo_over(state: WalkState, step: GuideStep) -> bool:
     return any(_promo_dialog(candidate, step.text or "") for candidate in _browser_pages(state.page))
+
+
+def _unnamed_modal_title(page, step_text: str) -> str | None:
+    """Returns the title of a visible modal dialog that the step does not name, or None."""
+    step_norm = norm(step_text)
+    for root in _roots(page):
+        # Check for role=dialog or aria-modal=true
+        for selector in ("[role='dialog']", "[role='alertdialog']", "[aria-modal='true']"):
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                item = loc.nth(index)
+                try:
+                    if hasattr(item, "is_visible") and not item.is_visible():
+                        continue
+                    # Get the dialog's full text (original, not normalized)
+                    dialog_text_raw = (item.inner_text(timeout=1000) or "").strip()
+                    dialog_text = norm(dialog_text_raw)
+                    if not dialog_text:
+                        continue
+                    # Try to find a title: look for h1, h2, h3, or role=heading
+                    title = ""
+                    for heading_sel in ("h1", "h2", "h3", "[role='heading']"):
+                        try:
+                            heading_loc = item.locator(heading_sel)
+                            if _count(heading_loc) > 0:
+                                title = (heading_loc.first.inner_text(timeout=500) or "").strip()
+                                if title:
+                                    break
+                        except Exception:
+                            continue
+                    # If no heading found, use first words of dialog text
+                    if not title:
+                        words = dialog_text_raw.split()
+                        title = " ".join(words[:5]) if words else dialog_text_raw[:50]
+                    # Check if step mentions this dialog's title
+                    if title and norm(title) not in step_norm and len(dialog_text) > 5:
+                        return title
+                except Exception:
+                    continue
+    return None
 
 
 def _builder_canvas_visible(page) -> bool:
