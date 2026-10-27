@@ -5,6 +5,7 @@ No file contents or private-looking filenames are ever printed.
 """
 from pathlib import Path, PurePosixPath
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -111,8 +112,11 @@ ALLOWED_BOT_EMAILS = frozenset({
 })
 
 
-def check_commit_emails(root: Path, base_ref: str = "origin/main") -> tuple[bool, str]:
-    """Check that all commits between base_ref and HEAD have allowed emails."""
+def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str = "HEAD") -> tuple[bool, str]:
+    """Check that all commits between base_ref and head_ref have allowed emails.
+
+    Skips head_ref if it's a 2-parent merge of base_ref (GitHub's synthetic merge commit).
+    """
     try:
         # Check if base ref exists
         check_base = subprocess.run(
@@ -122,17 +126,44 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main") -> tuple[bool
         if check_base.returncode != 0:
             return False, f"base ref {base_ref} not found; fetch it first"
 
-        # Get commit range
+        # Check if head_ref is a 2-parent merge of base_ref (GitHub synthetic merge)
+        # If so, use HEAD^2 (the PR's actual last commit)
+        parents = subprocess.run(
+            ["git", "rev-parse", "--verify", f"{head_ref}^2"],
+            cwd=root, capture_output=True, text=True
+        )
+        if parents.returncode == 0:
+            # HEAD has a second parent, check if it's a merge with base_ref
+            merge_base = subprocess.run(
+                ["git", "merge-base", base_ref, head_ref],
+                cwd=root, capture_output=True, text=True
+            )
+            first_parent = subprocess.run(
+                ["git", "rev-parse", f"{head_ref}^1"],
+                cwd=root, capture_output=True, text=True
+            )
+            # If first parent equals merge-base, this is a synthetic merge of base_ref
+            if (merge_base.returncode == 0 and first_parent.returncode == 0 and
+                merge_base.stdout.strip() == first_parent.stdout.strip()):
+                head_ref = f"{head_ref}^2"
+
+        # Get commit range with NUL-separated author and committer emails
         result = subprocess.run(
-            ["git", "log", f"{base_ref}..HEAD", "--format=%ae%n%ce"],
+            ["git", "log", f"{base_ref}..{head_ref}", "--format=%ae%x00%ce"],
             cwd=root, capture_output=True, text=True, check=True
         )
-        emails = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+
+        # Split on NUL to preserve empty emails
+        email_pairs = result.stdout.split('\n')
+        emails = []
+        for pair in email_pairs:
+            if pair:
+                emails.extend(pair.split('\x00'))
 
         # Check each email
         bad_count = 0
         for email in emails:
-            # Empty email fails
+            # Empty email fails (now detectable since we split on NUL)
             if not email:
                 bad_count += 1
                 continue
@@ -199,7 +230,11 @@ def main(argv: list[str] | None = None) -> int:
 
         # Check commit emails
         if args.check_emails:
-            email_ok, email_msg = check_commit_emails(root)
+            # Use PR_HEAD from environment (set in CI on pull_request events) to avoid
+            # checking GitHub's synthetic merge commit
+            pr_head = os.environ.get("PR_HEAD", "").strip()
+            head_ref = pr_head if pr_head else "HEAD"
+            email_ok, email_msg = check_commit_emails(root, head_ref=head_ref)
             if not email_ok:
                 print(f"Public safety gate: {email_msg}", file=sys.stderr)
                 return 1

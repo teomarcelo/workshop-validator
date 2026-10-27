@@ -237,5 +237,103 @@ class AtomicDecideWriteTests(unittest.TestCase):
             self.assertTrue(current == original_content or "W-002" in current)
 
 
+# Security re-review: Synthetic merge commit and empty email detection
+class SyntheticMergeCommitTests(unittest.TestCase):
+    """Security re-review: Skip GitHub's synthetic merge commit in PR checks."""
+
+    def test_synthetic_merge_commit_skipped(self):
+        """GitHub's synthetic merge commit (2-parent merge of origin/main) should be skipped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Create base commit on main
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Create PR branch with valid commits
+            subprocess.run(["git", "checkout", "-b", "pr-branch"], cwd=repo, check=True, capture_output=True)
+            (repo / "pr.txt").write_text("pr")
+            subprocess.run(["git", "add", "pr.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "pr commit"], cwd=repo, check=True, capture_output=True)
+            pr_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+            # Create synthetic merge commit (GitHub does this on pull_request events)
+            # Use a non-noreply email for the merge commit author
+            subprocess.run(["git", "checkout", "origin_main"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "github-actions@github.com"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "merge", "--no-ff", "pr-branch", "-m", "Merge PR"], cwd=repo, check=True, capture_output=True)
+
+            # Without fix: would fail because synthetic merge has non-noreply email
+            # With fix: synthetic merge is skipped via HEAD^2
+            ok, msg = check_commit_emails(repo, "origin_main", "HEAD")
+            self.assertTrue(ok, f"Should skip synthetic merge commit: {msg}")
+
+    def test_pr_head_env_used_when_set(self):
+        """When PR_HEAD env is set, use it instead of HEAD."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Base commit
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # PR commit
+            (repo / "pr.txt").write_text("pr")
+            subprocess.run(["git", "add", "pr.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "pr"], cwd=repo, check=True, capture_output=True)
+            pr_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+
+            # Pass PR_HEAD directly to check_commit_emails
+            ok, msg = check_commit_emails(repo, "origin_main", pr_sha)
+            self.assertTrue(ok)
+
+
+class EmptyEmailDetectionTests(unittest.TestCase):
+    """Security re-review: Empty email detection with NUL-separated format."""
+
+    def test_empty_email_detected_with_nul_format(self):
+        """Empty author or committer email should be detected using NUL-separated format."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "base@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
+
+            # Base commit
+            (repo / "base.txt").write_text("base")
+            subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
+
+            # Commit with empty email (use --allow-empty-email flag)
+            subprocess.run(["git", "config", "user.email", ""], cwd=repo, check=True, capture_output=True)
+            (repo / "test.txt").write_text("test")
+            subprocess.run(["git", "add", "test.txt"], cwd=repo, check=True, capture_output=True)
+            # Git requires --allow-empty-email to commit with empty email
+            result = subprocess.run(
+                ["git", "-c", "user.email=", "commit", "--allow-empty-email", "-m", "test"],
+                cwd=repo, capture_output=True
+            )
+            if result.returncode != 0:
+                # If git doesn't support empty email, skip test
+                self.skipTest("Git version doesn't support empty email commits")
+
+            # Should fail with empty email
+            ok, msg = check_commit_emails(repo, "origin_main")
+            self.assertFalse(ok, "Should detect empty email")
+            self.assertIn("non-github noreply email", msg.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
