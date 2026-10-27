@@ -31,9 +31,17 @@ ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 
 
-def _git(repo: Path, *args: str, check=True) -> str:
-    return subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
-                          check=check).stdout
+def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
+
+
+def _git(repo: Path, *args: str, check=True, runner=None) -> str:
+    """Run git through `runner(cmd, cwd)` (tests inject a fake); raise on failure when check."""
+    result = (runner or _default_runner)(["git", *args], Path(repo))
+    if check and result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, ["git", *args],
+                                            result.stdout, result.stderr)
+    return result.stdout or ""
 
 
 # ---- pure checks (unit tested) ---------------------------------------------
@@ -84,17 +92,17 @@ def clock24_hits(text: str) -> list[str]:
 
 
 def is_review_stale(content: str, head_oid: str) -> bool:
-    """A review is stale if it doesn't contain 'HEAD: <oid>' matching the PR head."""
-    for line in content.splitlines():
-        if line.startswith("HEAD:"):
-            review_oid = line.split(":", 1)[1].strip()
-            # Match if review oid is a prefix (at least 7 chars) of the current head
-            if len(review_oid) >= 7 and head_oid.startswith(review_oid):
-                return False
-            # Or if they're exactly equal
-            if review_oid == head_oid:
-                return False
-    return True
+    """Stale unless the first non-empty line is 'HEAD: <oid>' matching the PR head.
+
+    `team_kit review` writes that line; a HEAD line anywhere else does not count.
+    """
+    first = next((line.strip() for line in content.splitlines() if line.strip()), "")
+    if not first.startswith("HEAD:") or not head_oid:
+        return True
+    review_oid = first.split(":", 1)[1].strip()
+    if review_oid == head_oid:
+        return False
+    return not (len(review_oid) >= 7 and head_oid.startswith(review_oid))
 
 
 def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict[str, str]:
@@ -111,17 +119,18 @@ def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict
     return verdicts
 
 
-SECURITY_PATHS = (".github/", ".claude/settings.json", "workshop_validator/team_hooks.py",
-                  "workshop_validator/team_gates.py", "workshop_validator/team_kit.py",
-                  "workshop_validator/watchdog.py")
+SECURITY_PREFIXES = (".github/", ".claude/agents/", ".claude/workflows/")
+SECURITY_FILES = {".claude/settings.json", ".claude/settings.local.json",
+                  "workshop_validator/team_hooks.py", "workshop_validator/team_gates.py",
+                  "workshop_validator/team_kit.py", "workshop_validator/watchdog.py",
+                  "workshop_validator/public_safety.py", "workshop_validator/team_state.py"}
 
 
 def required_reviewers(changed: list[str]) -> list[str]:
     roles = list(ALWAYS_REVIEWERS)
     if any(name.startswith(RULE_PATHS) for name in changed):
         roles.append("rule-auditor")
-    if any(name.startswith(".github/") or name == ".claude/settings.json" or
-           name in SECURITY_PATHS[2:] for name in changed):
+    if any(name.startswith(SECURITY_PREFIXES) or name in SECURITY_FILES for name in changed):
         roles.append("security-reviewer")
     return roles
 
@@ -190,19 +199,19 @@ def gate_clock12(team: Path) -> bool:
 
 # ---- merge when green ------------------------------------------------------
 
-def _gh_json(repo: Path, *args: str):
-    out = subprocess.run(["gh", *args], cwd=repo, capture_output=True, text=True)
+def _gh_json(repo: Path, *args: str, runner=None):
+    out = (runner or _default_runner)(["gh", *args], Path(repo))
     return json.loads(out.stdout or "null")
 
 
-def merged_tree_gates(repo: Path, oid: str) -> bool:
+def merged_tree_gates(repo: Path, oid: str, runner=None) -> bool:
     """Run tests and gates on origin/main merged with the exact oid, in a temp worktree."""
+    run = runner or _default_runner
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp) / "merged"
-        _git(repo, "worktree", "add", "--detach", str(tree), "origin/main")
+        _git(repo, "worktree", "add", "--detach", str(tree), "origin/main", runner=runner)
         try:
-            merge = subprocess.run(["git", "merge", "--no-edit", "--no-ff", oid],
-                                   cwd=tree, capture_output=True, text=True)
+            merge = run(["git", "merge", "--no-edit", "--no-ff", oid], tree)
             if merge.returncode:
                 print("merged-tree: FAIL merge conflict with main")
                 return False
@@ -210,21 +219,21 @@ def merged_tree_gates(repo: Path, oid: str) -> bool:
             for cmd in ([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"],
                         [str(python), "-m", "workshop_validator.public_safety"],
                         [str(python), "-m", "compileall", "-q", "workshop_validator", "tests"]):
-                result = subprocess.run(cmd, cwd=tree, capture_output=True, text=True)
+                result = run(cmd, tree)
                 if result.returncode:
                     print(f"merged-tree: FAIL {' '.join(cmd[1:4])}")
                     return False
             print("merged-tree: PASS tests, public_safety, compileall")
             return True
         finally:
-            _git(repo, "worktree", "remove", "--force", str(tree), check=False)
+            _git(repo, "worktree", "remove", "--force", str(tree), check=False, runner=runner)
 
 
-def wait_main_ci(repo: Path, sha: str, timeout_s: int = 1500) -> str:
+def wait_main_ci(repo: Path, sha: str, timeout_s: int = 1500, runner=None) -> str:
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         runs = _gh_json(repo, "run", "list", "--branch", "main", "--limit", "10",
-                        "--json", "headSha,status,conclusion") or []
+                        "--json", "headSha,status,conclusion", runner=runner) or []
         mine = [r for r in runs if r.get("headSha") == sha]
         if mine and all(r.get("status") == "completed" for r in mine):
             return "success" if all(r.get("conclusion") == "success" for r in mine) else "failure"
@@ -232,73 +241,94 @@ def wait_main_ci(repo: Path, sha: str, timeout_s: int = 1500) -> str:
     return "timeout"
 
 
-def revert_by_pr(repo: Path, pr: int, sha: str) -> str:
-    """Create a revert PR in a temporary worktree. Returns PR URL or raises on error."""
+def revert_by_pr(repo: Path, pr: int, sha: str, runner=None) -> int:
+    """Open a revert PR from a temporary worktree (never the owner checkout).
+
+    Prints one line. Returns 0 when the revert PR is open, 1 with a REVERT FAILED
+    line otherwise. The local revert branch is always deleted afterwards, so a
+    second attempt does not collide with it.
+    """
+    run = runner or _default_runner
     branch = f"automation/{datetime.now().date().isoformat()}-revert-pr-{pr}-{sha[:7]}"
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            tree = Path(tmp) / "revert"
-            _git(repo, "fetch", "origin", "main")
-            _git(repo, "worktree", "add", "--detach", str(tree), "origin/main")
-            try:
-                _git(tree, "checkout", "-b", branch)
-                _git(tree, "revert", "--no-edit", sha)
-                _git(tree, "push", "-u", "origin", branch)
-                url = subprocess.run(["gh", "pr", "create", "--title", f"revert: PR #{pr} broke main CI",
-                                      "--body", f"Main CI failed after #{pr} merged ({sha[:10]}). Same-turn revert per the merge policy."],
-                                     cwd=tree, capture_output=True, text=True, check=True).stdout.strip()
-                return url
-            finally:
-                _git(repo, "worktree", "remove", "--force", str(tree), check=False)
-    except subprocess.CalledProcessError as exc:
-        print(f"merge-when-green: REVERT FAILED PR #{pr}: {exc}", file=sys.stderr)
-        raise
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp) / "revert"
+        added = False
+        try:
+            _git(repo, "fetch", "origin", "main", runner=runner)
+            _git(repo, "worktree", "add", "--detach", str(tree), "origin/main", runner=runner)
+            added = True
+            _git(tree, "checkout", "-b", branch, runner=runner)
+            _git(tree, "revert", "--no-edit", sha, runner=runner)
+            _git(tree, "push", "-u", "origin", branch, runner=runner)
+            created = run(["gh", "pr", "create", "--title", f"revert: PR #{pr} broke main CI",
+                           "--body", f"Main CI failed after #{pr} merged ({sha[:10]}). "
+                           "Same-turn revert per the merge policy."], tree)
+            if created.returncode:
+                raise subprocess.CalledProcessError(created.returncode, ["gh", "pr", "create"])
+            print(f"merge-when-green: REVERTING PR #{pr}, main CI red; revert PR "
+                  f"{(created.stdout or '').strip()}. Log an escape.")
+            return 0
+        except subprocess.CalledProcessError as exc:
+            step = " ".join(str(part) for part in list(exc.cmd)[:2])
+            print(f"merge-when-green: REVERT FAILED PR #{pr}: {step} exited {exc.returncode}; "
+                  "revert by hand and log an escape.")
+            return 1
+        finally:
+            if added:
+                _git(repo, "worktree", "remove", "--force", str(tree), check=False, runner=runner)
+            _git(repo, "branch", "-D", branch, check=False, runner=runner)
 
 
-def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False) -> int:
+def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, runner=None) -> int:
+    run = runner or _default_runner
     info = _gh_json(repo, "pr", "view", str(pr), "--json",
-                    "headRefName,headRefOid,isCrossRepository,files,state,baseRefName")
+                    "headRefName,headRefOid,isCrossRepository,files,state,baseRefName",
+                    runner=runner)
     if not info or info.get("state") != "OPEN" or info.get("baseRefName") != "main":
         print(f"merge-when-green: REFUSED PR #{pr} is not an open PR into main")
         return 2
     if info.get("isCrossRepository"):
         print(f"merge-when-green: REFUSED PR #{pr} is from a cross-repository fork")
         return 2
-    head = info["headRefName"]
-    head_oid = info.get("headRefOid", "")
-    if not head.startswith("automation/"):
-        print(f"merge-when-green: REFUSED head branch is not automation/*")
+    head = info.get("headRefName") or ""
+    head_oid = str(info.get("headRefOid") or "").strip()
+    if not head_oid:
+        print(f"merge-when-green: REFUSED PR #{pr} has no headRefOid to pin the merge to")
         return 2
-    checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket") or []
+    if not head.startswith("automation/"):
+        print("merge-when-green: REFUSED head branch is not automation/*")
+        return 2
+    checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket",
+                      runner=runner) or []
     changed = [f["path"] for f in info.get("files", [])]
     problems = merge_blockers(checks, review_verdicts(team / "reviews", pr, head_oid),
                               required_reviewers(changed))
     if problems:
         print(f"merge-when-green: WAIT {'; '.join(problems[:5])}")
         return 1
-    _git(repo, "fetch", "origin", head)
-    if not merged_tree_gates(repo, head_oid):
+    # Fetch main too, so the merged-tree gates run against current main.
+    fetched = run(["git", "fetch", "origin", "main", head], repo)
+    if fetched.returncode:
+        print(f"merge-when-green: FAIL git fetch origin main {head} exited {fetched.returncode}")
+        return 1
+    if not merged_tree_gates(repo, head_oid, runner=runner):
         return 1
     if dry_run:
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
         return 0
-    merged = subprocess.run(["gh", "pr", "merge", str(pr), "--squash", "--delete-branch",
-                             "--match-head-commit", head_oid],
-                            cwd=repo, capture_output=True, text=True)
+    merged = run(["gh", "pr", "merge", str(pr), "--squash", "--delete-branch",
+                  "--match-head-commit", head_oid], repo)
     if merged.returncode:
         print(f"merge-when-green: FAIL gh pr merge exited {merged.returncode}")
         return 1
-    sha = (_gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit") or {}).get("mergeCommit", {}).get("oid", "")
-    result = wait_main_ci(repo, sha) if sha else "timeout"
+    view = _gh_json(repo, "pr", "view", str(pr), "--json", "mergeCommit", runner=runner) or {}
+    sha = (view.get("mergeCommit") or {}).get("oid", "")
+    result = wait_main_ci(repo, sha, runner=runner) if sha else "timeout"
     if result == "success":
         print(f"merge-when-green: MERGED PR #{pr}, main CI green")
         return 0
     if result == "failure":
-        try:
-            url = revert_by_pr(repo, pr, sha)
-            print(f"merge-when-green: REVERTING PR #{pr}, main CI red; revert PR {url}. Log an escape.")
-        except subprocess.CalledProcessError:
-            pass
+        revert_by_pr(repo, pr, sha, runner=runner)
         return 1
     print(f"merge-when-green: MERGED PR #{pr}, main CI not finished; check `gh run list --branch main`")
     return 3
@@ -329,31 +359,32 @@ def worktree_idle_time(path: Path, commit_time: float) -> float:
     return (time.time() - newest) / 3600
 
 
-def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0) -> int:
+def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
+                     runner=None) -> int:
     """Remove agent worktrees whose PR merged, that are clean and idle for an hour."""
     removed, kept = [], 0
     main_tree = repo.resolve()
-    for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain")):
+    for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain", runner=runner)):
         path = Path(item.get("worktree", ""))
         branch = str(item.get("branch", "")).removeprefix("refs/heads/")
         if path.resolve() == main_tree or not branch:
             continue
-        dirty = _git(path, "status", "--porcelain", check=False).strip() if path.is_dir() else ""
+        dirty = _git(path, "status", "--porcelain", check=False, runner=runner).strip() if path.is_dir() else ""
         commit_time = team_kit._branch_commit_time(repo, branch)
         idle = worktree_idle_time(path, commit_time)
         merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--head", branch,
-                              "--json", "number,headRefOid") or []
+                              "--json", "number,headRefOid", runner=runner) or []
         # Only delete branch if its current oid matches the merged PR's headRefOid
-        branch_oid = _git(repo, "rev-parse", branch, check=False).strip() if branch else ""
-        safe_to_delete = any(pr.get("headRefOid") == branch_oid for pr in merged_prs) if merged_prs else False
+        branch_oid = _git(repo, "rev-parse", branch, check=False, runner=runner).strip() if branch else ""
+        safe_to_delete = bool(branch_oid) and any(pr.get("headRefOid") == branch_oid for pr in merged_prs)
         if dirty or idle < idle_hours or not safe_to_delete:
             kept += 1
             continue
         if not dry_run:
-            _git(repo, "worktree", "remove", str(path), check=False)
-            _git(repo, "branch", "-D", branch, check=False)
+            _git(repo, "worktree", "remove", str(path), check=False, runner=runner)
+            _git(repo, "branch", "-D", branch, check=False, runner=runner)
         removed.append(path.name)
-    _git(repo, "worktree", "prune", check=False)
+    _git(repo, "worktree", "prune", check=False, runner=runner)
     verb = "would remove" if dry_run else "removed"
     print(f"worktree-cleanup: {verb} {len(removed)}, kept {kept}, {team_kit.free_gb(repo):.0f} GB free")
     return 0

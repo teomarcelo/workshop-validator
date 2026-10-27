@@ -45,21 +45,40 @@ const test = () => agent(
   `Check out branch ${branch} in a temporary worktree and run the unit tests, compile check and public_safety. Return failures only.`,
   { phase: 'Test', label: 'test-runner', agentType: 'test-runner', schema: TESTS })
 
-const review = () => parallel(['code-reviewer', 'rule-auditor'].map(r => () =>
+const REVIEWERS = ['code-reviewer', 'rule-auditor']
+const review = () => parallel(REVIEWERS.map(r => () =>
   agent(`Review \`git diff origin/main...${branch}\` against the brief at ${brief}. You did not write it.`,
     { phase: 'Review', label: r, agentType: r === 'code-reviewer' ? 'general-purpose' : r, schema: VERDICT })
     .then(v => v && { role: r, ...v })))
+
+// BEGIN collectFindings (pure; tests/test_team_kit.py runs it with node)
+// A missing reviewer is a finding, and "not ready" never yields an empty list.
+function collectFindings(tests, results, roles) {
+  const findings = []
+  if (!tests) findings.push('test-runner returned nothing')
+  else if (!tests.green) {
+    const failures = (tests.failures || []).map(f => `test: ${f}`)
+    findings.push(...(failures.length ? failures : ['test: not green, no failures listed']))
+  }
+  const verdicts = []
+  roles.forEach((role, i) => {
+    const v = results && results[i]
+    if (!v || !v.verdict) { findings.push(`missing reviewer: ${role}`); return }
+    verdicts.push({ ...v, role })
+    if (v.verdict !== 'APPROVE') {
+      const list = (v.findings || []).map(f => `${role}: ${f}`)
+      findings.push(...(list.length ? list : [`${role}: ${v.verdict} with no findings listed`]))
+    }
+  })
+  return { verdicts, findings, ready: findings.length === 0 }
+}
+// END collectFindings
 
 let report = await build('')
 let rounds = 0
 while (true) {
   const tests = await test()
-  const verdicts = (await review()).filter(Boolean)
-  const findings = [
-    ...(!tests ? ['test-runner returned nothing'] : !tests.green ? tests.failures.map(f => `test: ${f}`) : []),
-    ...verdicts.filter(v => v.verdict !== 'APPROVE').flatMap(v => v.findings.map(f => `${v.role}: ${f}`)),
-  ]
-  const ready = tests && tests.green && verdicts.length === 2 && verdicts.every(v => v.verdict === 'APPROVE')
+  const { verdicts, findings, ready } = collectFindings(tests, await review(), REVIEWERS)
   if (ready) return { report, verdicts, rounds, status: 'READY_FOR_PR' }
   if (rounds >= 2) return { report, verdicts, rounds, findings, status: 'ESCALATE' }
   rounds += 1

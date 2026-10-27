@@ -4,7 +4,10 @@
   inside its own checkout or worktree, the private team folder, or a scratch
   folder. It fails closed: when the workspace or target does not resolve, the
   write is denied (exit 2). The settings command adds `|| exit 2` so a crash
-  denies too.
+  denies too. Review verdicts (`team/reviews/`) are never written this way;
+  `team_kit review` saves them. Settings, hooks, `team_kit.py`, role files and
+  workflows are written only from an agent worktree under `.claude/worktrees/`.
+  This guards against mistakes; a same-user agent with Bash is not stopped.
 - `stop` (Stop): for the producer session only, block ending a turn while the
   chain is IDLE or STALLED, or while the plan or register is newer than the
   dashboard. A second stop in a row (`stop_hook_active`) is always let through.
@@ -21,7 +24,8 @@ from . import team_kit
 
 NEVER_WRITE = {"verification-orgs.json", "browser-state.json"}
 PROTECTED_FROM_MAIN = {".claude/settings.json", ".claude/settings.local.json",
-                       "workshop_validator/team_hooks.py"}
+                       "workshop_validator/team_hooks.py", "workshop_validator/team_kit.py"}
+PROTECTED_PREFIXES_FROM_MAIN = (".claude/agents/", ".claude/workflows/")
 
 
 def _git_root(cwd: Path) -> Path | None:
@@ -31,6 +35,32 @@ def _git_root(cwd: Path) -> Path | None:
     except (OSError, subprocess.CalledProcessError):
         return None
     return Path(out).resolve() if out else None
+
+
+def _main_root(cwd: Path) -> Path | None:
+    """The main checkout that owns this workspace (the parent of the common .git)."""
+    try:
+        out = subprocess.run(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                             cwd=cwd, capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return Path(out).resolve().parent if out else None
+
+
+def is_agent_worktree(root: Path, main_root: Path | None) -> bool:
+    """True when root sits strictly inside <main checkout>/.claude/worktrees/ (path containment)."""
+    if main_root is None:
+        return False
+    worktrees = main_root.resolve() / ".claude" / "worktrees"
+    try:
+        rel = root.resolve().relative_to(worktrees)
+    except ValueError:
+        return False
+    return bool(rel.parts)
+
+
+def is_protected(rel: str) -> bool:
+    return rel in PROTECTED_FROM_MAIN or rel.startswith(PROTECTED_PREFIXES_FROM_MAIN)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -56,8 +86,8 @@ def scratch_roots() -> list[Path]:
 
 
 def guard_decision(payload: dict, *, home: Path | None = None, git_root=_git_root,
-                   scratch: list[Path] | None = None) -> tuple[bool, str]:
-    """Return (allowed, reason). Pure apart from the injectable git lookup."""
+                   scratch: list[Path] | None = None, main_root=_main_root) -> tuple[bool, str]:
+    """Return (allowed, reason). Pure apart from the injectable git lookups."""
     home = (home or Path.home()).resolve()
     tool_input = payload.get("tool_input") or {}
     raw = tool_input.get("file_path") or tool_input.get("notebook_path")
@@ -76,21 +106,16 @@ def guard_decision(payload: dict, *, home: Path | None = None, git_root=_git_roo
         return False, "write guard: target path does not resolve"
     if target.name in NEVER_WRITE:
         return False, "write guard: credential and session files are never written by agents"
+    if _inside(target, (home / ".workshop-validator" / "team" / "reviews").resolve()):
+        return False, ("write guard: review verdicts are saved only with "
+                       "`team_kit review --pr N --role R --head SHA`")
     worktrees = root / ".claude" / "worktrees"
     in_own_workspace = _inside(target, root) and not (_inside(target, worktrees) and not _inside(root, worktrees))
-    # Check for protected files that can only be written from worktrees
+    # Hooks, gates, settings and role files change only from an agent worktree.
     if in_own_workspace:
-        try:
-            rel = target.relative_to(root)
-            rel_str = str(rel).replace("\\", "/")
-            if rel_str in PROTECTED_FROM_MAIN:
-                # Check if root itself is inside a worktree (contains .claude/worktrees in path)
-                root_str = str(root.resolve())
-                is_worktree = "/.claude/worktrees/" in root_str or "\\.claude\\worktrees\\" in root_str
-                if not is_worktree:
-                    return False, f"write guard: {rel_str} can only be written from a worktree, not the main checkout"
-        except ValueError:
-            pass
+        rel = target.relative_to(root).as_posix()
+        if is_protected(rel) and not is_agent_worktree(root, main_root(cwd)):
+            return False, f"write guard: {rel} can only be written from a worktree, not the main checkout"
         return True, "inside own workspace"
     allowed = [home / ".workshop-validator" / "team", home / ".claude" / "plans",
                team_kit.transcripts_dir(root) / "memory",

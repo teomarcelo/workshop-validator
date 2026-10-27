@@ -16,6 +16,7 @@ from pathlib import Path
 import argparse
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -325,6 +326,41 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     return f"{action} {state}: {reason} (producer session {session})"
 
 
+# ---- review verdicts -------------------------------------------------------
+
+ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
+HEAD_OID = re.compile(r"^[0-9a-f]{7,40}$")
+
+
+def reviews_dir(team: Path) -> Path:
+    return team / "reviews"
+
+
+def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
+    """Write reviews/pr-<pr>-<role>.md with 'HEAD: <head>' as its first line (0600).
+
+    This is the only way the producer saves a verdict; the write guard denies the
+    Write and Edit tools in reviews/ so a session cannot hand-write one by mistake.
+    """
+    if pr <= 0:
+        raise ValueError("pr must be a positive number")
+    if not ROLE_NAME.match(role or ""):
+        raise ValueError("role must be lower-case letters, digits and dashes")
+    head = (head or "").strip().lower()
+    if not HEAD_OID.match(head):
+        raise ValueError("head must be the PR headRefOid (7 to 40 hex characters)")
+    body = (reply or "").strip()
+    if not body:
+        raise ValueError("reviewer reply on stdin is empty")
+    path = reviews_dir(team) / f"pr-{pr}-{role}.md"
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        handle.write(f"HEAD: {head}\n{body}\n")
+    path.chmod(0o600)
+    return path
+
+
 def _read_time_iso(value) -> datetime | None:
     try:
         return datetime.fromisoformat(value) if value else None
@@ -351,6 +387,10 @@ def main(argv: list[str] | None = None) -> int:
         led.add_argument(f"--{name.replace('_', '-')}")
     sub.add_parser("claim", help="Claim producer-live (session bound by the next hook)")
     sub.add_parser("release", help="Release producer-live before a clear")
+    rev = sub.add_parser("review", help="Save a reviewer reply (stdin) as reviews/pr-N-ROLE.md")
+    rev.add_argument("--pr", type=int, required=True)
+    rev.add_argument("--role", required=True)
+    rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
     args = parser.parse_args(argv)
 
     team = team_root(Path(args.private_root).expanduser() if args.private_root else None)
@@ -382,6 +422,14 @@ def main(argv: list[str] | None = None) -> int:
             print(str(exc), file=sys.stderr)
             return 1
         print(f"Ledger row added: {row['role']} / {row['task']}")
+        return 0
+    if args.cmd == "review":
+        try:
+            path = save_review(team, args.pr, args.role, args.head, sys.stdin.read())
+        except (ValueError, OSError) as exc:
+            print(f"review: REFUSED {exc}", file=sys.stderr)
+            return 2
+        print(f"review: saved {path.name} for HEAD {args.head.strip().lower()[:10]}")
         return 0
     if args.cmd == "claim":
         claim_producer(team)

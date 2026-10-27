@@ -111,7 +111,9 @@ Gates: `docs/MERGE-GATES.md`.
 2. Start a fresh executor (Sonnet, effort high) in its own worktree, or the
    `feature` workflow (`.claude/workflows/feature.js`: build, test, review, fix, re-review).
 3. Push, open a PR with the executor's report in the body.
-4. Fresh reviewers write `reviews/pr-<N>-<role>.md` with a `VERDICT:` line.
+4. Fresh reviewers reply with a `VERDICT:` line. The producer saves each reply with
+   `team_kit review --pr <N> --role <role> --head <headRefOid>`, which writes
+   `reviews/pr-<N>-<role>.md` with `HEAD: <sha>` first. Only saved reviews count.
 5. Findings go to a new agent. Two failed rounds escalate to Opus.
 6. `team_gates merge-when-green <N>`: CI, verdicts, merged-tree gates,
    squash merge, main CI, same-turn revert PR when red.
