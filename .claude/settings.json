@@ -35,7 +35,6 @@
       "Bash(git add requirements-dev.txt*)",
       "Bash(git commit*)",
       "Bash(git push -u origin automation/*)",
-      "Bash(git checkout -b automation/*)",
       "Bash(git status*)",
       "Bash(git diff*)",
       "Bash(git log*)",
@@ -51,7 +50,7 @@
       "Bash(git fetch*)",
       "Bash(git add briefs/*)",
       "Bash(git add .github/*)",
-      "Bash(git worktree add*)",
+      "Bash(git worktree add .claude/worktrees/*)",
       "Bash(git worktree list*)"
     ]
   },

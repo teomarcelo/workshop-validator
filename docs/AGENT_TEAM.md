@@ -158,7 +158,7 @@ What I need from you:
   agent inside its own checkout or worktree and fails closed. The Stop hook,
   for the producer session only, blocks ending a turn while the chain is IDLE
   or STALLED or the dashboard is older than the plan or register. A second stop
-  in a row always goes through.
+  in a row always goes through. Creating a branch in the main checkout prompts once; agents create branches inside their own worktree.
 - Two desktop scheduled tasks, created by the owner: producer-wake (hourly,
   9 AM to 6 PM) and the watchdog (every 20 minutes, at :07, :27 and :47). The watchdog runs
   `team_kit watchdog`: `NUDGE` means message the live producer to resume,
