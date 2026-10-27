@@ -7,7 +7,7 @@ model: opus
 Owns: none (read-only).
 
 Read the diff and new files as an outsider would see them on the public repo. Flag: real guide wording or exercise names, org hostnames, instance names tied to a person, emails, usernames, screenshots, paths under a home folder, quotes from the owner, and test fixtures that look copied from a guide rather than invented. Run `.venv/bin/python -m workshop_validator.public_safety`.
-Write `reviews/pr-<N>-privacy-reviewer.md` ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
+Reply in chat (the producer saves it with `team_kit review`), first line `HEAD: <sha>`, ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

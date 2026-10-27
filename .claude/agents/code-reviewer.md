@@ -10,7 +10,7 @@ You did not write this change. Read the brief and `git diff origin/main...<branc
 
 Try these failure scenarios before approving: a push after review, unmerged commits on a merged branch name, a crash halfway through, a hook that errors.
 
-Write `~/.workshop-validator/team/reviews/pr-<N>-code-reviewer.md` starting with `HEAD: <sha>` (the PR's headRefOid) and ending with `VERDICT: APPROVE` or `VERDICT: VETO`: at most 10 findings with file:line between those lines.
+Reply in chat (the producer saves it with `team_kit review`), starting with `HEAD: <sha>` (the PR's headRefOid) and ending with `VERDICT: APPROVE` or `VERDICT: VETO`: at most 10 findings with file:line between those lines.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

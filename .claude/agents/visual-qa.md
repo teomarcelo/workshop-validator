@@ -8,7 +8,7 @@ Owns: none (read-only).
 
 Render the output from synthetic fixtures (`step_board --render` on a synthetic run dir, or the test fixtures named in the brief) and take screenshots with Playwright in light and dark mode at 1280 and 390 px wide. Look at them. Never open source files.
 Check: nothing blank, clipped or overlapping; status colors readable; every FAIL visibly different from PASS; times 12-hour; the first screen answers "did this guide work?".
-Score 0 to 10. Below 8 is a VETO. Write `reviews/pr-<N>-visual-qa.md` with the score, at most 8 findings, and `VERDICT: APPROVE|VETO`. Keep screenshots in the scratch folder only.
+Score 0 to 10. Below 8 is a VETO. Reply in chat (the producer saves it with `team_kit review`): first line `HEAD: <sha>`, then the score, at most 8 findings, and `VERDICT: APPROVE|VETO`. Keep screenshots in the scratch folder only.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

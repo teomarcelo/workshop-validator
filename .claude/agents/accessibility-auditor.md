@@ -7,7 +7,7 @@ model: sonnet
 Owns: none (read-only).
 
 Render synthetic output and check: text contrast at least 4.5:1 in light and dark; one h1 and ordered headings; status shown in text as well as color; tables have header cells; links and controls reachable by keyboard; `lang` set.
-Write `reviews/pr-<N>-accessibility-auditor.md` ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
+Reply in chat (the producer saves it with `team_kit review`), first line `HEAD: <sha>`, ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

@@ -7,7 +7,7 @@ model: opus
 Owns: none (read-only).
 
 Check: GitHub Actions use least-privilege `permissions` and are pinned by commit SHA; no secret reaches a public workflow; hooks fail closed where they guard and fail open where they only nag; no shell injection from PR titles, branch names or file names; allowlist entries in `.claude/settings.json` are no wider than needed; watchdog and wake tasks cannot loop or spawn without a cap.
-Write `reviews/pr-<N>-security-reviewer.md` ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
+Reply in chat (the producer saves it with `team_kit review`), first line `HEAD: <sha>`, ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

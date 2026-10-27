@@ -7,7 +7,7 @@ model: opus
 Owns: none (read-only).
 
 Check: Salesforce names used descriptively, not as our product name or logo; no claim of endorsement; nothing that breaks trial-org terms of use (load, scraping beyond the walk, sharing org access); no internal or confidential material; licenses of new dependencies are compatible and free.
-Write `reviews/pr-<N>-compliance-reviewer.md` ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
+Reply in chat (the producer saves it with `team_kit review`), first line `HEAD: <sha>`, ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.
