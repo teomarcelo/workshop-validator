@@ -381,7 +381,9 @@ class MergeWhenGreenTests(unittest.TestCase):
             team_kit.save_review(self.team, 5, role, OID, f"notes\nVERDICT: {verdict}")
 
     def run_merge(self, info):
+        noreply_email = "teomarcelo@users.noreply.github.com"
         runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
             # pr view after successful merge (mergeCommit, headRefOid - no state)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": "b" * 40}, "headRefOid": OID})),
@@ -391,6 +393,7 @@ class MergeWhenGreenTests(unittest.TestCase):
             (lambda c: c[:3] == ["gh", "run", "list"], 0,
              json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
             (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            (lambda c: c[:2] == ["gh", "api"], 0, noreply_email + "\n"),
         ])
         out = io.StringIO()
         with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
@@ -427,8 +430,87 @@ class MergeWhenGreenTests(unittest.TestCase):
         self.assertEqual(fetches[0][0], ["git", "fetch", "origin", "main", GOOD_PR["headRefName"]])
         merge = runner.find("gh", "pr", "merge")
         self.assertEqual(len(merge), 1)
-        self.assertEqual(merge[0][0][-2:], ["--match-head-commit", OID])
+        # Check that both --match-head-commit and --author-email are present
+        self.assertIn("--match-head-commit", merge[0][0])
+        self.assertIn(OID, merge[0][0])
+        self.assertIn("--author-email", merge[0][0])
         # Note: git worktree is called by merged_tree_gates which is mocked, so we don't verify order here
+
+    def test_merge_includes_author_email_with_noreply_address(self):
+        """F11: merge command must include --author-email with the repo's noreply email."""
+        noreply_email = "teomarcelo@users.noreply.github.com"
+        runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": "b" * 40}, "headRefOid": OID})),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c), 0, json.dumps(GOOD_PR)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            (lambda c: c[:3] == ["gh", "run", "list"], 0,
+             json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            (lambda c: c[:2] == ["gh", "api"], 0, noreply_email + "\n"),
+        ])
+        out = io.StringIO()
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates, "wait_main_ci", return_value="success"), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        self.assertEqual(code, 0, out.getvalue())
+        merge = runner.find("gh", "pr", "merge")
+        self.assertEqual(len(merge), 1)
+        self.assertIn("--author-email", merge[0][0])
+        email_idx = merge[0][0].index("--author-email")
+        self.assertEqual(merge[0][0][email_idx + 1], noreply_email)
+
+    def test_non_noreply_user_email_refuses_before_merge(self):
+        """F11: refuse to merge if git config user.email is not a noreply address."""
+        work_email = "tmarcelo@example.com"
+        runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, work_email + "\n"),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c), 0, json.dumps(GOOD_PR)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+        ])
+        out = io.StringIO()
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL", out.getvalue())
+        self.assertIn("noreply address", out.getvalue())
+        self.assertNotIn(work_email, out.getvalue())
+        self.assertNotIn("@", out.getvalue())
+        # Should not call gh pr merge
+        self.assertFalse(runner.find("gh", "pr", "merge"))
+
+    def test_post_merge_non_noreply_author_is_fail(self):
+        """F11: after merge, check the merge commit author email and fail if not noreply."""
+        noreply_email = "teomarcelo@users.noreply.github.com"
+        work_email = "tmarcelo@example.com"
+        runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
+             json.dumps({"mergeCommit": {"oid": "b" * 40}, "headRefOid": OID})),
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c), 0, json.dumps(GOOD_PR)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            (lambda c: c[:2] == ["git", "merge-base"], 0, "c" * 40 + "\n"),
+            # API returns work email instead of noreply
+            (lambda c: c[:2] == ["gh", "api"] and "commits" in " ".join(c), 0, work_email + "\n"),
+            (lambda c: c[:3] == ["gh", "run", "list"], 0,
+             json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
+        ])
+        out = io.StringIO()
+        with mock.patch.object(team_gates, "merged_tree_gates", return_value=True), \
+             mock.patch.object(team_gates, "prove_tests", return_value=True), \
+             mock.patch.object(team_gates.time, "sleep", side_effect=AssertionError("real sleep")), \
+             contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        self.assertEqual(code, 1)
+        self.assertIn("FAIL", out.getvalue())
+        self.assertIn("non-noreply author", out.getvalue())
+        self.assertNotIn(work_email, out.getvalue())
+        self.assertNotIn("@", out.getvalue())
 
 
 class MergedTreeGatesTests(unittest.TestCase):
@@ -1256,8 +1338,10 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
 
     def test_merge_reads_state_after_nonzero_gh_pr_merge(self):
         """After non-zero gh pr merge, read PR state; if MERGED, continue."""
-        merge_oid = "m" * 40
+        merge_oid = "a" * 40
+        noreply_email = "teomarcelo@users.noreply.github.com"
         runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
             # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
              json.dumps(GOOD_PR)),
@@ -1272,6 +1356,7 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
             # Second pr view call after non-zero merge (state, mergeCommit, headRefOid)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "state" in " ".join(c) and "mergeCommit" in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}, "state": "MERGED", "headRefOid": OID})),
+            (lambda c: c[:2] == ["gh", "api"], 0, noreply_email + "\n"),
             # git push to delete branch
             (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
@@ -1288,8 +1373,10 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
 
     def test_merge_deletes_remote_branch_after_merge_not_local_in_worktree(self):
         """Should delete remote branch with git push origin --delete after merge, not local in worktree."""
-        merge_oid = "m" * 40
+        merge_oid = "a" * 40
+        noreply_email = "teomarcelo@users.noreply.github.com"
         runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
             # Initial pr view call (headRefName, headRefOid, isCrossRepository, files, state, baseRefName)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "headRefName" in " ".join(c) and "baseRefName" in " ".join(c), 0,
              json.dumps(GOOD_PR)),
@@ -1304,6 +1391,7 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
             # pr view after successful merge (mergeCommit, headRefOid - no state)
             (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in " ".join(c) and "state" not in " ".join(c), 0,
              json.dumps({"mergeCommit": {"oid": merge_oid}, "headRefOid": OID})),
+            (lambda c: c[:2] == ["gh", "api"], 0, noreply_email + "\n"),
             # git push to delete branch
             (lambda c: c[:2] == ["git", "push"], 0, ""),
         ])
@@ -1909,9 +1997,11 @@ class ProveTestsTests(unittest.TestCase):
 
     def test_merge_when_green_uses_pr_base_branch(self):
         team = Path(self.tmp.name) / "team"
+        noreply_email = "teomarcelo@users.noreply.github.com"
         for role, verdict in (("code-reviewer", "APPROVE"), ("safety-scanner", "CLEAR")):
             team_kit.save_review(team, 5, role, OID, f"notes\nVERDICT: {verdict}")
         runner = FakeRunner([
+            (lambda c: c == ["git", "config", "user.email"], 0, noreply_email + "\n"),
             (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c[-1], 0,
              json.dumps({"mergeCommit": {"oid": "f" * 40}})),
             (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(GOOD_PR)),
