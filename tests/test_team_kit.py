@@ -2,13 +2,18 @@
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest import mock
+import contextlib
+import io
 import json
 import os
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
 
-from workshop_validator import team_kit
+from workshop_validator import team_gates, team_hooks, team_kit
 from workshop_validator.public_safety import inspect_tracked
 from workshop_validator.team_dashboard import render
 from workshop_validator.team_gates import (
@@ -335,7 +340,300 @@ class WriteGuardSettingsProtectionTests(unittest.TestCase):
             # Worktree can write settings
             self.assertTrue(guard_decision(
                 {"cwd": str(worktree), "tool_input": {"file_path": str(worktree / ".claude" / "settings.json")}},
-                home=home, git_root=lookup)[0])
+                home=home, git_root=lookup, main_root=lambda c: repo)[0])
+
+
+# ---- F2: round-2 findings (synthetic data, injected runners, no network) ----
+
+OID = "a" * 40
+
+
+class FakeRunner:
+    """Records (cmd, cwd); answers from a list of (predicate, returncode, stdout)."""
+
+    def __init__(self, rules=()):
+        self.calls, self.rules = [], list(rules)
+
+    def __call__(self, cmd, cwd):
+        self.calls.append((list(cmd), Path(cwd)))
+        for match, code, out in self.rules:
+            if match(cmd):
+                return subprocess.CompletedProcess(cmd, code, out, "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    def find(self, *prefix):
+        return [(c, cwd) for c, cwd in self.calls if c[:len(prefix)] == list(prefix)]
+
+
+GOOD_PR = {"headRefName": "automation/2026-01-01-x", "headRefOid": OID, "isCrossRepository": False,
+           "files": [{"path": "docs/a.md"}], "state": "OPEN", "baseRefName": "main"}
+
+
+class MergeWhenGreenTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name) / "repo"
+        self.team = Path(self.tmp.name) / "team"
+        self.repo.mkdir()
+        for role, verdict in (("code-reviewer", "APPROVE"), ("safety-scanner", "CLEAR")):
+            team_kit.save_review(self.team, 5, role, OID, f"notes\nVERDICT: {verdict}")
+
+    def run_merge(self, info):
+        runner = FakeRunner([
+            (lambda c: c[:3] == ["gh", "pr", "view"] and "mergeCommit" in c, 0,
+             json.dumps({"mergeCommit": {"oid": "b" * 40}})),
+            (lambda c: c[:3] == ["gh", "pr", "view"], 0, json.dumps(info)),
+            (lambda c: c[:3] == ["gh", "pr", "checks"], 0, json.dumps([{"name": "unit", "bucket": "pass"}])),
+            (lambda c: c[:3] == ["gh", "run", "list"], 0,
+             json.dumps([{"headSha": "b" * 40, "status": "completed", "conclusion": "success"}])),
+        ])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = team_gates.merge_when_green(self.repo, self.team, 5, runner=runner)
+        return code, out.getvalue(), runner
+
+    def test_missing_or_empty_head_oid_is_refused(self):
+        for oid in (None, "", "  "):
+            info = dict(GOOD_PR, headRefOid=oid)
+            if oid is None:
+                info.pop("headRefOid")
+            with self.subTest(oid=oid):
+                code, out, runner = self.run_merge(info)
+                self.assertEqual(code, 2)
+                self.assertEqual(len(out.strip().splitlines()), 1)
+                self.assertIn("REFUSED", out)
+                self.assertFalse(runner.find("git", "fetch"))
+                self.assertFalse(runner.find("gh", "pr", "merge"))
+
+    def test_cross_repository_pr_is_refused(self):
+        code, out, runner = self.run_merge(dict(GOOD_PR, isCrossRepository=True))
+        self.assertEqual(code, 2)
+        self.assertIn("cross-repository", out)
+        self.assertFalse(runner.find("git", "fetch"))
+        self.assertFalse(runner.find("gh", "pr", "merge"))
+
+    def test_fetches_main_and_head_then_pins_merge_to_head_oid(self):
+        code, out, runner = self.run_merge(GOOD_PR)
+        self.assertEqual(code, 0, out)
+        fetches = runner.find("git", "fetch")
+        self.assertEqual(fetches[0][0], ["git", "fetch", "origin", "main", GOOD_PR["headRefName"]])
+        merge = runner.find("gh", "pr", "merge")
+        self.assertEqual(len(merge), 1)
+        self.assertEqual(merge[0][0][-2:], ["--match-head-commit", OID])
+        names = [c[:2] for c, _ in runner.calls]
+        self.assertLess(names.index(["git", "fetch"]), names.index(["git", "worktree"]))
+
+
+class MergedTreeGatesTests(unittest.TestCase):
+    def test_merges_the_exact_oid_in_a_temp_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            runner = FakeRunner()
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertTrue(team_gates.merged_tree_gates(repo, OID, runner=runner))
+            merges = runner.find("git", "merge")
+            self.assertEqual(merges[0][0], ["git", "merge", "--no-edit", "--no-ff", OID])
+            self.assertNotEqual(merges[0][1], repo)
+            self.assertEqual(runner.find("git", "worktree", "add")[0][0][-1], "origin/main")
+
+
+class RevertByPrTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = Path(self.tmp.name).resolve() / "owner-checkout"
+        self.repo.mkdir()
+
+    def revert(self, rules=()):
+        runner = FakeRunner(rules)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = team_gates.revert_by_pr(self.repo, 9, "c" * 40, runner=runner)
+        return code, out.getvalue(), runner
+
+    def test_runs_in_temp_worktree_and_deletes_branch_after_push(self):
+        code, out, runner = self.revert(
+            [(lambda c: c[:3] == ["gh", "pr", "create"], 0, "https://example.invalid/pr/10\n")])
+        self.assertEqual(code, 0, out)
+        self.assertIn("REVERTING", out)
+        for prefix in (("git", "checkout"), ("git", "revert"), ("git", "push")):
+            cwd = runner.find(*prefix)[0][1]
+            self.assertNotEqual(cwd, self.repo)
+            self.assertNotIn(self.repo, cwd.parents)
+        delete = runner.find("git", "branch", "-D")
+        self.assertEqual(len(delete), 1)
+        self.assertEqual(delete[0][1], self.repo)
+        names = [c[:3] for c, _ in runner.calls]
+        self.assertLess(names.index(["git", "worktree", "remove"]), names.index(["git", "branch", "-D"]))
+
+    def test_git_failure_returns_nonzero_with_revert_failed_and_cleans_branch(self):
+        code, out, runner = self.revert([(lambda c: c[:2] == ["git", "revert"], 1, "")])
+        self.assertNotEqual(code, 0)
+        self.assertEqual(len(out.strip().splitlines()), 1)
+        self.assertIn("REVERT FAILED", out)
+        self.assertFalse(runner.find("git", "push"))
+        self.assertTrue(runner.find("git", "worktree", "remove"))
+        self.assertTrue(runner.find("git", "branch", "-D"))
+
+
+class WorktreeCleanupTests(unittest.TestCase):
+    def test_keeps_moved_branch_and_deletes_merged_tip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {repo}/gone-keep\nHEAD {'1' * 40}\nbranch refs/heads/automation/keep\n\n"
+                         f"worktree {repo}/gone-del\nHEAD {'2' * 40}\nbranch refs/heads/automation/del\n")
+            merged = json.dumps([{"number": 1, "headRefOid": "9" * 40}])
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["gh", "pr"], 0, merged),
+                (lambda c: c == ["git", "rev-parse", "automation/keep"], 0, "1" * 40 + "\n"),
+                (lambda c: c == ["git", "rev-parse", "automation/del"], 0, "9" * 40 + "\n"),
+            ])
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner)
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertEqual(deleted, ["automation/del"])
+
+
+class WatchdogWaitingOwnerTests(unittest.TestCase):
+    def test_three_takeovers_then_waiting_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            team, repo = Path(tmp) / "team", Path(tmp) / "repo"
+            repo.mkdir()
+            team_kit.save_plan(team, plan({"id": "a", "state": "next"}), NOW)
+            results = [team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61 * i))
+                       for i in range(4)]
+            self.assertEqual([r.split()[0] for r in results[:3]], ["TAKEOVER"] * 3)
+            self.assertIn("WAITING owner", results[3])
+            self.assertIn("3 takeovers", results[3])
+
+
+class SaveReviewTests(unittest.TestCase):
+    def test_writes_head_first_line_0600(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            team = Path(tmp) / "team"
+            path = team_kit.save_review(team, 3, "code-reviewer", OID.upper(), "\nok\nVERDICT: APPROVE\n")
+            self.assertEqual(path.name, "pr-3-code-reviewer.md")
+            self.assertEqual(path.read_text().splitlines()[0], f"HEAD: {OID}")
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(review_verdicts(team / "reviews", 3, OID), {"code-reviewer": "APPROVE"})
+
+    def test_bad_input_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            team = Path(tmp) / "team"
+            for args in ((3, "../x", OID, "VERDICT: APPROVE"), (3, "code-reviewer", "not-hex", "x"),
+                         (3, "code-reviewer", OID, "  "), (0, "code-reviewer", OID, "x")):
+                with self.subTest(args=args), self.assertRaises(ValueError):
+                    team_kit.save_review(team, *args)
+
+    def test_cli_reads_stdin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch("sys.stdin", io.StringIO("VERDICT: CLEAR\n")), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                code = team_kit.main(["--private-root", tmp, "review", "--pr", "4",
+                                      "--role", "safety-scanner", "--head", OID])
+            self.assertEqual(code, 0)
+            saved = Path(tmp) / "team" / "reviews" / "pr-4-safety-scanner.md"
+            self.assertTrue(saved.read_text().startswith(f"HEAD: {OID}\n"))
+
+
+class HeadLineFirstOnlyTests(unittest.TestCase):
+    def test_head_line_counts_only_as_first_non_empty_line(self):
+        self.assertFalse(is_review_stale(f"\n\nHEAD: {OID}\nVERDICT: APPROVE", OID))
+        self.assertTrue(is_review_stale(f"notes\nHEAD: {OID}\nVERDICT: APPROVE", OID))
+        self.assertTrue(is_review_stale(f"HEAD: {'b' * 40}\nHEAD: {OID}\nVERDICT: APPROVE", OID))
+        self.assertTrue(is_review_stale(f"HEAD: {OID}", ""))
+
+
+class RequiredSecurityReviewerTests(unittest.TestCase):
+    def test_more_sensitive_paths_need_security_reviewer(self):
+        for name in (".claude/settings.local.json", ".claude/agents/producer.md",
+                     ".claude/workflows/feature.js", "workshop_validator/public_safety.py",
+                     "workshop_validator/team_state.py", "workshop_validator/team_kit.py"):
+            with self.subTest(name=name):
+                self.assertIn("security-reviewer", required_reviewers([name]))
+        self.assertNotIn("security-reviewer", required_reviewers(["workshop_validator/pdf_inline.py"]))
+
+
+class WriteGuardF2Tests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.home, self.repo = base / "home", base / "repo"
+        self.tree = self.repo / ".claude" / "worktrees" / "agent-1"
+        self.lookalike = base / "x" / ".claude" / "worktrees" / "fake"
+        for d in (self.home, self.tree, self.lookalike):
+            d.mkdir(parents=True)
+
+    def decide(self, target, cwd, root):
+        return guard_decision({"cwd": str(cwd), "tool_input": {"file_path": str(target)}},
+                              home=self.home, git_root=lambda c: root, scratch=[],
+                              main_root=lambda c: self.repo)[0]
+
+    def test_reviews_folder_denied_for_every_session(self):
+        reviews = self.home / ".workshop-validator" / "team" / "reviews"
+        self.assertFalse(self.decide(reviews / "pr-1-code-reviewer.md", self.repo, self.repo))
+        self.assertFalse(self.decide(reviews / "pr-1-code-reviewer.md", self.tree, self.tree))
+        self.assertTrue(self.decide(self.home / ".workshop-validator" / "team" / "briefs" / "b.md",
+                                    self.repo, self.repo))
+
+    def test_more_files_protected_in_main_checkout_only(self):
+        for rel in ("workshop_validator/team_kit.py", ".claude/agents/producer.md",
+                    ".claude/workflows/feature.js"):
+            with self.subTest(rel=rel):
+                self.assertFalse(self.decide(self.repo / rel, self.repo, self.repo))
+                self.assertTrue(self.decide(self.tree / rel, self.tree, self.tree))
+        self.assertTrue(self.decide(self.repo / "workshop_validator" / "pdf_inline.py", self.repo, self.repo))
+
+    def test_worktree_test_uses_path_containment_not_substring(self):
+        # A checkout whose path merely contains /.claude/worktrees/ is not an agent worktree.
+        self.assertFalse(self.decide(self.lookalike / ".claude" / "settings.json", self.lookalike, self.lookalike))
+        self.assertFalse(team_hooks.is_agent_worktree(self.repo / ".claude" / "worktrees", self.repo))
+        self.assertTrue(team_hooks.is_agent_worktree(self.tree, self.repo))
+        self.assertFalse(team_hooks.is_agent_worktree(self.tree, None))
+
+
+NODE = shutil.which("node")
+FEATURE_JS = Path(__file__).resolve().parents[1] / ".claude" / "workflows" / "feature.js"
+
+
+class FeatureWorkflowFindingsTests(unittest.TestCase):
+    def source(self):
+        text = FEATURE_JS.read_text(encoding="utf-8")
+        return text[text.index("// BEGIN collectFindings"):text.index("// END collectFindings")]
+
+    def test_missing_reviewer_is_named_in_source(self):
+        self.assertIn("missing reviewer: ${role}", self.source())
+
+    @unittest.skipUnless(NODE, "node not installed")
+    def test_collect_findings_never_empty_when_not_ready(self):
+        approve = {"verdict": "APPROVE", "findings": []}
+        green = {"green": True, "failures": []}
+        cases = [
+            (green, [approve, None], "missing reviewer: rule-auditor"),
+            (green, [None, None], "missing reviewer: code-reviewer"),
+            (green, [{"verdict": "VETO", "findings": []}, approve], "code-reviewer: VETO"),
+            ({"green": False, "failures": []}, [approve, approve], "test: not green"),
+            (None, [approve, approve], "test-runner returned nothing"),
+            (green, [approve, approve], None),
+        ]
+        script = self.source() + (
+            "const cases = JSON.parse(process.argv[1]);"
+            "console.log(JSON.stringify(cases.map(([t, r]) => "
+            "collectFindings(t, r, ['code-reviewer', 'rule-auditor']))));")
+        out = subprocess.run([NODE, "-e", script, json.dumps([[t, r] for t, r, _ in cases])],
+                             capture_output=True, text=True, check=True).stdout
+        for (_, _, expected), got in zip(cases, json.loads(out)):
+            with self.subTest(expected=expected):
+                if expected is None:
+                    self.assertTrue(got["ready"])
+                    self.assertEqual(got["findings"], [])
+                else:
+                    self.assertFalse(got["ready"])
+                    self.assertTrue(any(expected in f for f in got["findings"]), got["findings"])
 
 
 if __name__ == "__main__":
