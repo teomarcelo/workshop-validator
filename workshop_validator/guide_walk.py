@@ -541,6 +541,131 @@ def run_login(state: WalkState, step: GuideStep) -> CheckResult:
     )
 
 
+# Records which elements were visible before the View profile click, so the
+# panel that click opens can be told apart from the rest of the page.
+_SHOWN_BEFORE_JS = """() => {
+  for (const el of document.querySelectorAll('[data-wv-profile-panel]')) {
+    el.removeAttribute('data-wv-profile-panel');
+  }
+  const seen = new WeakSet();
+  const walk = (root) => {
+    for (const el of root.querySelectorAll('*')) {
+      const shown = el.checkVisibility
+        ? el.checkVisibility()
+        : !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+      if (shown) seen.add(el);
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(document);
+  window.__wvShownBeforeProfile = seen;
+  return true;
+}"""
+
+# From the Log Out control, the panel is the outermost ancestor that was not
+# visible before the View profile click. No record, or a panel that is the
+# whole document, means no panel.
+_PANEL_JS = """(el) => {
+  const seen = window.__wvShownBeforeProfile;
+  if (!seen) return false;
+  const up = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
+  let panel = null;
+  for (let n = el; n; n = up(n)) {
+    if (seen.has(n)) break;
+    panel = n;
+  }
+  if (!panel || panel === document.documentElement || panel === document.body) return false;
+  panel.setAttribute('data-wv-profile-panel', '1');
+  return true;
+}"""
+
+_PANEL_SELECTOR = '[data-wv-profile-panel="1"]'
+
+
+def _distinct_roots(page) -> list:
+    """Page and frames, without the main frame twice (it is the page)."""
+    main = getattr(page, "main_frame", None)
+    return [root for root in _roots(page) if main is None or root is not main]
+
+
+def _mark_shown_before(page) -> None:
+    for root in _distinct_roots(page):
+        try:
+            root.evaluate(_SHOWN_BEFORE_JS)
+        except Exception:
+            continue
+
+
+def _visible_items(loc, cap: int = 20) -> list:
+    """Every visible match (hidden copies are not counted)."""
+    if loc is None:
+        return []
+    count = _count(loc)
+    nth = getattr(loc, "nth", None)
+    if count == 0 or not callable(nth):
+        return []
+    items = []
+    for i in range(min(count, cap)):
+        target = nth(i)
+        try:
+            if target.is_visible():
+                items.append(target)
+        except Exception:
+            continue
+    return items
+
+
+def _profile_panels(page) -> list:
+    """The profile panel(s) holding an exact Log Out control, opened by View profile."""
+    panels = []
+    for root in _distinct_roots(page):
+        marked = False
+        for role in ("link", "button", "menuitem"):
+            for target in _visible_items(_by_role(root, role, "Log Out", exact=True)):
+                try:
+                    marked = bool(target.evaluate(_PANEL_JS)) or marked
+                except Exception:
+                    continue
+        if marked:
+            try:
+                panels.append(root.locator(_PANEL_SELECTOR))
+            except Exception:
+                continue
+    return panels
+
+
+def _profile_settings(page) -> tuple:
+    """Settings in the open profile panel: ("one", target), ("none", None) or ("many", None).
+
+    Counts visible exact matches across all roots inside the panel. A role
+    match (link, menuitem) wins over an exact text match. With no panel found,
+    only a page-wide exact role lookup is used and target is None.
+    """
+    panels = _profile_panels(page)
+    if not panels:
+        for role in ("link", "menuitem"):
+            for root in _roots(page):
+                if _visible_items(_by_role(root, role, "Settings", exact=True)):
+                    return ("one", None)
+        return ("none", None)
+    role_hits = []
+    for panel in panels:
+        for role in ("link", "menuitem"):
+            role_hits.extend(_visible_items(_by_role(panel, role, "Settings", exact=True)))
+    hits = role_hits
+    if not hits:
+        for panel in panels:
+            try:
+                hits.extend(_visible_items(panel.get_by_text("Settings", exact=True)))
+            except Exception:
+                continue
+    if len(hits) > 1:
+        return ("many", None)
+    if len(hits) == 1:
+        return ("one", hits[0])
+    return ("none", None)
+
+
 def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
     if not return_home(state):
         return CheckResult("UI_MISMATCH", "The org was not open.", ())
@@ -553,85 +678,40 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
     )
     if missed:
         return _stop_here(missed)
+    _mark_shown_before(state.page)
     if not click_role(state.page, "button", "View profile"):
         return CheckResult("UI_MISMATCH", "The profile menu did not open.", (), freeze=True)
 
-    def settings_shown() -> bool:
-        if present(state.page, "link", "Settings") or present(state.page, "menuitem", "Settings"):
-            return True
-        # Fallback: exact text match within profile panel
-        for root in _roots(state.page):
-            try:
-                loc = root.get_by_text("Settings", exact=True)
-                if _visible(loc):
-                    return True
-            except Exception:
-                continue
-        return False
-
-    missed = require(state, settings_shown, "Settings was not in the profile menu.", limit=state.page_wait_s)
+    # The wait and the click read the same helper, so they cannot disagree.
+    missed = require(
+        state,
+        lambda: _profile_settings(state.page)[0] != "none",
+        "Settings was not in the profile menu.",
+        limit=state.page_wait_s,
+    )
     if missed:
         return _stop_here(missed)
 
-    # Try role-based click first
-    if click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings"):
-        # Role-based click succeeded, continue to personal_root check
-        pass
-    else:
-        # Fallback: exact text click within profile panel
-        clicked = False
-        ambiguous_count = 0
-        for root in _roots(state.page):
-            try:
-                loc = root.get_by_text("Settings", exact=True)
-                count = _count(loc)
-                if count > 1:
-                    ambiguous_count = count
-                    break  # Multiple visible Settings elements
-                if count != 1:
-                    continue  # Missing
-                target = _visible_match(loc)
-                if target is None:
-                    continue
-                target.click(timeout=8000)
-                clicked = True
-                break
-            except Exception:
-                continue
-
-        if ambiguous_count > 1:
-            return CheckResult(
-                "NEEDS_REVIEW",
-                "More than one Settings control is in the profile menu; the step needs review.",
-                (),
-                freeze=True,
-            )
-
-        if not clicked:
-            # Diagnostic: what was found?
-            diagnostic_parts = []
-            for root in _roots(state.page):
-                try:
-                    loc = root.get_by_text("Settings", exact=True)
-                    count = _count(loc)
-                    if count > 0:
-                        diagnostic_parts.append(f"found {count} exact 'Settings' element(s)")
-                        for i in range(min(count, 3)):
-                            try:
-                                elem = loc.nth(i) if hasattr(loc, "nth") else _first(loc)
-                                tag = elem.evaluate("el => el.tagName").lower() if hasattr(elem, "evaluate") else "?"
-                                role_attr = elem.get_attribute("role") if hasattr(elem, "get_attribute") else None
-                                href_attr = elem.get_attribute("href") if hasattr(elem, "get_attribute") else None
-                                visible = elem.is_visible() if hasattr(elem, "is_visible") else False
-                                diagnostic_parts.append(
-                                    f"  [{i}] <{tag}> role={role_attr} href={'yes' if href_attr else 'no'} visible={visible}"
-                                )
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
-            diagnostic = "; ".join(diagnostic_parts) if diagnostic_parts else "no exact 'Settings' found"
-            return CheckResult("UI_MISMATCH", f"Settings did not open. {diagnostic}", (), freeze=True)
+    outcome, target = _profile_settings(state.page)
+    if outcome == "many":
+        return CheckResult(
+            "NEEDS_REVIEW",
+            "More than one Settings control is in the profile menu; the step needs review.",
+            (),
+            freeze=True,
+        )
+    clicked = False
+    if outcome == "one" and target is None:
+        # No profile panel was found: role lookup only, no text fallback.
+        clicked = click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings")
+    elif outcome == "one":
+        try:
+            target.click(timeout=8000)
+            clicked = True
+        except Exception:
+            clicked = False
+    if not clicked:
+        return CheckResult("UI_MISMATCH", "Settings did not open.", (), freeze=True)
 
     missed = require(
         state,

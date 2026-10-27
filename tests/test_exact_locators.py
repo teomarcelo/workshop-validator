@@ -289,6 +289,85 @@ document.querySelector('#settings').addEventListener('click', (e) => {
 '''
 
 
+# Settings outside the profile panel only (a real link), none inside.
+HTML_PROFILE_SETTINGS_OUTSIDE_ONLY = '''
+<button id="view-profile">View profile</button>
+<a href="#outside" id="outside-settings">Settings</a>
+<div id="profile-panel" style="display:none;">
+    <a href="#logout">Log Out</a>
+</div>
+<div id="personal-info" style="display:none;">
+    <label for="fname3">First Name</label>
+    <input id="fname3" type="text" value="Test" />
+</div>
+<div id="clicked"></div>
+<script>
+document.querySelector('#view-profile').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'block';
+});
+document.querySelector('#outside-settings').addEventListener('click', (e) => {
+    e.preventDefault();
+    document.querySelector('#personal-info').style.display = 'block';
+    document.querySelector('#clicked').innerText = 'outside clicked';
+});
+</script>
+'''
+
+# One exact Settings inside the panel, another outside it.
+HTML_PROFILE_SETTINGS_INSIDE_AND_OUTSIDE = '''
+<button id="view-profile">View profile</button>
+<div id="outside-settings">Settings</div>
+<div id="profile-panel" style="display:none;">
+    <a id="inside-settings">Settings</a>
+    <a href="#logout">Log Out</a>
+</div>
+<div id="personal-info" style="display:none;">
+    <label for="fname4">First Name</label>
+    <input id="fname4" type="text" value="Test" />
+</div>
+<div id="clicked"></div>
+<script>
+document.querySelector('#view-profile').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'block';
+});
+document.querySelector('#outside-settings').addEventListener('click', () => {
+    document.querySelector('#clicked').innerText = 'outside clicked';
+});
+document.querySelector('#inside-settings').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'none';
+    document.querySelector('#personal-info').style.display = 'block';
+    document.querySelector('#clicked').innerText = 'inside clicked';
+});
+</script>
+'''
+
+# One Settings in the page panel and one in a framed panel: two in total.
+HTML_PROFILE_SETTINGS_TWO_FRAMES = '''
+<button id="view-profile">View profile</button>
+<div id="profile-panel" style="display:none;">
+    <a id="page-settings">Settings</a>
+    <a href="#logout">Log Out</a>
+</div>
+<div id="personal-info" style="display:none;">
+    <label for="fname5">First Name</label>
+    <input id="fname5" type="text" value="Test" />
+</div>
+<div id="clicked"></div>
+<iframe id="side" srcdoc="<div id='frame-panel' style='display:none;'><a id='frame-settings'>Settings</a><a href='#logout'>Log Out</a></div>"></iframe>
+<script>
+document.querySelector('#view-profile').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'block';
+    document.querySelector('#side').contentDocument.querySelector('#frame-panel').style.display = 'block';
+});
+document.querySelector('#page-settings').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'none';
+    document.querySelector('#personal-info').style.display = 'block';
+    document.querySelector('#clicked').innerText = 'page clicked';
+});
+</script>
+'''
+
+
 @unittest.skipUnless(sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1", "Browser smoke only")
 class ExactLocatorTests(unittest.TestCase):
     @classmethod
@@ -611,6 +690,47 @@ class ExactLocatorTests(unittest.TestCase):
                      "Should reach Personal Information page")
         page.close()
 
+
+    @patch('workshop_validator.guide_walk.return_home')
+    def test_profile_settings_outside_panel_not_clicked(self, mock_return_home):
+        """An exact Settings outside the profile panel is never used"""
+        mock_return_home.return_value = True
+        page = self.browser.new_page()
+        page.set_content(HTML_PROFILE_SETTINGS_OUTSIDE_ONLY)
+
+        result = run_personal(self._make_state(page), self._make_step())
+
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("Settings was not in the profile menu", result.note)
+        self.assertEqual(page.inner_text("#clicked"), "")
+        page.close()
+
+    @patch('workshop_validator.guide_walk.return_home')
+    def test_profile_settings_inside_panel_wins_over_outside(self, mock_return_home):
+        """Settings inside the panel is used; one outside does not make it ambiguous"""
+        mock_return_home.return_value = True
+        page = self.browser.new_page()
+        page.set_content(HTML_PROFILE_SETTINGS_INSIDE_AND_OUTSIDE)
+
+        result = run_personal(self._make_state(page), self._make_step())
+
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(page.inner_text("#clicked"), "inside clicked")
+        page.close()
+
+    @patch('workshop_validator.guide_walk.return_home')
+    def test_profile_settings_counted_across_frames(self, mock_return_home):
+        """One Settings in each of two frames' panels is ambiguous"""
+        mock_return_home.return_value = True
+        page = self.browser.new_page()
+        page.set_content(HTML_PROFILE_SETTINGS_TWO_FRAMES)
+
+        result = run_personal(self._make_state(page), self._make_step())
+
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertTrue(result.freeze)
+        self.assertEqual(page.inner_text("#clicked"), "")
+        page.close()
 
 if __name__ == "__main__":
     unittest.main()
