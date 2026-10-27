@@ -206,5 +206,112 @@ class PublicSafetyMainCleanTests(unittest.TestCase):
             self.assertTrue(ok)
 
 
+class PublicSafetyMainCheckoutBranchTests(unittest.TestCase):
+    """F9: check_main_clean also fails when main checkout is not on branch main or HEAD is detached."""
+
+    def test_main_checkout_detached_head_rejected(self):
+        """Main checkout with detached HEAD should be rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize main checkout
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create initial commit on main
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Detach HEAD
+            sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=main_repo, check=True, capture_output=True, text=True).stdout.strip()
+            subprocess.run(["git", "checkout", "--detach", sha[:7]], cwd=main_repo, check=True, capture_output=True)
+
+            # Check should fail
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(main_repo)
+            self.assertFalse(ok)
+            self.assertIn("detached", msg.lower())
+            self.assertIn(sha[:7], msg)
+
+    def test_main_checkout_on_other_branch_rejected(self):
+        """Main checkout on a branch other than main should be rejected."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize main checkout
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create initial commit on main
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create and checkout a different branch
+            subprocess.run(["git", "checkout", "-b", "feature"], cwd=main_repo, check=True, capture_output=True)
+
+            # Check should fail
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(main_repo)
+            self.assertFalse(ok)
+            self.assertIn("feature", msg)
+            self.assertIn("not main", msg)
+
+    def test_main_checkout_on_main_passes(self):
+        """Main checkout on branch main with clean tree should pass."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize main checkout
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create initial commit on main
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Check should pass
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(main_repo)
+            self.assertTrue(ok)
+
+    def test_worktree_sees_main_checkout_branch(self):
+        """A worktree should check the main checkout's branch, not its own."""
+        with tempfile.TemporaryDirectory() as tmp:
+            main_repo = Path(tmp) / "main"
+            main_repo.mkdir()
+
+            # Initialize main checkout
+            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create initial commit on main
+            (main_repo / "file.txt").write_text("content")
+            subprocess.run(["git", "add", "file.txt"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "initial"], cwd=main_repo, check=True, capture_output=True)
+
+            # Checkout a different branch in main
+            subprocess.run(["git", "checkout", "-b", "review"], cwd=main_repo, check=True, capture_output=True)
+
+            # Create a worktree on main branch
+            worktree_path = Path(tmp) / "worktree"
+            subprocess.run(["git", "worktree", "add", "-b", "wt", str(worktree_path), "main"], cwd=main_repo, check=True, capture_output=True)
+
+            # Check from worktree should fail because main checkout is on review branch
+            from workshop_validator.public_safety import check_main_clean
+            ok, msg = check_main_clean(worktree_path)
+            self.assertFalse(ok)
+            self.assertIn("review", msg)
+
+
 if __name__ == "__main__":
     unittest.main()

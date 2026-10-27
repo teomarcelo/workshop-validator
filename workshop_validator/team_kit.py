@@ -288,6 +288,11 @@ def _read_time(path: Path) -> datetime | None:
 def watchdog_check(repo: Path, team: Path, now=None) -> str:
     """Record idle-since / nudged-at / takeover markers and print the action for the watchdog task."""
     now = _utc(now)
+    # Check main checkout is on main branch
+    from . import public_safety
+    clean_ok, clean_msg = public_safety.check_main_clean(repo)
+    if not clean_ok:
+        return f"NONE STALLED: {clean_msg}. Review in a temp worktree or with git show/diff."
     state, reason = status(repo, team, now)
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"

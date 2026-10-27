@@ -159,6 +159,12 @@ def stop_decision(payload: dict, *, team: Path, repo: Path, status_fn=None) -> s
     live = team_kit.load_producer(team)
     if not live or live.get("session_id") != session:
         return None
+    # Check main checkout is on main branch
+    from . import public_safety
+    clean_ok, clean_msg = public_safety.check_main_clean(repo)
+    if not clean_ok:
+        return (f"Main checkout problem: {clean_msg}. "
+                "Review in a temp worktree or with git show/diff; never check out anything in the main checkout.")
     state, reason = (status_fn or team_kit.status)(repo, team)
     if state in {"IDLE", "STALLED"}:
         return (f"Chain is {state}: {reason}. Start the next ready step (or fix the stall) "

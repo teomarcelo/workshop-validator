@@ -169,13 +169,68 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str
         return False, "Could not check commit emails"
 
 
-def check_main_clean(root: Path) -> tuple[bool, str]:
-    """Check that main checkout has no untracked or modified files."""
+def get_main_checkout(root: Path) -> Path | None:
+    """Get the main checkout path (first entry from git worktree list, or root if no worktrees)."""
     try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=root, capture_output=True, text=True, check=True
+        )
+        # First worktree entry is the main checkout
+        for line in result.stdout.splitlines():
+            if line.startswith("worktree "):
+                return Path(line.split(" ", 1)[1])
+        # If no worktrees found, the root itself is the main checkout
+        return root
+    except subprocess.CalledProcessError:
+        # git worktree list fails in non-git repos, or the root is the main checkout
+        return root
+
+
+def check_main_clean(root: Path) -> tuple[bool, str]:
+    """Check that main checkout is on branch main and has no untracked or modified files.
+
+    Returns (True, msg) if not in a git repo (skip check for test environments).
+    """
+    try:
+        # Check if this is a git repo at all
+        git_check = subprocess.run(
+            ["git", "rev-parse", "--git-dir"],
+            cwd=root, capture_output=True, text=True
+        )
+        if git_check.returncode != 0:
+            # Not a git repo, skip check (test environments)
+            return True, "Not a git repo, check skipped"
+
+        # Find the main checkout (first worktree entry)
+        main_checkout = get_main_checkout(root)
+        if main_checkout is None:
+            return False, "Could not find main checkout"
+
+        # Check if on branch main or detached
+        head_result = subprocess.run(
+            ["git", "symbolic-ref", "-q", "HEAD"],
+            cwd=main_checkout, capture_output=True, text=True
+        )
+        if head_result.returncode != 0:
+            # HEAD is detached, get the SHA
+            sha_result = subprocess.run(
+                ["git", "rev-parse", "--short", "HEAD"],
+                cwd=main_checkout, capture_output=True, text=True, check=True
+            )
+            sha = sha_result.stdout.strip()
+            return False, f"Main checkout HEAD is detached at {sha}"
+
+        # Check if the branch is main
+        branch = head_result.stdout.strip()
+        if branch != "refs/heads/main":
+            branch_name = branch.replace("refs/heads/", "")
+            return False, f"Main checkout is on branch {branch_name}, not main"
+
         # Check for modified or untracked files
         result = subprocess.run(
             ["git", "status", "--porcelain"],
-            cwd=root, capture_output=True, text=True, check=True
+            cwd=main_checkout, capture_output=True, text=True, check=True
         )
         if result.stdout.strip():
             return False, "Main checkout has untracked or modified files"
