@@ -666,6 +666,58 @@ def _profile_settings(page) -> tuple:
     return ("none", None)
 
 
+def _settings_diagnostic(page) -> str:
+    """Why Settings was missed or ambiguous. Control facts only, never page values.
+
+    Counts every exact "Settings" text match, hidden ones included. Never raises.
+    """
+    try:
+        panels = _profile_panels(page)
+    except Exception:
+        panels = []
+    inside = 0
+    for panel in panels:
+        try:
+            inside += _count(panel.get_by_text("Settings", exact=True))
+        except Exception:
+            continue
+    total = 0
+    details = []
+    for root in _distinct_roots(page):
+        try:
+            loc = root.get_by_text("Settings", exact=True)
+        except Exception:
+            continue
+        count = _count(loc)
+        total += count
+        for i in range(count):
+            if len(details) >= 3:
+                break
+            try:
+                elem = loc.nth(i)
+            except Exception:
+                continue
+            facts = []
+            for label, read in (
+                ("tag", lambda: "<" + str(elem.evaluate("el => el.tagName")).lower() + ">"),
+                ("role", lambda: elem.get_attribute("role") or "none"),
+                ("href", lambda: "yes" if elem.get_attribute("href") is not None else "no"),
+                ("visible", lambda: "yes" if elem.is_visible() else "no"),
+            ):
+                try:
+                    facts.append(f"{label}={read()}")
+                except Exception:
+                    facts.append(f"{label}=?")
+            details.append(f"[{len(details)}] " + " ".join(facts))
+    note = (
+        f"Profile panel found: {'yes' if panels else 'no'}. "
+        f"Exact 'Settings' matches inside the panel: {inside}; on the whole page: {total}."
+    )
+    if details:
+        note += " " + "; ".join(details) + "."
+    return note
+
+
 def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
     if not return_home(state):
         return CheckResult("UI_MISMATCH", "The org was not open.", ())
@@ -690,13 +742,18 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
         limit=state.page_wait_s,
     )
     if missed:
+        if missed.status == "UI_MISMATCH":
+            missed = CheckResult(
+                missed.status, f"{missed.note} {_settings_diagnostic(state.page)}", missed.evidence_ids,
+            )
         return _stop_here(missed)
 
     outcome, target = _profile_settings(state.page)
     if outcome == "many":
         return CheckResult(
             "NEEDS_REVIEW",
-            "More than one Settings control is in the profile menu; the step needs review.",
+            "More than one Settings control is in the profile menu; the step needs review. "
+            + _settings_diagnostic(state.page),
             (),
             freeze=True,
         )
@@ -711,7 +768,9 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
         except Exception:
             clicked = False
     if not clicked:
-        return CheckResult("UI_MISMATCH", "Settings did not open.", (), freeze=True)
+        return CheckResult(
+            "UI_MISMATCH", "Settings did not open. " + _settings_diagnostic(state.page), (), freeze=True,
+        )
 
     missed = require(
         state,

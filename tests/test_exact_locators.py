@@ -368,6 +368,25 @@ document.querySelector('#page-settings').addEventListener('click', () => {
 '''
 
 
+# No Log Out, so no profile panel; one exact Settings anchor (no href) elsewhere.
+HTML_PROFILE_NO_PANEL_SETTINGS_ELSEWHERE = '''
+<button id="view-profile">View profile</button>
+<div id="profile-panel" style="display:none;">
+    <a href="#account">Account</a>
+</div>
+<a id="elsewhere-settings">Settings</a>
+<div id="clicked"></div>
+<script>
+document.querySelector('#view-profile').addEventListener('click', () => {
+    document.querySelector('#profile-panel').style.display = 'block';
+});
+document.querySelector('#elsewhere-settings').addEventListener('click', () => {
+    document.querySelector('#clicked').innerText = 'elsewhere clicked';
+});
+</script>
+'''
+
+
 @unittest.skipUnless(sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1", "Browser smoke only")
 class ExactLocatorTests(unittest.TestCase):
     @classmethod
@@ -729,6 +748,25 @@ class ExactLocatorTests(unittest.TestCase):
 
         self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
         self.assertTrue(result.freeze)
+        self.assertEqual(page.inner_text("#clicked"), "")
+        page.close()
+
+    @patch('workshop_validator.guide_walk.return_home')
+    def test_profile_settings_miss_note_explains_panel_and_matches(self, mock_return_home):
+        """A miss note says if the panel was found and lists exact Settings matches"""
+        mock_return_home.return_value = True
+        page = self.browser.new_page()
+        page.set_content(HTML_PROFILE_NO_PANEL_SETTINGS_ELSEWHERE)
+
+        result = run_personal(self._make_state(page), self._make_step())
+
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertIn("Settings was not in the profile menu.", result.note)
+        self.assertIn("Profile panel found: no.", result.note)
+        self.assertIn("inside the panel: 0; on the whole page: 1.", result.note)
+        self.assertIn("[0] tag=<a> role=none href=no visible=yes", result.note)
+        self.assertNotIn("[1]", result.note)
         self.assertEqual(page.inner_text("#clicked"), "")
         page.close()
 
