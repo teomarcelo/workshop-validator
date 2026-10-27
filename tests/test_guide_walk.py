@@ -217,6 +217,15 @@ class Loc:
             inside = [item for item in inside if item in self.page.has_popup]
         return _ListLoc(self.page, inside)
 
+    def get_by_role(self, role, name=None, exact=True):
+        """Controls of that role (and exact name) inside this element, from page.children."""
+        inside = self.page.children.get((self.kind, self.name), ())
+        inside = [
+            item for item in inside
+            if item in self.page.roles and item[0] == role and (name is None or item[1] == name)
+        ]
+        return _ListLoc(self.page, inside)
+
 
 class _ListLoc:
     def __init__(self, page, items):
@@ -3180,3 +3189,120 @@ class UnnamedModalTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class UnrelatedPopupCloseTests(unittest.TestCase):
+    """Owner rule W-080: an unrelated pop-up is closed with its own dismiss control, then the step is retried."""
+
+    def walk(self, page, items):
+        clock = Clock()
+        return walk_guide(
+            page, inventory_of(*items),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+    @staticmethod
+    def add_popup(page, title, *buttons):
+        dialog = ("dialog", f"{title}\nA short synthetic tip for a new org")
+        inside = [("h2", title), *(("button", name) for name in buttons)]
+        page.roles.add(dialog)
+        page.roles.update(inside)
+        page.children[dialog] = inside
+        return dialog
+
+    @staticmethod
+    def clicks(page):
+        return [event for event in page.events if event[0] == "click"]
+
+    def accounts_step(self, text="Click Accounts."):
+        return step("open-accounts", "Exercise 2: Data Model", "Task 1: Open a list", "1", text)
+
+    def test_close_button_closes_popup_then_click_step_passes_on_its_own_evidence(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "Get started", "Close")
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(dialog)
+                page.roles.add(("link", "Accounts"))
+            elif name == "Accounts":
+                page.url = "https://example.lightning.force.com/lightning/o/Account/home"
+                page.page_title = "Accounts"
+                page.body = "Accounts Recently Viewed"
+                page.roles.add(("heading", "Accounts"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "PASS")
+        self.assertTrue(outcome.evidence["open-accounts"])
+        self.assertTrue(all("close" not in item.lower() for item in outcome.evidence["open-accounts"]))
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["open-accounts"])
+        self.assertIn("W-080", outcome.notes["open-accounts"])
+        self.assertEqual(
+            self.clicks(page), [("click", "button", "Close"), ("click", "link", "Accounts")],
+        )
+
+    def test_popup_with_only_get_started_is_not_clicked_and_stays_env_blocked(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        self.add_popup(page, "Welcome Tour", "Get started")
+        # A Close button outside the pop-up is not the pop-up's own control.
+        page.roles.add(("button", "Close"))
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertIn("modal covered the page", outcome.notes["open-accounts"])
+        self.assertNotIn("W-080", outcome.notes["open-accounts"])
+        self.assertEqual(self.clicks(page), [])
+
+    def test_popup_the_step_names_is_not_closed(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        self.add_popup(page, "Welcome Tour", "Close")
+        outcome = self.walk(page, (self.accounts_step("In the Welcome Tour, click Accounts."),))
+        self.assertNotEqual(outcome.statuses["open-accounts"], "PASS")
+        self.assertNotIn("W-080", outcome.notes.get("open-accounts", ""))
+        self.assertNotIn(("click", "button", "Close"), page.events)
+
+    def test_popup_that_keeps_reappearing_stops_after_three_closes(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        shown = [self.add_popup(page, "Tip 1", "Close")]
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(shown[-1])
+                shown.append(self.add_popup(page, f"Tip {len(shown) + 1}", "Close"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+        self.assertEqual(self.clicks(page), [("click", "button", "Close")] * 3)
+        self.assertEqual(outcome.notes["open-accounts"].count("W-080"), 3)
+        self.assertIn('"Tip 4" modal covered the page', outcome.notes["open-accounts"])
+
+    def test_profile_menu_closes_help_popup_and_finds_settings(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+        page.roles.add(("button", "View profile"))
+        dialog = self.add_popup(page, "Help Agent", "Get Started", "Close")
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(dialog)
+            elif name == "View profile" and dialog not in page.roles:
+                page.roles.add(("link", "Settings"))
+            elif name == "Settings":
+                page.values["First Name"] = "Synthetic"
+
+        page.on_click = react
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["settings"], "PASS")
+        self.assertIn("Personal Information", outcome.notes["settings"])
+        self.assertIn('closed "Help Agent" pop-up', outcome.notes["settings"])
+        self.assertNotIn(("click", "button", "Get Started"), page.events)
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "View profile"),
+            ("click", "button", "Close"),
+            ("click", "button", "View profile"),
+            ("click", "link", "Settings"),
+        ])

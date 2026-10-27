@@ -2894,6 +2894,12 @@ def _promo_over(state: WalkState, step: GuideStep) -> bool:
 
 def _unnamed_modal_title(page, step_text: str) -> str | None:
     """Returns the title of a visible modal dialog that the step does not name, or None."""
+    found = _unnamed_modal(page, step_text)
+    return found[1] if found else None
+
+
+def _unnamed_modal(page, step_text: str):
+    """(dialog, title) of a visible modal dialog the step does not name, or None."""
     step_norm = norm(step_text)
     for root in _roots(page):
         # Check for role=dialog or aria-modal=true
@@ -2929,10 +2935,76 @@ def _unnamed_modal_title(page, step_text: str) -> str | None:
                         title = " ".join(words[:5]) if words else dialog_text_raw[:50]
                     # Check if step mentions this dialog's title
                     if title and norm(title) not in step_norm and len(dialog_text) > 5:
-                        return title
+                        return item, title
                 except Exception:
                     continue
     return None
+
+
+# Owner rule W-080: an unrelated welcome or help pop-up is closed with its own dismiss control.
+_MODAL_BLOCKED_NOTE = "modal covered the page; the guide does not mention it; the walk did not close it."
+_POPUP_DISMISS_NAMES = ("Close", "Dismiss", "Not now", "No thanks", "Skip", "Maybe later", "Got it", "OK")
+_POPUP_CLOSE_LIMIT = 3
+
+
+def _modal_blocked(result) -> bool:
+    return (
+        isinstance(result, CheckResult)
+        and result.status == "ENV_BLOCKED"
+        and str(result.note or "").endswith(_MODAL_BLOCKED_NOTE)
+    )
+
+
+def _dialog_dismiss_button(dialog):
+    """The dialog's own dismiss button (exact name), searched only inside that dialog."""
+    for name in _POPUP_DISMISS_NAMES:
+        loc = _by_role(dialog, "button", name, exact=True)
+        if loc is None:
+            continue
+        target = _visible_match(loc)
+        if target is not None:
+            return target
+    return None
+
+
+def _dialog_gone(state: WalkState, dialog, wait_s: float = 6.0) -> bool:
+    """Poll (bounded) until the dialog is no longer visible."""
+    waited = 0.0
+    while True:
+        try:
+            if not dialog.is_visible():
+                return True
+        except Exception:
+            return True
+        if waited >= wait_s:
+            return False
+        _sleep(state, 0.5)
+        waited += 0.5
+
+
+def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
+    """Close one unnamed pop-up with its own dismiss control. Returns its title, or None."""
+    found = _unnamed_modal(state.page, step.text or "")
+    if not found:
+        return None
+    dialog, title = found
+    button = _dialog_dismiss_button(dialog)
+    if button is not None:
+        try:
+            button.click(timeout=5000)
+        except Exception:
+            return None
+    else:
+        keyboard = getattr(state.page, "keyboard", None)
+        try:
+            keyboard.press("Escape")
+        except Exception:
+            return None
+    return title if _dialog_gone(state, dialog) else None
+
+
+def _popup_note(title: str) -> str:
+    return f'Environment: closed "{title}" pop-up the guide does not mention (owner rule W-080).'
 
 
 def _builder_canvas_visible(page) -> bool:
@@ -4683,12 +4755,21 @@ def walk_guide(
         else:
             password_form = None
             check = find_check(step, catalog)
+        popup_notes: list[str] = []
         try:
             if skipped is None:
-                result = check.run(state, step) if check is not None else attempt_step(state, step)
-                t_elapsed = _clock() - t_start
-                if t_elapsed > step_cap_s:
-                    result = CheckResult("NOT_RUN", "The step exceeded its time limit.", ())
+                while True:
+                    t_try = _clock()
+                    result = check.run(state, step) if check is not None else attempt_step(state, step)
+                    if _clock() - t_try > step_cap_s:
+                        result = CheckResult("NOT_RUN", "The step exceeded its time limit.", ())
+                    if not _modal_blocked(result) or len(popup_notes) >= _POPUP_CLOSE_LIMIT:
+                        break
+                    closed = _close_unrelated_popup(state, step)
+                    if not closed:
+                        break
+                    # Closing is never evidence: the status comes from the retried action only.
+                    popup_notes.append(_popup_note(closed))
         except StillLoading:
             result = CheckResult("NOT_RUN", LOADING_NOTE, ())
         except Exception as exc:
@@ -4708,6 +4789,14 @@ def walk_guide(
                 "NEEDS_REVIEW",
                 result.note or "A pass was reported without evidence.",
                 (),
+            )
+        if popup_notes:
+            result = CheckResult(
+                result.status,
+                " ".join([*popup_notes, result.note or ""]).strip(),
+                result.evidence_ids,
+                result.freeze,
+                result.suspect,
             )
         t_end = _clock()
         statuses[step.step_id] = result.status

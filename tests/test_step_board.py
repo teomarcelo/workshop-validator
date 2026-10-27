@@ -304,6 +304,20 @@ class StepBoardTests(unittest.TestCase):
         self.assertIn("class='chip suspect'", page)
         self.assertIn("Evidence based only on element presence", page)
 
+    def test_closed_popup_note_shows_environment_chip_on_pass_row(self):
+        note = 'Environment: closed "Welcome Tour" pop-up the guide does not mention (owner rule W-080).'
+        page, _board = html_for(
+            (
+                step("a", "Exercise 1", "Task 1: Start", "1", "Click Accounts"),
+                step("b", "Exercise 1", "Task 1: Start", "2", "Click Contacts"),
+            ),
+            {
+                "a": StepOutcome("PASS", reason=note, evidence_ids=("evidence-1",)),
+                "b": StepOutcome("PASS", reason="Opened.", evidence_ids=("evidence-2",)),
+            },
+        )
+        self.assertEqual(page.count("Environment: pop-up closed"), 1)
+
     def test_no_screen_change_chip_renders(self):
         page, _board = html_for(
             (step("a", "Exercise 1", "Task 1: Start", "1", "Open the page"),),
