@@ -4,6 +4,7 @@ from unittest.mock import patch
 from types import SimpleNamespace
 from pathlib import Path
 
+from workshop_validator import guide_walk
 from workshop_validator.guide_inventory import GuideInventory, GuideStep, extract_inventory
 from workshop_validator.guide_walk import (
     LOADING_NOTE,
@@ -332,6 +333,14 @@ class Page:
         opened = getattr(self, "on_goto", None)
         if opened is not None:
             opened(url)
+
+
+def as_builder(page):
+    """A synthetic Flow Builder: visible canvas and Toolbox control. The URL alone is not a builder."""
+    # getattr keeps this fixture importable on base code for the fail-without proof.
+    page.roles.add(("css", getattr(guide_walk, "_BUILDER_CANVAS_SELECTOR", "")))
+    page.roles.add(("button", "Toggle Toolbox"))
+    return page
 
 
 def inventory_of(*items):
@@ -982,7 +991,7 @@ class WalkTests(unittest.TestCase):
             if name == "Create":
                 page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
                 page.body = "Free-Form"
-                page.roles.add(("button", "Toggle Toolbox"))
+                as_builder(page)
 
         page.on_goto = opened
         page.on_click = reveal
@@ -1014,7 +1023,7 @@ class WalkTests(unittest.TestCase):
         def reveal(kind, name):
             if name == "Screen Flow":
                 builder.body = "Free-Form"
-                builder.roles.add(("button", "Toggle Toolbox"))
+                as_builder(builder)
 
         flows.on_click = reveal
         builder.on_click = reveal
@@ -1029,6 +1038,7 @@ class WalkTests(unittest.TestCase):
 
     def test_record_variable_opens_new_resource(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
+        as_builder(page)
         page.roles.add(("button", "Toggle Toolbox"))
 
         def reveal(kind, name):
@@ -1157,6 +1167,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="New Resource",
         )
+        as_builder(page)
         page.roles.add(("button", "Done"))
         page.roles.add(("button", "Screen"))
 
@@ -1204,6 +1215,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="Click the elements you want to copy, and then click the copy button.",
         )
+        as_builder(page)
         page.roles.add(("button", "Close"))
         page.roles.add(("button", "Add Element"))
 
@@ -1235,6 +1247,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="Screen Flow",
         )
+        as_builder(page)
         page.roles.add(("button", "Screen Flow"))
 
         class Mouse:
@@ -1277,6 +1290,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="Screen Flow",
         )
+        as_builder(canvas)
         canvas.roles.add(("button", "Add To Flow"))
 
         class Context:
@@ -1316,6 +1330,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="New Automation\nScreen Flow",
         )
+        as_builder(page)
         page.roles.add(("button", "Close"))
         page.roles.add(("button", "Add To Flow"))
 
@@ -1363,6 +1378,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="Screen Flow",
         )
+        as_builder(canvas)
         canvas.roles.add(("button", "Screen Flow"))
 
         class Context:
@@ -1406,6 +1422,7 @@ class WalkTests(unittest.TestCase):
 
     def test_adding_a_screen_does_not_change_canvas_mode(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
+        as_builder(page)
         page.roles.add(("button", "Auto-Layout"))
         page.roles.add(("button", "Add Element"))
 
@@ -1430,6 +1447,7 @@ class WalkTests(unittest.TestCase):
 
     def test_second_click_places_screen_on_the_canvas(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
+        as_builder(page)
         page.roles.add(("button", "Screen"))
         page.screen_clicks = 0
 
@@ -1451,6 +1469,7 @@ class WalkTests(unittest.TestCase):
 
     def test_screen_is_dragged_onto_the_canvas(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
+        as_builder(page)
         page.roles.add(("button", "Screen"))
 
         class Mouse:
@@ -1494,6 +1513,7 @@ class WalkTests(unittest.TestCase):
     def test_canvas_mode_is_not_switched_when_step_does_not_name_it(self):
         """Guide-only: if the step does not name canvas mode, never switch Auto-Layout/Free-Form."""
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
+        as_builder(page)
         page.roles.add(("button", "Free-Form"))
         page.roles.add(("button", "Add Element"))
 
@@ -1522,6 +1542,7 @@ class WalkTests(unittest.TestCase):
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
             body="New Automation\nScreen Flow\nScreen Automations",
         )
+        as_builder(page)
 
         def reveal(kind, name):
             if name == "Screen Flow":
@@ -2062,6 +2083,112 @@ class DefaultsTests(unittest.TestCase):
     def test_page_wait_default_is_90_seconds(self):
         """CLAUDE.md: poll ~2 s, up to ~90 s"""
         self.assertEqual(PAGE_WAIT_S, 90.0)
+
+
+class FlowBuilderEvidenceTests(unittest.TestCase):
+    """Flow Builder counts as open only on visible evidence, never on the URL or DOM presence."""
+
+    BUILDER_URL = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+    FLOWS_URL = "https://example.lightning.force.com/lightning/setup/Flows/home"
+    PROMO = "Go Mobile Sample promo text Not Now"
+
+    def state(self, page):
+        clock = Clock()
+        return guide_walk.WalkState(
+            page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=0, page_poll_s=1,
+        )
+
+    def variable_step(self):
+        return step(
+            "var", "Exercise 9: Sample", "Task 1: Sample.", "3",
+            "Create a record variable to hold sample data.",
+        )
+
+    def test_hidden_toolbox_on_builder_url_is_not_open(self):
+        page = Page(self.BUILDER_URL)
+        page.roles.add(("css", getattr(guide_walk, "_BUILDER_CANVAS_SELECTOR", "")))
+        self.assertFalse(guide_walk._flow_builder_open(page))
+
+    def test_toolbox_covered_by_a_promo_dialog_is_not_open(self):
+        page = as_builder(Page(self.BUILDER_URL))
+        page.roles.add(("dialog", self.PROMO))
+        self.assertFalse(guide_walk._flow_builder_open(page))
+
+    def test_toolbox_button_without_a_canvas_is_not_open(self):
+        page = Page(self.FLOWS_URL)
+        page.roles.add(("button", "Toggle Toolbox"))
+        self.assertFalse(guide_walk._flow_builder_open(page))
+
+    def test_builder_step_on_the_flows_list_is_a_mismatch(self):
+        page = Page(self.FLOWS_URL, body="Flows")
+        page.roles.add(("button", "Toggle Toolbox"))
+        page.roles.add(("button", "New Resource"))
+        page.roles.add(("textbox", "API Name"))
+        result = guide_walk.run_record_variable(self.state(page), self.variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertEqual(result.note, "Flow Builder is not open.")
+        self.assertEqual(page.events, [])
+
+    def test_add_screen_on_the_flows_list_is_a_mismatch(self):
+        page = Page(self.FLOWS_URL, body="Flows")
+        page.roles.add(("button", "Toggle Toolbox"))
+        page.roles.add(("button", "Screen"))
+        item = step(
+            "screen", "Exercise 9: Sample", "Task 1: Sample.", "a",
+            "Add a Screen Element with Label Sample Label",
+        )
+        result = guide_walk.run_add_screen(self.state(page), item)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertEqual(page.events, [])
+
+    def test_promo_over_the_flows_list_blocks_without_a_click(self):
+        page = Page(self.FLOWS_URL, body=self.PROMO)
+        page.roles.add(("dialog", self.PROMO))
+        page.roles.add(("button", "Not Now"))
+        page.roles.add(("button", "New Flow"))
+        page.roles.add(("button", "Toggle Toolbox"))
+        item = step(
+            "flow", "Exercise 9: Sample", "Task 1: Sample.", "2",
+            "Create a new Screen Flow.",
+        )
+        result = guide_walk.run_screen_flow(self.state(page), item)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.freeze)
+        self.assertEqual(
+            result.note,
+            "A promotional dialog covered the page; the guide names no control to close it.",
+        )
+        self.assertEqual([event for event in page.events if event[0] == "click"], [])
+
+    def test_promo_over_the_builder_blocks_a_builder_step(self):
+        page = as_builder(Page(self.BUILDER_URL))
+        page.roles.add(("dialog", self.PROMO))
+        page.roles.add(("button", "Not Now"))
+        page.roles.add(("button", "New Resource"))
+        result = guide_walk.run_record_variable(self.state(page), self.variable_step())
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.freeze)
+        self.assertEqual(page.events, [])
+
+    def test_real_builder_page_still_proceeds(self):
+        page = as_builder(Page(self.BUILDER_URL))
+
+        def reveal(kind, name):
+            if name == "Toggle Toolbox":
+                page.roles.add(("button", "New Resource"))
+            if name == "New Resource":
+                page.roles.add(("option", "Variable"))
+            if name == "Variable":
+                page.roles.add(("textbox", "API Name"))
+
+        page.on_click = reveal
+        result = guide_walk.run_record_variable(self.state(page), self.variable_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(result.evidence_ids)
+        self.assertIn(("click", "button", "New Resource"), page.events)
 
 
 if __name__ == "__main__":

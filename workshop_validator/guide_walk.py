@@ -2240,11 +2240,74 @@ def _click_screen_flow(page) -> bool:
     return _click_choice(page, "Screen Flow")
 
 
+# Custom elements that only the Flow Builder app renders for its canvas.
+# UNVERIFIED: these tag names have not been checked against a live Flow Builder page.
+_BUILDER_CANVAS_SELECTOR = (
+    "builder_platform_interaction-canvas, "
+    "builder_platform_interaction-alc-canvas, "
+    "builder_platform_interaction-canvas-container"
+)
+# Phrases that mark a dialog as a product promotion, not part of any guide step.
+# The guide names no control in it, so nothing in it is ever clicked.
+_PROMO_PHRASES = ("go mobile",)
+PROMO_NOTE = "A promotional dialog covered the page; the guide names no control to close it."
+
+
+def _promo_dialog(page, allowed: str = "") -> bool:
+    """A visible dialog whose text marks it as a promotion the step does not name."""
+    phrases = [phrase for phrase in _PROMO_PHRASES if phrase not in norm(allowed)]
+    if not phrases:
+        return False
+    for root in _roots(page):
+        for role in ("dialog", "alertdialog"):
+            try:
+                loc = root.locator(f"[role='{role}']")
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                item = loc.nth(index)
+                try:
+                    if hasattr(item, "is_visible") and not item.is_visible():
+                        continue
+                    text = norm(item.inner_text(timeout=1000) or "")
+                except Exception:
+                    continue
+                if any(phrase in text for phrase in phrases):
+                    return True
+    return False
+
+
+def _promo_over(state: WalkState, step: GuideStep) -> bool:
+    return any(_promo_dialog(candidate, step.text or "") for candidate in _browser_pages(state.page))
+
+
+def _builder_canvas_visible(page) -> bool:
+    for root in _roots(page):
+        try:
+            loc = root.locator(_BUILDER_CANVAS_SELECTOR)
+        except Exception:
+            continue
+        if _visible(loc):
+            return True
+    return False
+
+
 def _flow_builder_open(page) -> bool:
-    url = str(getattr(page, "url", "") or "").lower()
-    if "flowbuilder" in url:
-        return True
+    """Visible builder canvas and Toolbox control, with no promotion on top. The URL alone is not proof."""
+    if _promo_dialog(page):
+        return False
+    if not _builder_canvas_visible(page):
+        return False
     return present(page, "button", "Toggle Toolbox")
+
+
+def _builder_gate(state: WalkState, step: GuideStep) -> CheckResult | None:
+    """Every Flow Builder step starts here. No builder, no action."""
+    if _promo_over(state, step):
+        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
+    if _focus_builder(state) or _flow_builder_open(state.page):
+        return None
+    return CheckResult("UI_MISMATCH", "Flow Builder is not open.", (), freeze=True)
 
 
 def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
@@ -2261,12 +2324,14 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult("UI_MISMATCH", "Flows did not open.", (), freeze=True)
     missed = require(
         state,
-        lambda: _named_choice(state.page, "New Flow"),
+        lambda: _promo_over(state, step) or _named_choice(state.page, "New Flow"),
         "New Flow was not on the Flows page.",
         limit=state.page_wait_s,
     )
     if missed:
         return _stop_here(missed)
+    if _promo_over(state, step):
+        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if not (_click_last(state.page, "button", "New Flow") or _click_choice(state.page, "New Flow")):
         return CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True)
     missed = require(
@@ -2284,12 +2349,14 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
             return CheckResult("UI_MISMATCH", "Create was not available for the Screen Flow.", (), freeze=True)
     missed = require(
         state,
-        lambda: _focus_builder(state),
+        lambda: _promo_over(state, step) or _focus_builder(state),
         "Flow Builder did not open.",
         limit=state.page_wait_s,
     )
     if missed:
         return _stop_here(missed)
+    if _promo_over(state, step):
+        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if not _flow_builder_open(state.page):
         return CheckResult("UI_MISMATCH", "Flow Builder did not open after Create was clicked.", (), freeze=True)
     return passed(step, "screen-flow", "New Flow, Screen Flow, then Create opens Flow Builder.")
@@ -2314,8 +2381,9 @@ def _choose_resource_variable(page) -> None:
 
 
 def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
-    if not (_focus_builder(state) or _flow_builder_open(state.page)):
-        return CheckResult("UI_MISMATCH", "Flow Builder is not open.", (), freeze=True)
+    blocked = _builder_gate(state, step)
+    if blocked is not None:
+        return blocked
     if present(state.page, "tab", "Manager"):
         click_role(state.page, "tab", "Manager")
     if not (present(state.page, "button", "New Resource") or present(state.page, "link", "New Resource")):
@@ -2977,8 +3045,9 @@ def _open_add_element(page) -> None:
 
 
 def run_add_screen(state: WalkState, step: GuideStep) -> CheckResult:
-    if not (_focus_builder(state) or _flow_builder_open(state.page)):
-        return CheckResult("UI_MISMATCH", "Flow Builder is not open.", (), freeze=True)
+    blocked = _builder_gate(state, step)
+    if blocked is not None:
+        return blocked
     _close_new_resource(state)
     _leave_copy_mode(state.page)
     _dismiss_covering_dialog(state.page)
