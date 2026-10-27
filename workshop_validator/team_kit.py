@@ -358,6 +358,10 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
     body = (reply or "").strip()
     if not body:
         raise ValueError("reviewer reply on stdin is empty")
+    # Refuse body without VERDICT line matching team_gates.VERDICT
+    from . import team_gates
+    if not team_gates.VERDICT.search(body):
+        raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
     path = reviews_dir(team) / f"pr-{pr}-{role}.md"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
@@ -380,8 +384,8 @@ VALID_DECISION_STATUSES = ("RECOMMENDED", "NOTED", "OPEN", "RESOLVED", "SUPERSED
 # Register row id: ASCII digits only, at least three. team_gates.ROW_PATTERN reuses it.
 DECISION_ID_RE = r"W-[0-9]{3,}"
 DECISION_ID_PATTERN = re.compile(DECISION_ID_RE)
-# Cc control, Cf format (U+200B, U+202E), Zl line sep (U+2028), Zp para sep (U+2029).
-_REFUSED_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
+# Cc control, Cf format (U+200B, U+202E), Cs lone surrogates, Zl line sep (U+2028), Zp para sep (U+2029).
+_REFUSED_CATEGORIES = ("Cc", "Cf", "Cs", "Zl", "Zp")
 
 
 def _check_register_cell(value: str, name: str) -> None:
@@ -416,8 +420,10 @@ def append_decision(team: Path, decision_id: str, decision_status: str, text: st
     register = team / "DECISIONS.md"
     existing = register.read_text(encoding="utf-8") if register.is_file() else ""
 
-    # Check for duplicate id
-    if f"| {decision_id} |" in existing:
+    # Check for duplicate id (parse the row with any spacing using team_gates.ROW_PATTERN)
+    from . import team_gates
+    existing_ids = {m.group(1) for line in existing.splitlines() if (m := team_gates.ROW_PATTERN.match(line))}
+    if decision_id in existing_ids:
         raise ValueError(f"decision {decision_id} already exists in register")
 
     date_str = _utc(now).strftime("%Y-%m-%d")

@@ -542,6 +542,23 @@ class SaveReviewTests(unittest.TestCase):
                 with self.subTest(args=args), self.assertRaises(ValueError):
                     team_kit.save_review(team, *args)
 
+    def test_review_without_verdict_line_is_refused(self):
+        """F10 item 3: review without VERDICT line matching team_gates.VERDICT is refused."""
+        with tempfile.TemporaryDirectory() as tmp:
+            team = Path(tmp) / "team"
+            # Missing VERDICT line
+            with self.assertRaises(ValueError) as cm:
+                team_kit.save_review(team, 3, "code-reviewer", OID, "This looks good but no verdict")
+            self.assertIn("VERDICT", str(cm.exception))
+            # Wrong format (lowercase verdict)
+            with self.assertRaises(ValueError):
+                team_kit.save_review(team, 3, "code-reviewer", OID, "verdict: approve")
+            # Valid verdicts should work
+            roles = ["code-reviewer", "safety-scanner", "rule-auditor", "security-reviewer", "privacy-reviewer"]
+            verdicts = ["APPROVE", "VETO", "CLEAR", "BLOCK", "REQUEST_CHANGES"]
+            for i, verdict in enumerate(verdicts):
+                team_kit.save_review(team, i + 10, roles[i % len(roles)], OID, f"VERDICT: {verdict}\nGood")
+
     def test_cli_reads_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch("sys.stdin", io.StringIO("VERDICT: CLEAR\n")), \
@@ -973,6 +990,30 @@ class TeamKitDecideTests(unittest.TestCase):
         code = team_kit.main(["--private-root", str(self.team.parent), "decide",
                               "--id", "W-002", "--status", "NOTED",
                               "--text", "Duplicate"])
+
+        self.assertNotEqual(code, 0)
+
+    def test_decide_duplicate_check_handles_spacing(self):
+        """F10 item 5: duplicate-id check matches with any spacing using ROW_PATTERN."""
+        register = self.team / "DECISIONS.md"
+        register.parent.mkdir(parents=True, exist_ok=True)
+        # Write a row with extra spacing around the ID
+        register.write_text("|  W-005  | 2026-10-27 | NOTED | First |\n")
+
+        # Should refuse duplicate even with different spacing
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-005", "--status", "NOTED",
+                              "--text", "Duplicate with spacing"])
+
+        self.assertNotEqual(code, 0)
+
+    def test_decide_refuses_lone_surrogates(self):
+        """F10 item 4: decide refuses Unicode category Cs (lone surrogates)."""
+        # Lone surrogate U+D800
+        surrogate_text = "Test \ud800 text"
+        code = team_kit.main(["--private-root", str(self.team.parent), "decide",
+                              "--id", "W-999", "--status", "NOTED",
+                              "--text", surrogate_text])
 
         self.assertNotEqual(code, 0)
 

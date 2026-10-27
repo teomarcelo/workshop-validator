@@ -657,11 +657,14 @@ def guides(root: Path, config: dict) -> str:
                 skipped += 1
                 continue
             response = context.request.get(url, max_redirects=0)
+            # Count any non-OK response (including refused redirects) as skipped
+            if not response.ok or 300 <= response.status < 400:
+                skipped += 1
+                continue
             if not on_portal(getattr(response, "url", ""), portal_url):
                 skipped += 1  # redirected off the portal: the body is not kept
                 continue
-            if response.ok:
-                files.append((url, response.body()))
+            files.append((url, response.body()))
         line = f"org-claim: GUIDES {save_guides(root, files)}"
         return line + (f" (skipped {skipped} off-portal links)" if skipped else "")
     return _browser(run)
