@@ -748,6 +748,129 @@ class ReviewVerdictsFailClosedTests(unittest.TestCase):
             self.assertEqual(verdicts["code-reviewer"], "STALE")
 
 
+class WriteGuardF3Fix1Tests(unittest.TestCase):
+    """F3-fix1: split allow and deny containment in the write guard."""
+
+    def test_case_sensitive_layout_denies_miscased_workspace(self):
+        """On simulated case-sensitive layout, base/REPO/x NOT allowed when workspace is base/repo."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            home.mkdir(parents=True)
+
+            # Mock Path.resolve to simulate case-sensitive filesystem behavior
+            # where /tmp/base/repo and /tmp/base/REPO are different directories
+            def mock_resolve(self):
+                # Get the actual resolved path
+                parts = list(self.parts)
+                # Preserve case in parts that contain repo/REPO
+                for i, part in enumerate(parts):
+                    if part.lower() == "repo":
+                        # Keep the original case from the path
+                        pass  # parts already has it
+                # Return a path with the original case preserved
+                return Path(*parts) if len(parts) > 1 else Path(parts[0]) if parts else Path()
+
+            with mock.patch.object(Path, 'resolve', mock_resolve):
+                # On case-sensitive FS: these would be different directories
+                repo_lower = base / "repo"
+                repo_upper = base / "REPO"
+                target = repo_upper / "x.py"
+
+                # Workspace is repo (lowercase)
+                def git_root_lookup(c):
+                    return repo_lower
+
+                allowed, _ = guard_decision(
+                    {"cwd": str(repo_lower), "tool_input": {"file_path": str(target)}},
+                    home=home, git_root=git_root_lookup, scratch=[]
+                )
+
+                # Should be denied - target is in REPO, workspace is repo
+                self.assertFalse(allowed)
+
+    def test_miscased_root_denied_with_clear_reason(self):
+        """Miscased root target should be denied with clear reason, not ValueError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            repo = base / "repo"
+            repo.mkdir(parents=True)
+            home.mkdir(parents=True)
+
+            # Directly test the scenario where relative_to would fail
+            # Mock to make _inside_allow return True but Path.relative_to raise ValueError
+            class PathWithFailingRelativeTo(type(Path())):
+                """Path that fails relative_to to simulate case mismatch."""
+                def __init__(self, *args):
+                    self._path = Path(*args)
+
+                def __truediv__(self, other):
+                    return self._path / other
+
+                def resolve(self):
+                    return self._path.resolve()
+
+                def relative_to(self, other):
+                    # Simulate case-sensitive FS where this would fail
+                    raise ValueError("path case mismatch")
+
+                @property
+                def name(self):
+                    return self._path.name
+
+            # Create target that will fail relative_to
+            failing_target = PathWithFailingRelativeTo(repo / "x.py")
+
+            # Patch _resolve_target to return our special path
+            def mock_resolve_target(raw, cwd):
+                return failing_target
+
+            # Mock _inside_allow to return True (so we enter the in_own_workspace block)
+            with mock.patch.object(team_hooks, '_resolve_target', mock_resolve_target):
+                with mock.patch.object(team_hooks, '_inside_allow', return_value=True):
+                    with mock.patch.object(team_hooks, '_inside_deny', return_value=False):
+                        allowed, reason = guard_decision(
+                            {"cwd": str(repo), "tool_input": {"file_path": "x.py"}},
+                            home=home, git_root=lambda c: repo, scratch=[]
+                        )
+
+                        self.assertFalse(allowed)
+                        # Should have clear error message about case mismatch
+                        self.assertIn("case", reason.lower())
+                        # Should not expose ValueError in user-facing message
+                        self.assertNotIn("ValueError", reason)
+
+    def test_case_variants_still_denied(self):
+        """Case variants of protected names should still be denied (existing tests stay green)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            repo = base / "repo"
+            repo.mkdir(parents=True)
+            home.mkdir(parents=True)
+
+            # These tests verify the existing case-insensitive protection works
+            def decide(target):
+                return guard_decision(
+                    {"cwd": str(repo), "tool_input": {"file_path": str(target)}},
+                    home=home, git_root=lambda c: repo, scratch=[]
+                )[0]
+
+            # Case variants of NEVER_WRITE should be denied
+            self.assertFalse(decide(repo / "Verification-Orgs.json"))
+            self.assertFalse(decide(repo / "BROWSER-STATE.JSON"))
+
+            # Case variants of protected paths should be denied from main
+            self.assertFalse(decide(repo / "workshop_validator" / "TEAM_HOOKS.PY"))
+            self.assertFalse(decide(repo / ".CLAUDE" / "settings.json"))
+
+            # Reviews folder with case variants should be denied
+            reviews = home / ".workshop-validator" / "team" / "REVIEWS"
+            reviews.mkdir(parents=True, exist_ok=True)
+            self.assertFalse(decide(reviews / "pr-1-x.md"))
+
+
 class WorktreeCleanupAncestorTests(unittest.TestCase):
     """Finding 4: worktree_cleanup should treat branch as merged when tip is ancestor of merged PR."""
 
