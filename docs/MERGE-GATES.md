@@ -49,7 +49,11 @@ is added for `.github/`, `.claude/settings.json`, `.claude/settings.local.json`,
 comes from a fork, has no `headRefOid`, or whose head is not `automation/*`.
 It fetches both `main` and the head, then runs the merged-tree gates on
 origin/main merged with the exact `headRefOid`. The squash merge passes
-`--match-head-commit <headRefOid>`, so a push after the gates stops the merge.
+`--match-head-commit <headRefOid>` and `--author-email <git config user.email>`,
+where the email must end with `@users.noreply.github.com` (otherwise FAIL before
+merge). After merge, the merge commit author email is verified to be a noreply
+address (FAIL if not; no revert, content is fine). A push after the gates stops
+the merge.
 
 ## After the merge
 `merge-when-green` waits for main CI on the merge commit. If it is red, it
