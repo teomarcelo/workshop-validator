@@ -847,15 +847,9 @@ def _click_save(page) -> bool:
     return click_role(page, "button", "Save")
 
 
-def _read_save_message(page) -> tuple[str, str]:
-    """Read save result message after clicking Save.
-
-    Returns (message_type, text) where message_type is:
-    - 'success' if settings were saved successfully
-    - 'error' if an error message is shown
-    - 'none' if no message found
-    """
-    # Check for success messages (banner, toast, status/alert)
+def _read_status_messages(page) -> frozenset[str]:
+    """Read all visible role=status and role=alert messages."""
+    messages = []
     for role in ("status", "alert"):
         for root in _roots(page):
             try:
@@ -864,24 +858,31 @@ def _read_save_message(page) -> tuple[str, str]:
                     try:
                         if hasattr(element, "is_visible") and element.is_visible():
                             text = element.inner_text().strip()
-                            if text and ("saved" in text.lower() or "success" in text.lower()):
-                                return ("success", text)
-                            if text and ("error" in text.lower() or "failed" in text.lower()):
-                                return ("error", text)
+                            if text:
+                                messages.append(text)
                     except Exception:
                         continue
             except Exception:
                 continue
+    return frozenset(messages)
 
-    # Check for visible text patterns
-    if _words_visible(page, "successfully saved"):
-        return ("success", "Settings saved successfully")
-    if _words_visible(page, "saved"):
-        return ("success", "Settings saved")
-    if _words_visible(page, "error"):
-        return ("error", "Error message shown")
 
-    return ("none", "")
+def _classify_save_message(text: str) -> str:
+    """Classify a message as success, error, or none.
+
+    Success: contains "saved" as whole word AND ("success"/"successfully" OR "were saved")
+    Error: contains "error" or "failed"
+    """
+    lower = text.lower()
+    # Check for success: "saved" as whole word + success indicators
+    import re
+    if re.search(r'\bsaved\b', lower):
+        if "success" in lower or "were saved" in lower:
+            return "success"
+    # Check for error
+    if "error" in lower or "failed" in lower:
+        return "error"
+    return "none"
 
 
 def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
@@ -902,6 +903,10 @@ def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
         company = _labeled(root, "Company Name") if root is not None else None
         if company is not None:
             state.company_before = _input(company)
+
+    # Capture messages before clicking Save
+    messages_before = _read_status_messages(state.page)
+
     if not _click_save(state.page):
         return CheckResult("UI_MISMATCH", "Save was not on Personal Information.", ())
     expected_company = state.company_before or ""
@@ -921,14 +926,20 @@ def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
     if email is not None and state.email_before is not None and _input(email) != state.email_before:
         return CheckResult("FUNCTIONAL_FAIL", "Save changed the email field.", ())
 
-    # Read the save result message
-    msg_type, msg_text = _read_save_message(state.page)
-    if msg_type == "error":
-        return CheckResult("FUNCTIONAL_FAIL", f"Save showed an error: {msg_text[:100]}", ())
-    if msg_type == "none":
-        return CheckResult("NEEDS_REVIEW", "Clicked Save, but no change could be read from the page.", ())
+    # Read messages after clicking Save and find new ones
+    messages_after = _read_status_messages(state.page)
+    new_messages = messages_after - messages_before
 
-    return passed(step, "saved-message", f"Save completed. {msg_text[:100]}")
+    # Classify new messages
+    for msg in new_messages:
+        msg_type = _classify_save_message(msg)
+        if msg_type == "error":
+            return CheckResult("FUNCTIONAL_FAIL", f"Save showed an error: {msg[:100]}", ())
+        if msg_type == "success":
+            return passed(step, "saved-message", f"Save completed. {msg[:100]}")
+
+    # No new message found
+    return CheckResult("NEEDS_REVIEW", "Clicked Save, but no change could be read from the page.", ())
 
 
 def _quick_find(page):
