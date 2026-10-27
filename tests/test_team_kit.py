@@ -227,9 +227,9 @@ class GateTests(unittest.TestCase):
     def test_review_verdicts_read_last_line(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "pr-7-code-reviewer.md"
-            path.write_text("notes\nVERDICT: VETO\nfixed\nVERDICT: APPROVE\n")
+            path.write_text("HEAD: abc123\nnotes\nVERDICT: VETO\nfixed\nVERDICT: APPROVE\n")
             (Path(tmp) / "pr-7-safety-scanner.md").write_text("no verdict here")
-            self.assertEqual(review_verdicts(Path(tmp), 7),
+            self.assertEqual(review_verdicts(Path(tmp), 7, "abc123"),
                              {"code-reviewer": "APPROVE", "safety-scanner": "MISSING"})
 
 
@@ -490,6 +490,8 @@ class WorktreeCleanupTests(unittest.TestCase):
                 (lambda c: c[:2] == ["gh", "pr"], 0, merged),
                 (lambda c: c == ["git", "rev-parse", "automation/keep"], 0, "1" * 40 + "\n"),
                 (lambda c: c == ["git", "rev-parse", "automation/del"], 0, "9" * 40 + "\n"),
+                # Ancestor check: 1111... is NOT ancestor of 9999...
+                (lambda c: c[:3] == ["git", "merge-base", "--is-ancestor"] and c[3] == "1" * 40, 1, ""),
             ])
             with contextlib.redirect_stdout(io.StringIO()):
                 team_gates.worktree_cleanup(repo, runner=runner)
@@ -634,6 +636,290 @@ class FeatureWorkflowFindingsTests(unittest.TestCase):
                 else:
                     self.assertFalse(got["ready"])
                     self.assertTrue(any(expected in f for f in got["findings"]), got["findings"])
+
+
+# ---- F3: write-guard and cleanup follow-ups from PR #1 reviews ------------
+
+
+class WriteGuardCaseFoldingTests(unittest.TestCase):
+    """Finding 1: Write guard should be case-insensitive on case-insensitive filesystems."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.home, self.repo = base / "home", base / "repo"
+        self.tree = self.repo / ".claude" / "worktrees" / "agent-1"
+        for d in (self.home, self.repo, self.tree):
+            d.mkdir(parents=True)
+
+    def decide(self, target, cwd=None, root="auto"):
+        cwd = cwd or self.repo
+        lookup = (lambda c: self.tree if Path(c).resolve() == self.tree else self.repo) if root == "auto" else (lambda c: root)
+        return guard_decision({"cwd": str(cwd), "tool_input": {"file_path": str(target)}},
+                              home=self.home, git_root=lookup, scratch=[],
+                              main_root=lambda c: self.repo)[0]
+
+    def test_case_variants_blocked_in_never_write(self):
+        """Verification-Orgs.json should be blocked (case variant of verification-orgs.json)."""
+        self.assertFalse(self.decide(self.repo / "Verification-Orgs.json"))
+        self.assertFalse(self.decide(self.repo / "VERIFICATION-ORGS.JSON"))
+        self.assertFalse(self.decide(self.repo / "Browser-State.json"))
+
+    def test_case_variants_blocked_in_protected_files(self):
+        """Team_Hooks.py should be blocked from main checkout (case variant)."""
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "Team_Hooks.py"))
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "TEAM_HOOKS.PY"))
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "team_gates.PY"))
+
+    def test_case_variants_blocked_in_settings(self):
+        """.CLAUDE/settings.json should be blocked from main (case variant of .claude)."""
+        self.assertFalse(self.decide(self.repo / ".CLAUDE" / "settings.json"))
+        self.assertFalse(self.decide(self.repo / ".Claude" / "SETTINGS.JSON"))
+
+    def test_case_variants_blocked_in_reviews_path(self):
+        """team/REVIEWS/pr-1-x.md should be blocked (case variant of reviews)."""
+        reviews = self.home / ".workshop-validator" / "team" / "REVIEWS"
+        reviews.mkdir(parents=True, exist_ok=True)
+        self.assertFalse(self.decide(reviews / "pr-1-x.md"))
+        self.assertFalse(self.decide(self.home / ".WORKSHOP-VALIDATOR" / "team" / "reviews" / "pr-2-x.md"))
+
+
+class ProtectedFilesF3Tests(unittest.TestCase):
+    """Finding 2: team_gates.py, team_state.py, watchdog.py should be protected in main checkout."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        base = Path(self.tmp.name).resolve()
+        self.home, self.repo = base / "home", base / "repo"
+        self.tree = self.repo / ".claude" / "worktrees" / "agent-1"
+        for d in (self.home, self.repo, self.tree):
+            d.mkdir(parents=True)
+
+    def decide(self, target, cwd, root):
+        return guard_decision({"cwd": str(cwd), "tool_input": {"file_path": str(target)}},
+                              home=self.home, git_root=lambda c: root, scratch=[],
+                              main_root=lambda c: self.repo)[0]
+
+    def test_team_gates_protected_from_main_checkout(self):
+        """team_gates.py cannot be written from main checkout."""
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "team_gates.py", self.repo, self.repo))
+        # But can be written from worktree
+        self.assertTrue(self.decide(self.tree / "workshop_validator" / "team_gates.py", self.tree, self.tree))
+
+    def test_team_state_protected_from_main_checkout(self):
+        """team_state.py cannot be written from main checkout."""
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "team_state.py", self.repo, self.repo))
+        self.assertTrue(self.decide(self.tree / "workshop_validator" / "team_state.py", self.tree, self.tree))
+
+    def test_watchdog_protected_from_main_checkout(self):
+        """watchdog.py cannot be written from main checkout."""
+        self.assertFalse(self.decide(self.repo / "workshop_validator" / "watchdog.py", self.repo, self.repo))
+        self.assertTrue(self.decide(self.tree / "workshop_validator" / "watchdog.py", self.tree, self.tree))
+
+
+class ReviewVerdictsFailClosedTests(unittest.TestCase):
+    """Finding 3: review_verdicts must fail closed when head_oid is empty."""
+
+    def test_empty_head_oid_marks_passing_verdicts_stale(self):
+        """When head_oid is empty or None, all PASS verdicts should be STALE."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reviews = Path(tmp)
+            (reviews / "pr-5-code-reviewer.md").write_text("HEAD: abc123\nVERDICT: APPROVE")
+            (reviews / "pr-5-safety-scanner.md").write_text("HEAD: def456\nVERDICT: CLEAR")
+
+            # With empty string
+            verdicts = review_verdicts(reviews, 5, head_oid="")
+            self.assertEqual(verdicts["code-reviewer"], "STALE")
+            self.assertEqual(verdicts["safety-scanner"], "STALE")
+
+            # With None
+            verdicts = review_verdicts(reviews, 5, head_oid=None)
+            self.assertEqual(verdicts["code-reviewer"], "STALE")
+            self.assertEqual(verdicts["safety-scanner"], "STALE")
+
+    def test_whitespace_head_oid_marks_passing_verdicts_stale(self):
+        """Whitespace-only head_oid should also mark verdicts stale."""
+        with tempfile.TemporaryDirectory() as tmp:
+            reviews = Path(tmp)
+            (reviews / "pr-6-code-reviewer.md").write_text("HEAD: abc123\nVERDICT: APPROVE")
+            verdicts = review_verdicts(reviews, 6, head_oid="  ")
+            self.assertEqual(verdicts["code-reviewer"], "STALE")
+
+
+class WriteGuardF3Fix1Tests(unittest.TestCase):
+    """F3-fix1: split allow and deny containment in the write guard."""
+
+    def test_case_sensitive_layout_denies_miscased_workspace(self):
+        """Workspace base/repo does not grant writes to base/REPO/x.py (no mocks).
+
+        On a case-sensitive volume base/REPO is a different folder; on a
+        case-insensitive one it is the same folder spelled differently. Either
+        way an allow decision must not depend on casefold.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            home.mkdir()
+            repo = base / "repo"
+            repo.mkdir()
+            (base / "REPO").mkdir(exist_ok=True)  # same folder on case-insensitive volumes
+            target = base / "REPO" / "x.py"
+            allowed, reason = guard_decision(
+                {"cwd": str(repo), "tool_input": {"file_path": str(target)}},
+                home=home, git_root=lambda c: repo, scratch=[],
+                main_root=lambda c: None)
+            self.assertFalse(allowed)
+            self.assertIn("outside this agent's workspace", reason)
+
+    def test_inside_allow_is_case_exact(self):
+        """_inside_allow never matches a path that differs from the root only in case."""
+        base = Path(tempfile.gettempdir()).resolve() / "wv-case-helper"
+        self.assertFalse(team_hooks._inside_allow(base / "REPO" / "x.py", base / "repo"))
+        self.assertTrue(team_hooks._inside_allow(base / "repo" / "x.py", base / "repo"))
+
+    def test_inside_deny_is_case_insensitive(self):
+        """_inside_deny matches a path that differs from the root only in case."""
+        base = Path(tempfile.gettempdir()).resolve() / "wv-case-helper"
+        self.assertTrue(team_hooks._inside_deny(base / "REPO" / "x.py", base / "repo"))
+        self.assertFalse(team_hooks._inside_deny(base / "repox" / "x.py", base / "repo"))
+
+    def test_miscased_root_denied_with_clear_reason(self):
+        """Miscased root target should be denied with clear reason, not ValueError."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            repo = base / "repo"
+            repo.mkdir(parents=True)
+            home.mkdir(parents=True)
+
+            # Directly test the scenario where relative_to would fail
+            # Mock to make _inside_allow return True but Path.relative_to raise ValueError
+            class PathWithFailingRelativeTo(type(Path())):
+                """Path that fails relative_to to simulate case mismatch."""
+                def __init__(self, *args):
+                    self._path = Path(*args)
+
+                def __truediv__(self, other):
+                    return self._path / other
+
+                def resolve(self):
+                    return self._path.resolve()
+
+                def relative_to(self, other):
+                    # Simulate case-sensitive FS where this would fail
+                    raise ValueError("path case mismatch")
+
+                @property
+                def name(self):
+                    return self._path.name
+
+            # Create target that will fail relative_to
+            failing_target = PathWithFailingRelativeTo(repo / "x.py")
+
+            # Patch _resolve_target to return our special path
+            def mock_resolve_target(raw, cwd):
+                return failing_target
+
+            # Mock _inside_allow to return True (so we enter the in_own_workspace block)
+            with mock.patch.object(team_hooks, '_resolve_target', mock_resolve_target):
+                with mock.patch.object(team_hooks, '_inside_allow', return_value=True):
+                    with mock.patch.object(team_hooks, '_inside_deny', return_value=False):
+                        allowed, reason = guard_decision(
+                            {"cwd": str(repo), "tool_input": {"file_path": "x.py"}},
+                            home=home, git_root=lambda c: repo, scratch=[]
+                        )
+
+                        self.assertFalse(allowed)
+                        # Should have clear error message about case mismatch
+                        self.assertIn("case", reason.lower())
+                        # Should not expose ValueError in user-facing message
+                        self.assertNotIn("ValueError", reason)
+
+    def test_case_variants_still_denied(self):
+        """Case variants of protected names should still be denied (existing tests stay green)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            repo = base / "repo"
+            repo.mkdir(parents=True)
+            home.mkdir(parents=True)
+
+            # These tests verify the existing case-insensitive protection works
+            def decide(target):
+                return guard_decision(
+                    {"cwd": str(repo), "tool_input": {"file_path": str(target)}},
+                    home=home, git_root=lambda c: repo, scratch=[]
+                )[0]
+
+            # Case variants of NEVER_WRITE should be denied
+            self.assertFalse(decide(repo / "Verification-Orgs.json"))
+            self.assertFalse(decide(repo / "BROWSER-STATE.JSON"))
+
+            # Case variants of protected paths should be denied from main
+            self.assertFalse(decide(repo / "workshop_validator" / "TEAM_HOOKS.PY"))
+            self.assertFalse(decide(repo / ".CLAUDE" / "settings.json"))
+
+            # Reviews folder with case variants should be denied
+            reviews = home / ".workshop-validator" / "team" / "REVIEWS"
+            reviews.mkdir(parents=True, exist_ok=True)
+            self.assertFalse(decide(reviews / "pr-1-x.md"))
+
+
+class WorktreeCleanupAncestorTests(unittest.TestCase):
+    """Finding 4: worktree_cleanup should treat branch as merged when tip is ancestor of merged PR."""
+
+    def test_deletes_when_branch_tip_is_ancestor_of_merged_pr(self):
+        """Branch should be deleted when its tip is an ancestor of a merged PR's headRefOid."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            branch_oid = "1" * 40
+            ancestor_oid = "a" * 40  # branch_oid is ancestor of this
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {repo}/wt\nHEAD {branch_oid}\nbranch refs/heads/automation/feature\n")
+            merged = json.dumps([{"number": 10, "headRefOid": ancestor_oid}])
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["gh", "pr"], 0, merged),
+                (lambda c: c == ["git", "rev-parse", "automation/feature"], 0, branch_oid + "\n"),
+                # Fetch the PR oid
+                (lambda c: c == ["git", "fetch", "origin", ancestor_oid], 0, ""),
+                # merge-base --is-ancestor returns 0 when true
+                (lambda c: c == ["git", "merge-base", "--is-ancestor", branch_oid, ancestor_oid], 0, ""),
+            ])
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner)
+
+            # Should have deleted the branch
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertIn("automation/feature", deleted)
+
+    def test_keeps_when_branch_tip_not_ancestor(self):
+        """Branch should be kept when tip is neither exact match nor ancestor of merged PR."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            branch_oid = "1" * 40
+            unrelated_oid = "9" * 40
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {repo}/wt\nHEAD {branch_oid}\nbranch refs/heads/automation/other\n")
+            merged = json.dumps([{"number": 11, "headRefOid": unrelated_oid}])
+
+            runner = FakeRunner([
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+                (lambda c: c[:2] == ["gh", "pr"], 0, merged),
+                (lambda c: c == ["git", "rev-parse", "automation/other"], 0, branch_oid + "\n"),
+                (lambda c: c == ["git", "fetch", "origin", unrelated_oid], 0, ""),
+                # merge-base --is-ancestor returns 1 when false
+                (lambda c: c == ["git", "merge-base", "--is-ancestor", branch_oid, unrelated_oid], 1, ""),
+            ])
+            with contextlib.redirect_stdout(io.StringIO()):
+                team_gates.worktree_cleanup(repo, runner=runner)
+
+            # Should NOT have deleted the branch
+            deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
+            self.assertEqual(deleted, [])
 
 
 if __name__ == "__main__":

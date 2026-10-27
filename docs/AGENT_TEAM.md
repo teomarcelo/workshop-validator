@@ -13,7 +13,7 @@ through review. No paid API is used.
 | `failure-triager` | Sonnet | First failing step or step-verifier verdict; classifies the cause; writes a fix brief |
 | `salesforce-doc-validator` (global) | Sonnet, Opus when ambiguous | Confirms a suspected UI rename against current Salesforce docs |
 | `check-fixer` | Sonnet | Smallest code fix plus a synthetic test |
-| `test-runner` | Haiku | Unit, compile and browser smoke tests; returns failures only |
+| `test-runner` | Haiku | Unit, compile, browser smoke and gates; fast-fails on unit or compile RED |
 | `rule-auditor` | Sonnet | Independent review of the diff against CLAUDE.md; can veto |
 | `lessons-keeper` | Haiku | Records each root cause (cause, fix, `never:` rule, PR) and each team mistake |
 | `safety-scanner` | Haiku | `public_safety` plus a staged-diff scan for leaks |
