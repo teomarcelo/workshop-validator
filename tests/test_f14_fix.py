@@ -3,7 +3,7 @@
 Items:
 1. team_gates._redact_stderr strips Unicode Cc and Cf except newline and tab
 2. team_kit.watchdog_check catches any Exception from check_main_clean
-3. public_safety subprocess decode with errors="replace"
+3. public_safety strict decoding of git listings: see tests/test_f14_utf8_fix.py
 """
 
 import os
@@ -133,66 +133,6 @@ class TestF14WatchdogCheckException(unittest.TestCase):
 
                 # Should report STALLED
                 self.assertIn("STALLED", result)
-
-
-class TestF14PublicSafetyDecode(unittest.TestCase):
-    """F14 item 3: public_safety subprocess decode with errors='replace'."""
-
-    def test_decode_invalid_utf8_in_filenames(self):
-        """Invalid UTF-8 in git ls-files output should be replaced, not crash."""
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "repo"
-            root.mkdir()
-
-            # Initialize git repo
-            os.system(f"cd {root} && git init -b main >/dev/null 2>&1")
-
-            # Create a test file
-            test_file = root / "test.py"
-            test_file.write_text("# test\n", encoding="utf-8")
-            os.system(f"cd {root} && git add test.py && git commit -m 'test' >/dev/null 2>&1")
-
-            # Mock subprocess to return invalid UTF-8
-            with patch("subprocess.run") as mock_run:
-                # First call: git rev-parse --git-dir (for check_main_clean)
-                # Second call: git worktree list (for check_main_clean)
-                # Third call: git symbolic-ref (for check_main_clean)
-                # Fourth call: git ls-files --cached
-                mock_result = Mock()
-                mock_result.returncode = 0
-                mock_result.stdout = b"test.py\x00\xff\xfeinvalid.py\x00"  # Invalid UTF-8 sequence
-
-                def side_effect(cmd, *args, **kwargs):
-                    if "ls-files" in cmd and "--cached" in cmd:
-                        return mock_result
-                    # For git rev-parse, worktree, symbolic-ref calls
-                    result = Mock()
-                    result.returncode = 0
-                    result.stdout = str(root / ".git") if "rev-parse" in cmd else (
-                        f"worktree {root}\nHEAD {' ' * 40}\nbranch refs/heads/main\n" if "worktree" in cmd else
-                        "refs/heads/main"
-                    )
-                    result.stderr = ""
-                    return result
-
-                mock_run.side_effect = side_effect
-
-                # This should not crash, but use errors="replace"
-                # The old code would crash with UnicodeDecodeError
-                try:
-                    tracked_listing = b"test.py\x00\xff\xfeinvalid.py\x00"
-                    # Simulate old code (will fail)
-                    tracked_names_old = [part.decode("utf-8") for part in tracked_listing.split(bytes([0])) if part]
-                    self.fail("Old code should have raised UnicodeDecodeError")
-                except UnicodeDecodeError:
-                    pass  # Expected for old code
-
-                # New code should handle it
-                tracked_names = [part.decode("utf-8", errors="replace") for part in tracked_listing.split(bytes([0])) if part]
-                self.assertEqual(len(tracked_names), 2)
-                self.assertEqual(tracked_names[0], "test.py")
-                # Invalid sequence should be replaced with replacement character
-                self.assertIn("�", tracked_names[1])
 
 
 if __name__ == "__main__":
