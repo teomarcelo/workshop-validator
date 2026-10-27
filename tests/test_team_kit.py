@@ -1110,6 +1110,57 @@ class WorktreeCleanupF6Tests(unittest.TestCase):
             deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
             self.assertIn("worktree-agent-abc123", deleted)
 
+    def test_pr_exact_checks_all_merged_prs_pr_ancestor_only_own_branch(self):
+        """pr-exact checks all merged PRs; pr-ancestor only checks own branch PRs."""
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            wt1 = repo / "wt1"
+            wt2 = repo / "wt2"
+            wt1.mkdir(parents=True)
+            wt2.mkdir(parents=True)
+
+            # wt1: worktree-agent branch with HEAD = another branch's merged PR head (pr-exact)
+            exact_oid = "e" * 40
+            # wt2: worktree-agent branch with HEAD = ancestor of another branch's merged PR (kept)
+            ancestor_oid = "a" * 40
+            other_pr_oid = "b" * 40
+
+            porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                         f"worktree {wt1}\nHEAD {exact_oid}\nbranch refs/heads/worktree-agent-exact\n\n"
+                         f"worktree {wt2}\nHEAD {ancestor_oid}\nbranch refs/heads/worktree-agent-ancestor\n")
+
+            # All merged PRs includes one with exact_oid (from another branch)
+            all_prs = [{"headRefOid": exact_oid}, {"headRefOid": other_pr_oid}]
+
+            runner = FakeRunner([
+                # First call: get all merged PRs for pr-exact
+                (lambda c: c[:3] == ["gh", "pr", "list"] and "--limit" in c and "200" in c, 0, json.dumps(all_prs)),
+                (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
+
+                # wt1 (exact match)
+                (lambda c: c[:2] == ["git", "status"] and str(wt1) in " ".join(str(x) for x in c), 0, ""),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-exact"], 0, exact_oid + "\n"),
+                # No own-branch PRs query for worktree-agent-*
+
+                # wt2 (ancestor only, not exact)
+                (lambda c: c[:2] == ["git", "status"] and str(wt2) in " ".join(str(x) for x in c), 0, ""),
+                (lambda c: c == ["git", "rev-parse", "worktree-agent-ancestor"], 0, ancestor_oid + "\n"),
+                # Tree check for wt2 (not in main)
+                (lambda c: len(c) == 3 and c[:2] == ["git", "rev-parse"] and ancestor_oid in c[2], 0, "t2" * 20 + "\n"),
+                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, "other-tree\n"),
+            ])
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0, dry_run=True)
+
+            output = out.getvalue()
+            # wt1 should be removed (pr-exact match with another branch's merged PR)
+            self.assertIn("remove wt1: pr-exact", output)
+
+            # wt2 should be kept (only ancestor, not exact, and tree not in main)
+            self.assertIn("keep wt2: no-proof", output)
+
 
 class ValidateOidF6Tests(unittest.TestCase):
     """F6 item 5: validate every oid from gh as 40 hex before using in git commands."""

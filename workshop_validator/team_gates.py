@@ -397,6 +397,10 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
     removed, removed_reasons = [], {}
     kept_reasons = {}
     main_tree = repo.resolve()
+    # Get all merged PRs for pr-exact checking (an exact oid match is sound proof)
+    all_merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--base", "main",
+                              "--limit", "200", "--json", "headRefOid", runner=runner) or []
+
     for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain", runner=runner)):
         path = Path(item.get("worktree", ""))
         branch = str(item.get("branch", "")).removeprefix("refs/heads/")
@@ -406,11 +410,10 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         commit_time = team_kit._branch_commit_time(repo, branch)
         idle = worktree_idle_time(path, commit_time)
 
-        # Worktree-agent-* branches never match PR heads, check tree match with origin/main
+        # Query this branch's own PRs for pr-ancestor checking only
         if branch.startswith("worktree-agent-"):
-            this_branch_prs = []  # Don't look for PRs
+            this_branch_prs = []  # Worktree-agent-* branches don't have named PRs
         else:
-            # Query PRs filtered by this specific branch's head
             this_branch_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--base", "main",
                                        "--head", branch, "--json", "number,headRefOid", runner=runner) or []
 
@@ -424,15 +427,15 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         elif idle < idle_hours:
             keep_reason = "recent"
         elif branch_oid and is_valid_oid(branch_oid):
-            # Check exact match with merged PR headRefOid (from this branch's PRs only)
-            for pr in this_branch_prs:
+            # pr-exact: Check against ALL merged PRs (sound proof - that commit was reviewed and merged)
+            for pr in all_merged_prs:
                 pr_oid = pr.get("headRefOid")
                 if pr_oid and is_valid_oid(pr_oid) and pr_oid == branch_oid:
                     safe_to_delete = True
                     remove_reason = "pr-exact"
                     break
 
-            # pr-ancestor only for THIS branch's own PRs
+            # pr-ancestor: Only for THIS branch's own PRs (security constraint)
             if not safe_to_delete and this_branch_prs:
                 for pr in this_branch_prs:
                     pr_oid = pr.get("headRefOid")
@@ -447,7 +450,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                             remove_reason = "pr-ancestor"
                             break
 
-            # For worktree-agent-* or no own-branch PR match: check tree match (squash-merges won't be ancestors)
+            # tree-in-main: Check tree match (squash-merges won't be ancestors)
             if not safe_to_delete:
                 run = runner or _default_runner
                 # Get tree hash of branch
