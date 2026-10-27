@@ -847,6 +847,43 @@ def _click_save(page) -> bool:
     return click_role(page, "button", "Save")
 
 
+def _read_save_message(page) -> tuple[str, str]:
+    """Read save result message after clicking Save.
+
+    Returns (message_type, text) where message_type is:
+    - 'success' if settings were saved successfully
+    - 'error' if an error message is shown
+    - 'none' if no message found
+    """
+    # Check for success messages (banner, toast, status/alert)
+    for role in ("status", "alert"):
+        for root in _roots(page):
+            try:
+                elements = root.locator(f"[role='{role}']").all()
+                for element in elements:
+                    try:
+                        if hasattr(element, "is_visible") and element.is_visible():
+                            text = element.inner_text().strip()
+                            if text and ("saved" in text.lower() or "success" in text.lower()):
+                                return ("success", text)
+                            if text and ("error" in text.lower() or "failed" in text.lower()):
+                                return ("error", text)
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+
+    # Check for visible text patterns
+    if _words_visible(page, "successfully saved"):
+        return ("success", "Settings saved successfully")
+    if _words_visible(page, "saved"):
+        return ("success", "Settings saved")
+    if _words_visible(page, "error"):
+        return ("error", "Error message shown")
+
+    return ("none", "")
+
+
 def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
     missed = require(
         state,
@@ -883,7 +920,15 @@ def run_save_personal(state: WalkState, step: GuideStep) -> CheckResult:
     email = _labeled(root, "Email") if root is not None else None
     if email is not None and state.email_before is not None and _input(email) != state.email_before:
         return CheckResult("FUNCTIONAL_FAIL", "Save changed the email field.", ())
-    return passed(step, "personal-saved", f"Save kept Company Name as {expected_company}.")
+
+    # Read the save result message
+    msg_type, msg_text = _read_save_message(state.page)
+    if msg_type == "error":
+        return CheckResult("FUNCTIONAL_FAIL", f"Save showed an error: {msg_text[:100]}", ())
+    if msg_type == "none":
+        return CheckResult("NEEDS_REVIEW", "Clicked Save, but no change could be read from the page.", ())
+
+    return passed(step, "saved-message", f"Save completed. {msg_text[:100]}")
 
 
 def _quick_find(page):
