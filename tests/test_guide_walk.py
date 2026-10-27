@@ -2173,6 +2173,18 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
         self.assertTrue(result.freeze)
         self.assertEqual(page.events, [])
 
+    def test_add_screen_without_a_label_to_read_is_not_a_pass(self):
+        page = as_builder(Page(self.BUILDER_URL, body="Screen Flow"))
+        page.roles.add(("button", "Screen"))
+        item = step(
+            "screen", "Exercise 9: Sample", "Task 1: Sample.", "a",
+            "Add a Screen Element with Label",
+        )
+        result = guide_walk.run_add_screen(self.state(page), item)
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
+
     def test_real_builder_page_still_proceeds(self):
         page = as_builder(Page(self.BUILDER_URL))
 

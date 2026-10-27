@@ -3077,7 +3077,8 @@ def run_add_screen(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult("UI_MISMATCH", "Screen was not added.", (), freeze=True)
     label = _screen_label(step.text or "")
     if not label:
-        return passed(step, "screen-added", "Screen was added to the flow.")
+        # A click is not a result. Without a label to read back, nothing on the page proves the add.
+        return CheckResult("NEEDS_REVIEW", "Screen was clicked; no result was read from the page.", (), freeze=True)
     def label_ready() -> bool:
         _focus_screen_editor(state)
         if _input_matches_label(state.page, label):
