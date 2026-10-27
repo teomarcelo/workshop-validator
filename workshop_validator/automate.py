@@ -129,7 +129,7 @@ def outcome_of(result) -> tuple[str, str]:
 def gate_outcome_of(result) -> str:
     """Classify for the org-move decision, judging only the stopping step.
 
-    The stopping step is the last non-NOT_RUN step before a NOT_RUN tail.
+    The stopping step is the first non-PASS step after which every later step is NOT_RUN.
     If there is no stopping step (the walk ran to completion), use the overall outcome.
     """
     steps = result.report_steps
@@ -153,6 +153,8 @@ def gate_outcome_of(result) -> str:
     if stopping_step.status in _REAL_FAIL:
         return FAILED
     if stopping_step.status in _INCONCLUSIVE:
+        return INCONCLUSIVE
+    if stopping_step.status == "NOT_RUN" and "exceeded its time limit" in (stopping_step.note or ""):
         return INCONCLUSIVE
 
     # For other statuses (e.g., PASS at the end), use the overall outcome
