@@ -126,6 +126,41 @@ def outcome_of(result) -> tuple[str, str]:
     return SUCCESS, ""
 
 
+def gate_outcome_of(result) -> str:
+    """Classify for the org-move decision, judging only the stopping step.
+
+    The stopping step is the first non-PASS step after which every later step is NOT_RUN.
+    If there is no stopping step (the walk ran to completion), use the overall outcome.
+    """
+    steps = result.report_steps
+    if not steps:
+        return outcome_of(result)[0]
+
+    # Find the stopping step: the last non-NOT_RUN step before a NOT_RUN tail
+    stopping_step = None
+    for i, step in enumerate(steps):
+        if step.status != "NOT_RUN":
+            # Check if all remaining steps are NOT_RUN
+            if all(s.status == "NOT_RUN" for s in steps[i + 1:]):
+                stopping_step = step
+                break
+
+    # No stopping step means the walk ran to the end
+    if stopping_step is None:
+        return outcome_of(result)[0]
+
+    # Judge based on the stopping step
+    if stopping_step.status in _REAL_FAIL:
+        return FAILED
+    if stopping_step.status in _INCONCLUSIVE:
+        return INCONCLUSIVE
+    if stopping_step.status == "NOT_RUN" and "exceeded its time limit" in (stopping_step.note or ""):
+        return INCONCLUSIVE
+
+    # For other statuses (e.g., PASS at the end), use the overall outcome
+    return outcome_of(result)[0]
+
+
 # Evidence from steps that only sign in, open a page, or read a state. A run
 # that passed nothing else left the org as it was provisioned.
 _READ_ONLY = {
@@ -300,8 +335,9 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
         write_results_pdf(board, output / "results.pdf")
     record_lessons(private_root, [(s.title, s.status, s.note) for s in result.report_steps])
     # A success or a real failure used this org, unless nothing in it changed.
-    # Inconclusive runs keep it.
-    used = outcome in {SUCCESS, FAILED} and (outcome == SUCCESS or org_changed(result))
+    # Inconclusive runs keep it. The org decision judges the stopping step only.
+    gate_outcome = gate_outcome_of(result)
+    used = gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
     save_gate(private_root, {
         "org": index + 1 if used else index,
         "frozen": outcome != SUCCESS,
