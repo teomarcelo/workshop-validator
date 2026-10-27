@@ -1,0 +1,82 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(~/.workshop-validator/verification-orgs.json)",
+      "Read(//**/browser-state.json)",
+      "Read(./**/*.pdf)",
+      "Bash(git push origin main*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(cat ~/.workshop-validator/verification-orgs.json*)",
+      "Bash(gh pr merge*--admin*)"
+    ],
+    "allow": [
+      "Bash(.venv/bin/python -m unittest*)",
+      "Bash(.venv/bin/python -m workshop_validator.public_safety*)",
+      "Bash(.venv/bin/python -m workshop_validator.automate*)",
+      "Bash(.venv/bin/python -m workshop_validator.lessons*)",
+      "Bash(.venv/bin/python -m workshop_validator.step_board*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_state*)",
+      "Bash(.venv/bin/python -m workshop_validator.watchdog*)",
+      "Bash(.venv/bin/python -m compileall*)",
+      "Bash(ffmpeg*)",
+      "Bash(ffprobe*)",
+      "Bash(git add workshop_validator/*)",
+      "Bash(git add tests/*)",
+      "Bash(git add docs/*)",
+      "Bash(git add .claude/*)",
+      "Bash(git add .cursor/*)",
+      "Bash(git add scripts/*)",
+      "Bash(git add CLAUDE.md*)",
+      "Bash(git add README.md*)",
+      "Bash(git add AUTOMATION_LOG.md*)",
+      "Bash(git add PROJECT_PLAN.md*)",
+      "Bash(git add .gitignore*)",
+      "Bash(git add requirements-dev.txt*)",
+      "Bash(git commit*)",
+      "Bash(git push -u origin automation/*)",
+      "Bash(git status*)",
+      "Bash(git diff*)",
+      "Bash(git log*)",
+      "Bash(gh pr create*)",
+      "Bash(gh pr view*)",
+      "Bash(gh pr checks*)",
+      "Bash(gh run view*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_kit*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_gates*)",
+      "Bash(.venv/bin/python -m workshop_validator.team_dashboard*)",
+      "Bash(gh pr list*)",
+      "Bash(gh run list*)",
+      "Bash(git fetch*)",
+      "Bash(git add briefs/*)",
+      "Bash(git add .github/*)",
+      "Bash(git worktree add .claude/worktrees/*)",
+      "Bash(git worktree list*)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && { [ -x .venv/bin/python ] && P=.venv/bin/python || P=python3; } && \"$P\" -m workshop_validator.team_hooks write-guard || exit 2",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cd \"$CLAUDE_PROJECT_DIR\" && { [ -x .venv/bin/python ] && P=.venv/bin/python || P=python3; } && \"$P\" -m workshop_validator.team_hooks stop || exit 0",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -32,6 +32,9 @@ class ReportStep:
     screenshot_href: str | None = None
     behavioral_classification: str | None = None
     behavioral_evidence_ids: tuple[str, ...] = ()
+    t_start: float | None = None
+    t_end: float | None = None
+    suspect: tuple[str, ...] = ()
 
 
 def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: bool = False) -> str:

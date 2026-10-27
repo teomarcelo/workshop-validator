@@ -1,0 +1,14 @@
+---
+description: Do only what the guide step says
+alwaysApply: true
+---
+
+# Guide only
+
+A guide step is the whole instruction. Do that step. Do not add a different action because the real control is hard to find.
+
+1. Read the step text before acting. If the step does not name a canvas mode, do not switch Auto-Layout or Free-Form.
+2. If the page is already in Auto-Layout, add the element with the plus on the path, then choose the element the step names.
+3. A checker must compare the action with the step text before the click. If the action is not in the step, do not do it.
+4. When a step fails, look at the page and the step again. Do not invent a second path that the guide never wrote.
+5. Learn the miss. The same unguided action is not tried again on a later run.
