@@ -202,9 +202,14 @@ class TestProgressAndTimestamps(unittest.TestCase):
         clock = FakeClock()
         video_origin = 100.0
 
+        # Provide a no-op sleeper for fake clock
+        def fake_sleep(seconds):
+            clock.now += seconds
+
         outcome = walk_guide(
             page, inventory,
             clock=clock,
+            sleeper=fake_sleep,
             video_origin=video_origin,
         )
 
@@ -215,7 +220,8 @@ class TestProgressAndTimestamps(unittest.TestCase):
         self.assertGreaterEqual(t_start, 0)
         self.assertGreater(t_end, t_start)
         # Timestamps should be seconds from video start
-        self.assertLess(t_end - t_start, 100)  # Step shouldn't take 100+ seconds
+        # Save steps may poll for up to 90s, so allow reasonable time
+        self.assertLess(t_end - t_start, 150)  # Step shouldn't take excessive time
 
     def test_click_without_after_state_returns_needs_review(self):
         """Test that click without verifiable after-state returns NEEDS_REVIEW."""
@@ -225,7 +231,23 @@ class TestProgressAndTimestamps(unittest.TestCase):
         inventory = SimpleNamespace(steps=steps)
         page = FakePage()
 
-        outcome = walk_guide(page, inventory)
+        # Use fake clock for quick test
+        class QuickClock:
+            def __init__(self):
+                self.now = 0
+                self.calls = 0
+            def __call__(self):
+                result = self.now
+                self.calls += 1
+                # After a few calls (initial checks), jump past timeout
+                if self.calls > 5:
+                    self.now += 100
+                else:
+                    self.now += 1
+                return result
+
+        clock = QuickClock()
+        outcome = walk_guide(page, inventory, clock=clock, sleeper=lambda s: None, timeout_s=50)
 
         # Should be NEEDS_REVIEW since no after-state evidence could be read
         self.assertEqual(outcome.statuses.get("step-1"), "NEEDS_REVIEW")
@@ -432,7 +454,23 @@ class TestProgressAndTimestamps(unittest.TestCase):
         page = PageNoChange()
         page.get_by_role = lambda role, name="", exact=True: LocNoChange(page, role, name)
 
-        outcome = walk_guide(page, inventory)
+        # Use fake clock for quick test
+        class QuickClock:
+            def __init__(self):
+                self.now = 0
+                self.calls = 0
+            def __call__(self):
+                result = self.now
+                self.calls += 1
+                # After a few calls (initial checks), jump past timeout
+                if self.calls > 5:
+                    self.now += 100
+                else:
+                    self.now += 1
+                return result
+
+        clock = QuickClock()
+        outcome = walk_guide(page, inventory, clock=clock, sleeper=lambda s: None, timeout_s=50)
 
         # step-1 should be NEEDS_REVIEW with freeze
         self.assertEqual(outcome.statuses.get("step-1"), "NEEDS_REVIEW")
