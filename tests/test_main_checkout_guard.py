@@ -18,7 +18,7 @@ class TeamHooksMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -49,7 +49,7 @@ class TeamHooksMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -80,7 +80,7 @@ class TeamHooksMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo on main
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -110,7 +110,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -143,7 +143,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -177,7 +177,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             team.mkdir(parents=True)
 
             # Initialize repo on main
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")
@@ -280,7 +280,7 @@ class PublicSafetyCheckMainCleanTests(unittest.TestCase):
             main_repo.mkdir()
 
             # Initialize repo on main
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
             (main_repo / "file.txt").write_text("content")

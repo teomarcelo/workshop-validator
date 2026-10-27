@@ -107,7 +107,7 @@ class PublicSafetyAuthorEmailTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             # Initialize git repo
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
 
@@ -168,7 +168,7 @@ class PublicSafetyMainCleanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             # Initialize git repo
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
 
@@ -191,7 +191,7 @@ class PublicSafetyMainCleanTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             # Initialize git repo
-            subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=repo, check=True, capture_output=True)
 
@@ -216,7 +216,7 @@ class PublicSafetyMainCheckoutBranchTests(unittest.TestCase):
             main_repo.mkdir()
 
             # Initialize main checkout
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
 
@@ -243,7 +243,7 @@ class PublicSafetyMainCheckoutBranchTests(unittest.TestCase):
             main_repo.mkdir()
 
             # Initialize main checkout
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
 
@@ -269,7 +269,7 @@ class PublicSafetyMainCheckoutBranchTests(unittest.TestCase):
             main_repo.mkdir()
 
             # Initialize main checkout
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
 
@@ -290,7 +290,7 @@ class PublicSafetyMainCheckoutBranchTests(unittest.TestCase):
             main_repo.mkdir()
 
             # Initialize main checkout
-            subprocess.run(["git", "init"], cwd=main_repo, check=True, capture_output=True)
+            subprocess.run(["git", "init", "-b", "main"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.name", "Test"], cwd=main_repo, check=True, capture_output=True)
             subprocess.run(["git", "config", "user.email", "test@users.noreply.github.com"], cwd=main_repo, check=True, capture_output=True)
 
