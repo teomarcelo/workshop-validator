@@ -385,7 +385,8 @@ def worktree_idle_time(path: Path, commit_time: float) -> float:
 def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                      runner=None) -> int:
     """Remove agent worktrees whose PR merged, that are clean and idle for an hour."""
-    removed, kept_reasons = [], {}
+    removed, removed_reasons = [], {}
+    kept_reasons = {}
     main_tree = repo.resolve()
     for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain", runner=runner)):
         path = Path(item.get("worktree", ""))
@@ -406,6 +407,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         branch_oid = _git(repo, "rev-parse", branch, check=False, runner=runner).strip() if branch else ""
         safe_to_delete = False
         keep_reason = None
+        remove_reason = None
 
         if dirty:
             keep_reason = "dirty"
@@ -417,6 +419,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                 pr_oid = pr.get("headRefOid")
                 if pr_oid and is_valid_oid(pr_oid) and pr_oid == branch_oid:
                     safe_to_delete = True
+                    remove_reason = "pr-exact"
                     break
 
             # Also check if branch tip is an ancestor of any merged PR's headRefOid
@@ -431,6 +434,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                         result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
                         if result.returncode == 0:
                             safe_to_delete = True
+                            remove_reason = "pr-ancestor"
                             break
 
             # For worktree-agent-* or no merged PR: check tree match (squash-merges won't be ancestors)
@@ -443,6 +447,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                     result = run(["git", "log", "origin/main", "--pretty=%T"], repo)
                     if result.returncode == 0 and branch_tree in result.stdout:
                         safe_to_delete = True
+                        remove_reason = "tree-in-main"
 
             if not safe_to_delete:
                 keep_reason = "no-proof"
@@ -450,13 +455,19 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         if keep_reason:
             kept_reasons[keep_reason] = kept_reasons.get(keep_reason, 0) + 1
             if dry_run:
-                print(f"  {path.name}: {keep_reason}")
+                print(f"  keep {path.name}: {keep_reason}")
             continue
 
         if not dry_run:
             _git(repo, "worktree", "remove", str(path), check=False, runner=runner)
             _git(repo, "branch", "-D", branch, check=False, runner=runner)
+        else:
+            # In dry-run, print worktrees that would be removed
+            if remove_reason:
+                print(f"  remove {path.name}: {remove_reason}")
         removed.append(path.name)
+        if remove_reason:
+            removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
     _git(repo, "worktree", "prune", check=False, runner=runner)
     verb = "would remove" if dry_run else "removed"
     reason_str = ", ".join(f"{n} {r}" for r, n in sorted(kept_reasons.items())) if kept_reasons else "none"
