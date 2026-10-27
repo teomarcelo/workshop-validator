@@ -24,7 +24,9 @@ from . import team_kit
 
 NEVER_WRITE = {"verification-orgs.json", "browser-state.json"}
 PROTECTED_FROM_MAIN = {".claude/settings.json", ".claude/settings.local.json",
-                       "workshop_validator/team_hooks.py", "workshop_validator/team_kit.py"}
+                       "workshop_validator/team_hooks.py", "workshop_validator/team_kit.py",
+                       "workshop_validator/team_gates.py", "workshop_validator/team_state.py",
+                       "workshop_validator/watchdog.py"}
 PROTECTED_PREFIXES_FROM_MAIN = (".claude/agents/", ".claude/workflows/")
 
 
@@ -60,7 +62,9 @@ def is_agent_worktree(root: Path, main_root: Path | None) -> bool:
 
 
 def is_protected(rel: str) -> bool:
-    return rel in PROTECTED_FROM_MAIN or rel.startswith(PROTECTED_PREFIXES_FROM_MAIN)
+    rel_lower = rel.casefold()
+    return any(rel_lower == p.casefold() for p in PROTECTED_FROM_MAIN) or \
+           any(rel_lower.startswith(p.casefold()) for p in PROTECTED_PREFIXES_FROM_MAIN)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -68,6 +72,16 @@ def _inside(path: Path, root: Path) -> bool:
         path.relative_to(root)
         return True
     except ValueError:
+        pass
+    # Fall back to case-insensitive string comparison for case-insensitive filesystems
+    try:
+        path_str = str(path.resolve()).casefold()
+        root_str = str(root.resolve()).casefold()
+        # Ensure root ends with separator for proper containment check
+        if not root_str.endswith(os.sep):
+            root_str += os.sep
+        return path_str.startswith(root_str)
+    except (ValueError, OSError):
         return False
 
 
@@ -104,7 +118,7 @@ def guard_decision(payload: dict, *, home: Path | None = None, git_root=_git_roo
         target = _resolve_target(raw, cwd)
     except (OSError, RuntimeError):
         return False, "write guard: target path does not resolve"
-    if target.name in NEVER_WRITE:
+    if any(target.name.casefold() == n.casefold() for n in NEVER_WRITE):
         return False, "write guard: credential and session files are never written by agents"
     if _inside(target, (home / ".workshop-validator" / "team" / "reviews").resolve()):
         return False, ("write guard: review verdicts are saved only with "
