@@ -586,18 +586,82 @@ _SHOWN_BEFORE_JS = """() => {
 
 # From the Log Out control, the panel is the outermost ancestor that was not
 # visible before the View profile click. No record, or a panel that is the
-# whole document, means no panel.
+# whole document, means no panel. When the baseline is missing, the panel is
+# the smallest common ancestor containing both Log Out and Settings.
 _PANEL_JS = """(el) => {
   const seen = window.__wvShownBeforeProfile;
-  if (!seen) return false;
   const up = (n) => n.parentElement || (n.getRootNode && n.getRootNode().host) || null;
-  let panel = null;
-  for (let n = el; n; n = up(n)) {
-    if (seen.has(n)) break;
-    panel = n;
+
+  if (seen) {
+    // Original behavior: use baseline
+    let panel = null;
+    for (let n = el; n; n = up(n)) {
+      if (seen.has(n)) break;
+      panel = n;
+    }
+    if (!panel || panel === document.documentElement || panel === document.body) return false;
+    panel.setAttribute('data-wv-profile-panel', '1');
+    return true;
   }
-  if (!panel || panel === document.documentElement || panel === document.body) return false;
-  panel.setAttribute('data-wv-profile-panel', '1');
+
+  // No baseline: find smallest common ancestor of Log Out (el) and Settings
+  const findVisibleSettings = () => {
+    const results = [];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, null);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const text = (node.textContent || '').trim();
+      if (text === 'Settings') {
+        const rect = node.getBoundingClientRect();
+        const style = window.getComputedStyle(node);
+        if (rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none') {
+          results.push(node);
+        }
+      }
+    }
+    return results;
+  };
+
+  const settingsElements = findVisibleSettings();
+  if (settingsElements.length === 0) return false;
+
+  // Build Log Out ancestor chain
+  const logoutAncestors = [];
+  for (let n = el; n; n = up(n)) {
+    if (n === document.body || n === document.documentElement) break;
+    logoutAncestors.push(n);
+  }
+
+  // Find smallest common ancestor
+  let smallestPanel = null;
+  let smallestSize = Infinity;
+
+  for (const settings of settingsElements) {
+    for (let n = settings; n; n = up(n)) {
+      if (n === document.body || n === document.documentElement) break;
+
+      if (logoutAncestors.includes(n)) {
+        const rect = n.getBoundingClientRect();
+        const size = rect.width * rect.height;
+
+        // Exclude if it contains global header/nav as direct children
+        const hasGlobalNav = Array.from(n.children).some(child => {
+          const tag = child.tagName.toLowerCase();
+          const role = child.getAttribute('role');
+          return tag === 'header' || tag === 'nav' || role === 'banner' || role === 'navigation';
+        });
+
+        if (size > 0 && size < smallestSize && !hasGlobalNav) {
+          smallestPanel = n;
+          smallestSize = size;
+        }
+        break;
+      }
+    }
+  }
+
+  if (!smallestPanel) return false;
+  smallestPanel.setAttribute('data-wv-profile-panel', '1');
   return true;
 }"""
 
