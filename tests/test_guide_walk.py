@@ -2744,6 +2744,104 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
 
 
 class UnnamedModalTests(unittest.TestCase):
+    def walk(self, page, items):
+        clock = Clock()
+        return walk_guide(
+            page, inventory_of(*items),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+    def test_walker_unnamed_modal_returns_env_blocked(self):
+        """Walker: unnamed modal covering page returns ENV_BLOCKED when control missing."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[
+                ("button", "View profile"),
+                ("dialog", "Help Agent\nWelcome to your new org\nGet Started"),
+                ("h1", "Help Agent"),
+            ],
+        )
+        # Add a heading inside the dialog
+        page.children = {
+            ("dialog", "Help Agent\nWelcome to your new org\nGet Started"): [("h1", "Help Agent")]
+        }
+
+        def reveal(kind, name):
+            # View profile click opens menu, but Settings is missing (blocked by modal)
+            if name == "View profile":
+                # Don't add Settings - it's blocked by the modal
+                pass
+
+        page.on_click = reveal
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return ENV_BLOCKED, not UI_MISMATCH
+        self.assertEqual(outcome.statuses["settings"], "ENV_BLOCKED")
+        self.assertIn("Help Agent", outcome.notes["settings"])
+        self.assertIn("modal covered the page", outcome.notes["settings"])
+        self.assertIn("guide does not mention it", outcome.notes["settings"])
+        # Verify no Settings click was attempted (only View profile clicked)
+        clicks = [event for event in page.events if event[0] == "click"]
+        self.assertEqual(clicks, [("click", "button", "View profile")])
+
+    def test_walker_no_modal_returns_ui_mismatch(self):
+        """Walker: missing control without modal returns UI_MISMATCH."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[("button", "View profile")],
+        )
+
+        def reveal(kind, name):
+            # View profile click opens menu, but Settings is missing (no modal)
+            if name == "View profile":
+                # Don't add Settings
+                pass
+
+        page.on_click = reveal
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should return UI_MISMATCH when no modal is present
+        self.assertEqual(outcome.statuses["settings"], "UI_MISMATCH")
+        self.assertIn("Settings was not in the profile menu", outcome.notes["settings"])
+        self.assertNotIn("modal", outcome.notes["settings"].lower())
+
+    def test_walker_named_modal_not_env_blocked(self):
+        """Walker: modal mentioned in step does not cause ENV_BLOCKED."""
+        page = Page(
+            "https://example.lightning.force.com/home",
+            roles=[
+                ("button", "View profile"),
+                ("dialog", "Help Agent\nWelcome message"),
+                ("h1", "Help Agent"),
+            ],
+        )
+        page.children = {
+            ("dialog", "Help Agent\nWelcome message"): [("h1", "Help Agent")]
+        }
+
+        def reveal(kind, name):
+            if name == "View profile":
+                # Don't add Settings
+                pass
+
+        page.on_click = reveal
+        # Step text mentions "Help Agent" modal
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Close the Help Agent modal, then select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        # Should NOT be ENV_BLOCKED since step mentions the modal
+        self.assertNotEqual(outcome.statuses["settings"], "ENV_BLOCKED")
+        # Should be UI_MISMATCH (Settings missing)
+        self.assertEqual(outcome.statuses["settings"], "UI_MISMATCH")
+
     def test_unnamed_modal_blocks_when_control_not_found(self):
         """A visible unnamed modal covering the page returns ENV_BLOCKED, not UI_MISMATCH."""
         page = Page(
