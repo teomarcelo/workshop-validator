@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 from .team_state import _write_private, is_open, load as load_job
 
@@ -376,21 +377,31 @@ def _read_time_iso(value) -> datetime | None:
 # ---- decide register row ---------------------------------------------------
 
 VALID_DECISION_STATUSES = ("RECOMMENDED", "NOTED", "OPEN", "RESOLVED", "SUPERSEDED")
-DECISION_ID_PATTERN = re.compile(r"^W-\d+$")
+# Register row id: ASCII digits only, at least three. team_gates.ROW_PATTERN reuses it.
+DECISION_ID_RE = r"W-[0-9]{3,}"
+DECISION_ID_PATTERN = re.compile(DECISION_ID_RE)
+# Cc control, Cf format (U+200B, U+202E), Zl line sep (U+2028), Zp para sep (U+2029).
+_REFUSED_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
+
+
+def _check_register_cell(value: str, name: str) -> None:
+    """Refuse a value that could break or disguise one DECISIONS.md cell."""
+    if any(unicodedata.category(c) in _REFUSED_CATEGORIES for c in value):
+        raise ValueError(f"{name} contains control, format or line-separator characters")
+    if len(value.splitlines()) > 1:
+        raise ValueError(f"{name} spans more than one line")
+    if "|" in value:
+        raise ValueError(f"{name} contains pipe character")
 
 
 def append_decision(team: Path, decision_id: str, decision_status: str, text: str, repo: Path = None, now=None) -> Path:
     """Append one decision row to DECISIONS.md and render dashboard."""
-    # Validate decision_id format
-    if not decision_id or not DECISION_ID_PATTERN.match(decision_id):
-        raise ValueError("decision_id must match W-\\d+ format")
+    # Validate decision_id format (fullmatch: no trailing newline, ASCII digits only)
+    if not decision_id or not DECISION_ID_PATTERN.fullmatch(decision_id):
+        raise ValueError("decision_id must match W-[0-9]{3,}")
 
-    # Check for control characters and pipe in decision_id
-    for value, name in [(decision_id, "--id"), (text, "--text")]:
-        if any(ord(c) < 32 or c == "\x7f" for c in value):
-            raise ValueError(f"{name} contains control characters")
-        if "|" in value:
-            raise ValueError(f"{name} contains pipe character")
+    for value, name in [(decision_id, "--id"), (text or "", "--text")]:
+        _check_register_cell(value, name)
 
     # Check for whitespace-only text
     if not text or not text.strip():

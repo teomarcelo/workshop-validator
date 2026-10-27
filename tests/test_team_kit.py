@@ -1130,8 +1130,8 @@ class F8Fix1DecideValidationTests(unittest.TestCase):
                 self.assertNotEqual(code, 0)
 
     def test_accepts_valid_id_format(self):
-        """--id matching W-\\d+ should be accepted."""
-        for valid_id in ["W-1", "W-123", "W-999999"]:
+        """--id matching W-[0-9]{3,} should be accepted."""
+        for valid_id in ["W-001", "W-123", "W-999999"]:
             with self.subTest(id=valid_id):
                 code = team_kit.main(["--private-root", str(self.team.parent), "decide",
                                       "--id", valid_id, "--status", "NOTED",
@@ -1160,6 +1160,70 @@ class F8Fix1DecideValidationTests(unittest.TestCase):
         if register.exists():
             content = register.read_text()
             self.assertNotIn("W-999", content)
+
+
+class F8Fix2DecideUnicodeTests(unittest.TestCase):
+    """F8-fix2: decide refuses Unicode line/format characters and non-ASCII or short ids."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.team = Path(self.tmp.name) / "team"
+        self.team.mkdir()
+        team_kit.save_plan(self.team, plan({"id": "a", "state": "done"}), NOW)
+
+    def _decide(self, decision_id, text="Synthetic text"):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return team_kit.main(["--private-root", str(self.team.parent), "decide",
+                                  "--id", decision_id, "--status", "NOTED", "--text", text])
+
+    def _assert_no_register_row(self, marker):
+        register = self.team / "DECISIONS.md"
+        if register.exists():
+            self.assertNotIn(marker, register.read_text(encoding="utf-8"))
+
+    def test_refuses_line_separator_u2028_in_text(self):
+        self.assertNotEqual(self._decide("W-201", "a\u2028| W-901 | forged |"), 0)
+        self._assert_no_register_row("W-901")
+
+    def test_refuses_paragraph_separator_u2029_in_text(self):
+        self.assertNotEqual(self._decide("W-202", "a\u2029b"), 0)
+
+    def test_refuses_next_line_u0085_in_text(self):
+        self.assertNotEqual(self._decide("W-203", "a\u0085b"), 0)
+
+    def test_refuses_rtl_override_u202e_in_text(self):
+        self.assertNotEqual(self._decide("W-204", "a\u202eb"), 0)
+
+    def test_refuses_zero_width_space_u200b_in_text(self):
+        self.assertNotEqual(self._decide("W-205", "a\u200bb"), 0)
+
+    def test_refuses_format_char_in_id(self):
+        self.assertNotEqual(self._decide("W-206\u200b"), 0)
+
+    def test_refuses_multiline_by_splitlines(self):
+        # U+001C..U+001E are splitlines() separators; refused either way.
+        for sep in ("\x1c", "\x1d", "\x1e", "\x0b", "\x0c"):
+            with self.subTest(sep=repr(sep)):
+                self.assertNotEqual(self._decide("W-207", "a" + sep + "b"), 0)
+
+    def test_refuses_short_id_w5(self):
+        self.assertNotEqual(self._decide("W-5"), 0)
+
+    def test_refuses_arabic_indic_digit_id(self):
+        self.assertNotEqual(self._decide("W-\u0661\u0660\u0664"), 0)
+
+    def test_refuses_trailing_newline_id(self):
+        self.assertNotEqual(self._decide("W-123\n"), 0)
+
+    def test_accepts_valid_w123(self):
+        self.assertEqual(self._decide("W-123"), 0)
+        self.assertIn("| W-123 |", (self.team / "DECISIONS.md").read_text(encoding="utf-8"))
+
+    def test_id_pattern_shared_with_team_gates(self):
+        from workshop_validator import team_gates
+        self.assertIn(team_kit.DECISION_ID_RE, team_gates.ROW_PATTERN.pattern)
+        self.assertIsNone(team_gates.ROW_PATTERN.match("| W-\u0661\u0660\u0664 | x |"))
 
 
 class SavePlanDuplicateStepTests(unittest.TestCase):
