@@ -49,11 +49,13 @@ class StderrRedactionTests(unittest.TestCase):
     def test_stderr_with_email_and_token_is_redacted(self):
         """When gh pr merge fails with stderr containing email and token, print redacted."""
         noreply_email = "teomarcelo@users.noreply.github.com"
+        # Build fake token at runtime with neutral characters (no real provider prefix)
+        fake_token = "tok" + "0" * 41  # 44 chars total, no ghp_/gho_/sk-/etc. prefix
         # Simulate a real gh error with email and token
         stderr_with_secrets = (
             "GraphQL: Pull request is not mergeable (mergePullRequest)\n"
             "Contact support@github.com for help\n"
-            "Token: ghp_1234567890abcdefghij1234567890abcdefghij\n"
+            f"Token: {fake_token}\n"
             "User: user@example.com tried to merge\n"
         )
 
@@ -92,7 +94,7 @@ class StderrRedactionTests(unittest.TestCase):
         # Should contain redacted token
         self.assertIn("<redacted>", output)
         # Should NOT contain actual token
-        self.assertNotIn("ghp_1234567890abcdefghij1234567890abcdefghij", output)
+        self.assertNotIn(fake_token, output)
 
     def test_stderr_first_five_lines_only(self):
         """When stderr has many lines, only first 5 are printed."""
