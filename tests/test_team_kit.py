@@ -1484,7 +1484,7 @@ class WorktreeCleanupF6Tests(unittest.TestCase):
             self.assertIn("worktree-agent-abc123", deleted)
 
     def test_pr_exact_checks_all_merged_prs_pr_ancestor_only_own_branch(self):
-        """pr-exact checks all merged PRs; pr-ancestor only checks own branch PRs."""
+        """pr-exact checks all merged PRs; pr-ancestor only checks own branch PRs; merged-pr-ancestor for worktree-agent-*."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()
             wt1 = repo / "wt1"
@@ -1494,7 +1494,7 @@ class WorktreeCleanupF6Tests(unittest.TestCase):
 
             # wt1: worktree-agent branch with HEAD = another branch's merged PR head (pr-exact)
             exact_oid = "e" * 40
-            # wt2: worktree-agent branch with HEAD = ancestor of another branch's merged PR (kept)
+            # wt2: worktree-agent branch with HEAD = ancestor of another branch's merged PR (merged-pr-ancestor)
             ancestor_oid = "a" * 40
             other_pr_oid = "b" * 40
 
@@ -1518,9 +1518,10 @@ class WorktreeCleanupF6Tests(unittest.TestCase):
                 # wt2 (ancestor only, not exact)
                 (lambda c: c[:2] == ["git", "status"] and str(wt2) in " ".join(str(x) for x in c), 0, ""),
                 (lambda c: c == ["git", "rev-parse", "worktree-agent-ancestor"], 0, ancestor_oid + "\n"),
-                # Tree check for wt2 (not in main)
-                (lambda c: len(c) == 3 and c[:2] == ["git", "rev-parse"] and ancestor_oid in c[2], 0, "t2" * 20 + "\n"),
-                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, "other-tree\n"),
+                # Fetch for merged-pr-ancestor check
+                (lambda c: c[:3] == ["git", "fetch", "origin"] and other_pr_oid in c, 0, ""),
+                # merge-base --is-ancestor check for wt2 (ancestor_oid is ancestor of other_pr_oid)
+                (lambda c: c[:2] == ["git", "merge-base"] and "--is-ancestor" in c and ancestor_oid in c and other_pr_oid in c, 0, ""),
             ])
 
             out = io.StringIO()
@@ -1531,8 +1532,8 @@ class WorktreeCleanupF6Tests(unittest.TestCase):
             # wt1 should be removed (pr-exact match with another branch's merged PR)
             self.assertIn("remove wt1: pr-exact", output)
 
-            # wt2 should be kept (only ancestor, not exact, and tree not in main)
-            self.assertIn("keep wt2: no-proof", output)
+            # wt2 should be removed (merged-pr-ancestor: ancestor of another branch's merged PR)
+            self.assertIn("remove wt2: merged-pr-ancestor", output)
 
 
 class ValidateOidF6Tests(unittest.TestCase):

@@ -463,6 +463,27 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
     removed, removed_reasons = [], {}
     kept_reasons = {}
     main_tree = repo.resolve()
+    # Cache of oids we've already fetched this run (fetch each at most once)
+    fetched_oids = set()
+    
+    def _ensure_oid_available(oid: str) -> bool:
+        """Check if oid exists locally, fetch if missing and not yet fetched. Return True when available."""
+        if not oid or not is_valid_oid(oid):
+            return False
+        # Check if oid exists locally
+        run = runner or _default_runner
+        result = run(["git", "cat-file", "-e", f"{oid}^{{commit}}"], repo)
+        if result.returncode == 0:
+            return True  # Already local
+        # Not local - fetch if we haven't already fetched it this run
+        if oid in fetched_oids:
+            return False  # Already tried fetching, still not available
+        fetched_oids.add(oid)
+        fetch_result = _git(repo, "fetch", "origin", oid, check=False, runner=runner)
+        # Verify the fetch worked
+        verify = run(["git", "cat-file", "-e", f"{oid}^{{commit}}"], repo)
+        return verify.returncode == 0
+    
     # Get all merged PRs for pr-exact checking (an exact oid match is sound proof)
     all_merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--base", "main",
                               "--limit", "200", "--json", "headRefOid", runner=runner) or []
@@ -505,15 +526,26 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
             if not safe_to_delete and this_branch_prs:
                 for pr in this_branch_prs:
                     pr_oid = pr.get("headRefOid")
-                    if pr_oid and is_valid_oid(pr_oid):
-                        # Try to fetch the oid (may fail if it's been GC'd)
-                        _git(repo, "fetch", "origin", pr_oid, check=False, runner=runner)
+                    if pr_oid and is_valid_oid(pr_oid) and _ensure_oid_available(pr_oid):
                         # Check if branch_oid is ancestor of pr_oid
                         run = runner or _default_runner
                         result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
                         if result.returncode == 0:
                             safe_to_delete = True
                             remove_reason = "pr-ancestor"
+                            break
+
+            # merged-pr-ancestor: For worktree-agent-* branches, check if tip is ancestor of any merged PR head
+            if not safe_to_delete and branch.startswith("worktree-agent-"):
+                for pr in all_merged_prs:
+                    pr_oid = pr.get("headRefOid")
+                    if pr_oid and is_valid_oid(pr_oid) and _ensure_oid_available(pr_oid):
+                        # Check if branch_oid is ancestor of pr_oid
+                        run = runner or _default_runner
+                        result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
+                        if result.returncode == 0:
+                            safe_to_delete = True
+                            remove_reason = "merged-pr-ancestor"
                             break
 
             # tree-in-main: Check tree match (squash-merges won't be ancestors)
