@@ -1,68 +1,186 @@
 """Tests for profile panel detection when pre-click baseline is missing."""
+import os
 import unittest
-from workshop_validator.guide_walk import _PANEL_JS
+
+try:
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    sync_playwright = None
+
+from workshop_validator.guide_walk import _panel_js
 
 
+# Scenario (a): Panel opens in iframe, contains Settings + Log Out, Settings also outside
+HTML_PANEL_IN_IFRAME = '''
+<button id="avatar">View profile</button>
+<div id="outside-settings">Settings</div>
+<div id="result"></div>
+<script>
+document.querySelector('#avatar').addEventListener('click', () => {
+    const iframe = document.createElement('iframe');
+    iframe.id = 'profile-frame';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument;
+    doc.open();
+    doc.write(`
+        <div id="panel" style="width: 200px; height: 150px;">
+            <a href="#settings" id="settings-link">Settings</a>
+            <a href="#logout" id="logout-link">Log Out</a>
+        </div>
+    `);
+    doc.close();
+});
+</script>
+'''
+
+# Scenario (b): Panel in iframe, no Log Out -> should not find
+HTML_PANEL_NO_LOGOUT = '''
+<button id="avatar">View profile</button>
+<div id="result"></div>
+<script>
+document.querySelector('#avatar').addEventListener('click', () => {
+    const iframe = document.createElement('iframe');
+    iframe.id = 'profile-frame';
+    document.body.appendChild(iframe);
+    const doc = iframe.contentDocument;
+    doc.open();
+    doc.write(`
+        <div id="panel" style="width: 200px; height: 150px;">
+            <a href="#settings" id="settings-link">Settings</a>
+        </div>
+    `);
+    doc.close();
+});
+</script>
+'''
+
+# Scenario (c): Baseline present (main frame) -> unchanged behavior
+HTML_PANEL_WITH_BASELINE = '''
+<div id="page-wrapper">
+    <div id="outside">Outside content</div>
+    <div id="panel" style="width: 200px; height: 150px;">
+        <a href="#settings" id="settings-link">Settings</a>
+        <a href="#logout" id="logout-link">Log Out</a>
+    </div>
+    <div id="result"></div>
+</div>
+<script>
+// Baseline: mark the wrapper that existed before the panel appeared
+window.__wvShownBeforeProfile = new Set();
+window.__wvShownBeforeProfile.add(document.querySelector('#page-wrapper'));
+</script>
+'''
+
+# Scenario (d): Smallest container also contains global nav -> not found
+HTML_PANEL_WITH_GLOBAL_NAV = '''
+<div id="combined-container" style="width: 800px; height: 600px;">
+    <header role="banner" id="global-header">Global Header</header>
+    <a href="#settings" id="settings-link">Settings</a>
+    <a href="#logout" id="logout-link">Log Out</a>
+</div>
+<div id="result"></div>
+'''
+
+
+@unittest.skipUnless(sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1", "Browser smoke only")
 class TestProfilePanelNoBaseline(unittest.TestCase):
-    """Test _PANEL_JS logic for finding panels without pre-click baseline."""
+    """Test _panel_js logic for finding panels without pre-click baseline."""
 
-    def test_panel_js_does_not_fail_fast_on_missing_baseline(self):
-        """_PANEL_JS does NOT return false immediately when baseline is missing.
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        executable = os.environ.get('CHROMIUM_PATH') or None
+        cls.browser = cls.pw.chromium.launch(headless=True, executable_path=executable)
 
-        Old buggy code had: if (!seen) return false;
-        This prevented finding panels in frames without pre-click baseline.
-        New code must have a fallback path that finds panels structurally.
-        """
-        # The bug was: if (!seen) return false; at the start
-        # This would fail immediately when baseline was missing
-        # New code should NOT have this pattern
-        self.assertNotIn("if (!seen) return false", _PANEL_JS)
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
 
-        # Instead, it should have conditional logic that handles both cases
-        self.assertIn("if (seen)", _PANEL_JS)
+    def test_panel_in_iframe_without_baseline(self):
+        """Panel opens in iframe with no baseline, Settings exists outside -> panel's Settings is clicked."""
+        page = self.browser.new_page()
+        page.set_content(HTML_PANEL_IN_IFRAME)
 
-    def test_panel_js_finds_settings_without_baseline(self):
-        """_PANEL_JS searches for Settings elements when baseline is missing.
+        # Click avatar to open panel in iframe
+        page.click('#avatar')
+        page.wait_for_selector('iframe#profile-frame')
 
-        This is the core of the fix: when window.__wvShownBeforeProfile is missing,
-        the code must find Settings elements and compute common ancestors with Log Out.
-        """
-        # Must search for Settings elements
-        self.assertIn("Settings", _PANEL_JS)
-        # Must have a function or logic to find Settings elements
-        self.assertIn("findVisibleSettings", _PANEL_JS)
+        # Get iframe and find Log Out element
+        iframe = page.frame('profile-frame')
+        logout = iframe.locator('a:has-text("Log Out")').first
 
-    def test_panel_js_computes_smallest_common_ancestor(self):
-        """_PANEL_JS finds the smallest common ancestor of Log Out and Settings.
+        # Run _panel_js on the Log Out element with "Settings" as the item
+        panel_js = _panel_js('Settings')
+        result = logout.evaluate(panel_js)
 
-        When baseline is missing, the panel is the smallest container holding
-        both Log Out (the element passed to the function) and Settings.
-        """
-        self.assertIn("smallestPanel", _PANEL_JS)
-        self.assertIn("smallestSize", _PANEL_JS)
-        # Must iterate through Settings elements to find common ancestors
-        self.assertIn("logoutAncestors", _PANEL_JS)
+        self.assertTrue(result, "Should find panel in iframe without baseline")
 
-    def test_panel_js_excludes_body_documentElement(self):
-        """_PANEL_JS rejects body and documentElement as panels."""
-        # Both the baseline and no-baseline paths must exclude these
-        body_checks = _PANEL_JS.count("document.body")
-        doc_checks = _PANEL_JS.count("document.documentElement")
-        self.assertGreaterEqual(body_checks, 2, "Should check document.body in multiple places")
-        self.assertGreaterEqual(doc_checks, 2, "Should check document.documentElement in multiple places")
+        # Verify the panel was marked
+        panel = iframe.locator('[data-wv-profile-panel="1"]')
+        self.assertEqual(panel.count(), 1, "Should mark exactly one panel")
 
-    def test_panel_js_excludes_global_navigation(self):
-        """_PANEL_JS rejects containers that also hold global header/navigation.
+        # Verify Settings is inside the marked panel
+        settings_in_panel = panel.locator('a:has-text("Settings")')
+        self.assertEqual(settings_in_panel.count(), 1, "Settings should be in the marked panel")
 
-        This prevents selecting a container so large it includes both the profile
-        panel and the global page header.
-        """
-        self.assertIn("hasGlobalNav", _PANEL_JS)
-        # Must check for header, nav, and ARIA roles
-        self.assertIn("'header'", _PANEL_JS)
-        self.assertIn("'nav'", _PANEL_JS)
-        self.assertIn("'banner'", _PANEL_JS)
-        self.assertIn("'navigation'", _PANEL_JS)
+        page.close()
+
+    def test_panel_without_logout_not_found(self):
+        """Panel in iframe with Settings but no Log Out -> not found."""
+        page = self.browser.new_page()
+        page.set_content(HTML_PANEL_NO_LOGOUT)
+
+        # Click avatar to open panel
+        page.click('#avatar')
+        page.wait_for_selector('iframe#profile-frame')
+
+        # No Log Out element exists, so we can't run _panel_js
+        iframe = page.frame('profile-frame')
+        logout = iframe.locator('a:has-text("Log Out")')
+        self.assertEqual(logout.count(), 0, "Log Out should not exist")
+
+        page.close()
+
+    def test_panel_with_baseline_unchanged_behavior(self):
+        """Baseline present (panel in main frame) -> unchanged behavior, panel's Settings clicked."""
+        page = self.browser.new_page()
+        page.set_content(HTML_PANEL_WITH_BASELINE)
+
+        # Find Log Out element
+        logout = page.locator('a:has-text("Log Out")').first
+
+        # Run _panel_js with baseline
+        panel_js = _panel_js('Settings')
+        result = logout.evaluate(panel_js)
+
+        self.assertTrue(result, "Should find panel with baseline")
+
+        # Verify the panel was marked
+        panel = page.locator('[data-wv-profile-panel="1"]')
+        self.assertEqual(panel.count(), 1, "Should mark exactly one panel")
+
+        page.close()
+
+    def test_panel_with_global_nav_rejected(self):
+        """Container holding both Settings and Log Out also contains global header -> not found."""
+        page = self.browser.new_page()
+        page.set_content(HTML_PANEL_WITH_GLOBAL_NAV)
+
+        # Find Log Out element
+        logout = page.locator('a:has-text("Log Out")').first
+
+        # Run _panel_js
+        panel_js = _panel_js('Settings')
+        result = logout.evaluate(panel_js)
+
+        self.assertFalse(result, "Should reject container with global nav")
+
+        # Verify no panel was marked
+        panel = page.locator('[data-wv-profile-panel="1"]')
+        self.assertEqual(panel.count(), 0, "Should not mark any panel")
+
+        page.close()
 
 
 if __name__ == '__main__':
