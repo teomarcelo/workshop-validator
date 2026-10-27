@@ -113,7 +113,8 @@ def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict
         content = path.read_text(encoding="utf-8")
         found = VERDICT.findall(content)
         verdict = found[-1] if found else "MISSING"
-        if head_oid and verdict in PASSING and is_review_stale(content, head_oid):
+        # Fail closed: empty/missing head_oid or stale review marks PASSING verdicts as STALE
+        if verdict in PASSING and (not head_oid or not head_oid.strip() or is_review_stale(content, head_oid)):
             verdict = "STALE"
         verdicts[role] = verdict
     return verdicts
@@ -377,6 +378,19 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         # Only delete branch if its current oid matches the merged PR's headRefOid
         branch_oid = _git(repo, "rev-parse", branch, check=False, runner=runner).strip() if branch else ""
         safe_to_delete = bool(branch_oid) and any(pr.get("headRefOid") == branch_oid for pr in merged_prs)
+        # Also check if branch tip is an ancestor of any merged PR's headRefOid
+        if not safe_to_delete and branch_oid and merged_prs:
+            for pr in merged_prs:
+                pr_oid = pr.get("headRefOid")
+                if pr_oid:
+                    # Try to fetch the oid (may fail if it's been GC'd)
+                    _git(repo, "fetch", "origin", pr_oid, check=False, runner=runner)
+                    # Check if branch_oid is ancestor of pr_oid
+                    run = runner or _default_runner
+                    result = run(["git", "merge-base", "--is-ancestor", branch_oid, pr_oid], repo)
+                    if result.returncode == 0:
+                        safe_to_delete = True
+                        break
         if dirty or idle < idle_hours or not safe_to_delete:
             kept += 1
             continue

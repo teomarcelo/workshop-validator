@@ -61,7 +61,9 @@ Agents write only in their own checkout or worktree, the private team folder
 also denies `.claude/settings.json`, `.claude/settings.local.json`,
 `team_hooks.py`, `team_kit.py`, `.claude/agents/` and `.claude/workflows/`.
 Those change only from an agent worktree, which the guard checks by path
-containment in `<main checkout>/.claude/worktrees/`.
+containment in `<main checkout>/.claude/worktrees/`. The allowlist glob
+`git worktree add .claude/worktrees/*` still matches `..` paths; the write guard
+limits harm; tightening it is an owner decision.
 
 ## Preferences are gates
 - No em dashes: `team_gates em-dash`.
