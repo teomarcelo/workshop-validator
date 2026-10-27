@@ -1074,25 +1074,30 @@ class MergeWhenGreenF6Tests(unittest.TestCase):
 
 
 class WorktreeCleanupF6Tests(unittest.TestCase):
-    """F6 item 4: worktree_cleanup handles worktree-agent-* branches and origin/main ancestors."""
+    """F6 item 4: worktree_cleanup handles worktree-agent-* branches and tree matches."""
 
-    def test_worktree_agent_branches_never_match_pr_head(self):
-        """Worktree-agent-* branches should be checked against origin/main ancestry."""
+    def test_worktree_agent_branches_checked_via_tree_match(self):
+        """Worktree-agent-* branches should be checked via tree match with origin/main."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp).resolve()
+            wt = repo / "wt"
+            wt.mkdir(parents=True)
             branch_oid = "1" * 40
+            tree_oid = "a" * 40
             porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
-                         f"worktree {repo}/wt\nHEAD {branch_oid}\nbranch refs/heads/worktree-agent-abc123\n")
+                         f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/worktree-agent-abc123\n")
 
             runner = FakeRunner([
                 (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain),
-                (lambda c: c[:2] == ["gh", "pr"] and "--head" in c, 0, "[]"),  # No PR for this branch
+                (lambda c: c[:2] == ["git", "status"] and "--porcelain" in c, 0, ""),  # Clean
+                (lambda c: c[:2] == ["gh", "pr"], 0, "[]"),  # No PRs
                 (lambda c: c == ["git", "rev-parse", "worktree-agent-abc123"], 0, branch_oid + "\n"),
-                # Check if it's ancestor of origin/main
-                (lambda c: c == ["git", "merge-base", "--is-ancestor", branch_oid, "origin/main"], 0, ""),
+                (lambda c: len(c) == 3 and c[:2] == ["git", "rev-parse"] and "^{tree}" in c[2], 0, tree_oid + "\n"),
+                # Check tree in origin/main log - tree found
+                (lambda c: c[:2] == ["git", "log"] and "origin/main" in c, 0, f"{tree_oid}\nother\n"),
             ])
             with contextlib.redirect_stdout(io.StringIO()):
-                team_gates.worktree_cleanup(repo, runner=runner)
+                team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0)
 
             # Should have deleted the worktree
             deleted = [c[-1] for c, _ in runner.find("git", "branch", "-D")]
