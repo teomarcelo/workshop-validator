@@ -825,9 +825,11 @@ class WalkTests(unittest.TestCase):
             "Click Save at the bottom, then read the popup and click OK.",
         )
         clock, outcome = self.attempt(page, (item,))
-        self.assertEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.statuses["save"], "UI_MISMATCH")
         self.assertEqual(clock.now, 0)
         self.assertIn("successfully saved", outcome.notes["save"])
+        self.assertIn("guide expects a popup", outcome.notes["save"])
+        self.assertIn("inline saved message", outcome.notes["save"])
         self.assertEqual(
             [event for event in page.events if event[0] == "click"],
             [("click", "button", "Save")],
@@ -861,6 +863,61 @@ class WalkTests(unittest.TestCase):
         self.assertIn("Save", outcome.notes["save"])
         self.assertIn("OK", outcome.notes["save"])
 
+    def test_ok_absent_with_banner_returns_ui_mismatch(self):
+        """Prove OK fallback returns UI_MISMATCH when banner is shown but OK is absent."""
+        page = Page("https://example.lightning.force.com/lightning/setup/personalInformation")
+        page.roles.add(("button", "Save"))
+
+        def reveal(kind, name):
+            if name == "Save":
+                # Show the saved banner without an OK button
+                page.body = "Personal Information\nYour settings have been successfully saved.\nBack to Setup"
+                # Explicitly no OK button in roles
+
+        page.on_click = reveal
+        item = step(
+            "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
+            "Click Save at the bottom, then read the popup and click OK.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        # Should be UI_MISMATCH because OK is not present but the banner is
+        self.assertEqual(outcome.statuses["save"], "UI_MISMATCH")
+        self.assertIn("successfully saved", outcome.notes["save"])
+        self.assertIn("guide expects a popup", outcome.notes["save"])
+        # Only Save should be clicked, not OK
+        self.assertEqual(
+            [event for event in page.events if event[0] == "click"],
+            [("click", "button", "Save")],
+        )
+        # Should have evidence
+        self.assertTrue(len(outcome.evidence.get("save", ())) > 0)
+
+    def test_ok_not_found_without_banner_continues_normal_failure(self):
+        """Prove the OK fallback only applies when the saved banner is visible."""
+        page = Page("https://example.lightning.force.com/lightning/setup/personalInformation")
+        page.roles.add(("button", "Save"))
+
+        def reveal(kind, name):
+            if name == "Save":
+                # No banner, no OK button - just empty response
+                page.body = "Page loaded."
+
+        page.on_click = reveal
+        item = step(
+            "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
+            "Click Save at the bottom, then read the popup and click OK.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        # Should fail normally (NEEDS_REVIEW) because OK is not found and no banner
+        self.assertEqual(outcome.statuses["save"], "NEEDS_REVIEW")
+        self.assertNotIn("successfully saved", outcome.notes["save"])
+        self.assertNotIn("guide expects a popup", outcome.notes["save"])
+        # Only Save should be clicked
+        self.assertEqual(
+            [event for event in page.events if event[0] == "click"],
+            [("click", "button", "Save")],
+        )
+
     def test_save_banner_inside_the_setup_frame_counts(self):
         page = Page(
             "https://example.lightning.force.com/lightning/setup/personalInformation",
@@ -880,9 +937,10 @@ class WalkTests(unittest.TestCase):
             "Click Save at the bottom, then read the popup and click OK.",
         )
         clock, outcome = self.attempt(page, (item,))
-        self.assertEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.statuses["save"], "UI_MISMATCH")
         self.assertEqual(clock.now, 0)
         self.assertIn("successfully saved", outcome.notes["save"])
+        self.assertIn("guide expects a popup", outcome.notes["save"])
 
     def test_sales_app_check_looks_for_sales(self):
         page = Page(
