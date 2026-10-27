@@ -254,6 +254,32 @@ class _MultiLoc:
             return Loc(self.page, kind, name)
         return Loc(self.page, self.role, "")
 
+    def filter(self, has_text=None):
+        """Filter items by text content."""
+        if has_text is None:
+            return self
+        filtered = []
+        for item in self.items:
+            # Check if the item's children contain the text
+            children = self.page.children.get(item, ())
+            # Check the item's name or any child name/text
+            if has_text == item[1]:  # Exact match on the item name
+                filtered.append(item)
+            elif any(has_text == child[1] for child in children):  # Exact match in children
+                filtered.append(item)
+        result = _MultiLoc.__new__(_MultiLoc)
+        result.page = self.page
+        result.role = self.role
+        result.items = filtered
+        return result
+
+    @property
+    def first(self):
+        return self.nth(0)
+
+    def is_visible(self):
+        return len(self.items) > 0
+
 
 class Page:
     def __init__(self, url, body="", roles=(), values=None):
@@ -308,7 +334,10 @@ class Page:
         return Loc(self, "css", selector)
 
     def get_by_role(self, role, name=None, exact=True):
-        return Loc(self, role, name or "")
+        if name:
+            return Loc(self, role, name)
+        # When no name is specified, return a multi-locator that can filter
+        return _MultiLoc(self, role)
 
     def get_by_label(self, name):
         return Loc(self, "label", name)
@@ -1000,6 +1029,122 @@ class WalkTests(unittest.TestCase):
         self.assertIn("dropdown in the Sample File row was not found", outcome.notes["file"])
         # Never fall back to the file link.
         self.assertEqual([event for event in page.events if event[0] == "click"], [])
+
+    def test_row_dropdown_found_by_text_when_accessible_name_differs(self):
+        """Row whose accessible name differs from title cell text is found via has_text."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # Row with accessible name different from the title cell
+        page.roles.add(("row", "document-id-123"))
+        page.roles.add(("link", "Sample Document"))
+        page.roles.add(("button", "Show Actions"))
+        page.children[("row", "document-id-123")] = [
+            ("link", "Sample Document"), ("button", "Show Actions"),
+        ]
+        page.has_popup.add(("button", "Show Actions"))
+
+        def reveal(kind, name):
+            if name == "Show Actions":
+                page.roles.add(("menuitem", "Download"))
+
+        page.on_click = reveal
+        item = step(
+            "file", "Exercise 1: Get Started", "Task 2: Files.", "4",
+            "Click the dropdown arrow to the far right of Sample Document and click Download.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        clicks = [event for event in page.events if event[0] == "click"]
+        # The fallback finds the row by text and clicks the correct controls.
+        self.assertEqual(
+            clicks, [("click", "button", "Show Actions"), ("click", "menuitem", "Download")],
+        )
+        self.assertEqual(outcome.statuses["file"], "NEEDS_REVIEW")
+
+    def test_row_dropdown_not_found_when_two_rows_have_same_text(self):
+        """Two rows with the same text results in no match (no guessing)."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # Two rows both containing "Duplicate Name"
+        page.roles.add(("row", "document-id-1"))
+        page.roles.add(("row", "document-id-2"))
+        page.roles.add(("link", "Duplicate Name"))
+        page.roles.add(("button", "Actions 1"))
+        page.roles.add(("button", "Actions 2"))
+        page.children[("row", "document-id-1")] = [("link", "Duplicate Name"), ("button", "Actions 1")]
+        page.children[("row", "document-id-2")] = [("link", "Duplicate Name"), ("button", "Actions 2")]
+        page.has_popup.add(("button", "Actions 1"))
+        page.has_popup.add(("button", "Actions 2"))
+        item = step(
+            "file", "Exercise 1: Get Started", "Task 2: Files.", "4",
+            "Click the dropdown arrow to the far right of Duplicate Name and click Download.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        # Zero clicks: ambiguous match means no action.
+        self.assertEqual([event for event in page.events if event[0] == "click"], [])
+        self.assertEqual(outcome.statuses["file"], "UI_MISMATCH")
+
+    def test_row_dropdown_never_clicks_chevron_in_other_row(self):
+        """Chevron in an unrelated row is never clicked."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        page.roles.add(("row", "document-id-123"))
+        page.roles.add(("row", "other-document-id"))
+        page.roles.add(("link", "Target Document"))
+        page.roles.add(("link", "Other Document"))
+        page.roles.add(("button", "Target Actions"))
+        page.roles.add(("button", "Other Actions"))
+        page.children[("row", "document-id-123")] = [
+            ("link", "Target Document"), ("button", "Target Actions"),
+        ]
+        page.children[("row", "other-document-id")] = [
+            ("link", "Other Document"), ("button", "Other Actions"),
+        ]
+        page.has_popup.add(("button", "Target Actions"))
+        page.has_popup.add(("button", "Other Actions"))
+
+        def reveal(kind, name):
+            if name == "Target Actions":
+                page.roles.add(("menuitem", "Download"))
+
+        page.on_click = reveal
+        item = step(
+            "file", "Exercise 1: Get Started", "Task 2: Files.", "4",
+            "Click the dropdown arrow to the far right of Target Document and click Download.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        clicks = [event for event in page.events if event[0] == "click"]
+        # Only the target row's controls are clicked.
+        self.assertEqual(
+            clicks, [("click", "button", "Target Actions"), ("click", "menuitem", "Download")],
+        )
+        self.assertNotIn(("click", "button", "Other Actions"), clicks)
+        self.assertEqual(outcome.statuses["file"], "NEEDS_REVIEW")
+
+    def test_row_dropdown_existing_name_match_still_works(self):
+        """Existing path where accessible name matches still works."""
+        page = Page("https://example.lightning.force.com/lightning/o/ContentDocument/home")
+        # Row whose accessible name matches the title text
+        page.roles.add(("row", "Matching Name"))
+        page.roles.add(("link", "Matching Name"))
+        page.roles.add(("button", "Show Actions"))
+        page.children[("row", "Matching Name")] = [
+            ("link", "Matching Name"), ("button", "Show Actions"),
+        ]
+        page.has_popup.add(("button", "Show Actions"))
+
+        def reveal(kind, name):
+            if name == "Show Actions":
+                page.roles.add(("menuitem", "Download"))
+
+        page.on_click = reveal
+        item = step(
+            "file", "Exercise 1: Get Started", "Task 2: Files.", "4",
+            "Click the dropdown arrow to the far right of Matching Name and click Download.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        clicks = [event for event in page.events if event[0] == "click"]
+        # The existing name-match path finds the row and clicks the correct controls.
+        self.assertEqual(
+            clicks, [("click", "button", "Show Actions"), ("click", "menuitem", "Download")],
+        )
+        self.assertEqual(outcome.statuses["file"], "NEEDS_REVIEW")
 
     def test_files_tab_leaves_personal_information(self):
         page = Page("https://example.lightning.force.com/lightning/settings/personalInformation")
