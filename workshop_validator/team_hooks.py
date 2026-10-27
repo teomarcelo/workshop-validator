@@ -20,6 +20,8 @@ import tempfile
 from . import team_kit
 
 NEVER_WRITE = {"verification-orgs.json", "browser-state.json"}
+PROTECTED_FROM_MAIN = {".claude/settings.json", ".claude/settings.local.json",
+                       "workshop_validator/team_hooks.py"}
 
 
 def _git_root(cwd: Path) -> Path | None:
@@ -75,7 +77,20 @@ def guard_decision(payload: dict, *, home: Path | None = None, git_root=_git_roo
     if target.name in NEVER_WRITE:
         return False, "write guard: credential and session files are never written by agents"
     worktrees = root / ".claude" / "worktrees"
-    if _inside(target, root) and not (_inside(target, worktrees) and not _inside(root, worktrees)):
+    in_own_workspace = _inside(target, root) and not (_inside(target, worktrees) and not _inside(root, worktrees))
+    # Check for protected files that can only be written from worktrees
+    if in_own_workspace:
+        try:
+            rel = target.relative_to(root)
+            rel_str = str(rel).replace("\\", "/")
+            if rel_str in PROTECTED_FROM_MAIN:
+                # Check if root itself is inside a worktree (contains .claude/worktrees in path)
+                root_str = str(root.resolve())
+                is_worktree = "/.claude/worktrees/" in root_str or "\\.claude\\worktrees\\" in root_str
+                if not is_worktree:
+                    return False, f"write guard: {rel_str} can only be written from a worktree, not the main checkout"
+        except ValueError:
+            pass
         return True, "inside own workspace"
     allowed = [home / ".workshop-validator" / "team", home / ".claude" / "plans",
                team_kit.transcripts_dir(root) / "memory",

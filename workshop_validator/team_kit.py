@@ -27,6 +27,8 @@ STALL_MINUTES = 30
 MIN_FREE_GB = 15
 NUDGE_GRACE_MINUTES = 30
 PRODUCER_ALIVE_MINUTES = 120
+TAKEOVER_COOLDOWN_MINUTES = 60
+MAX_TAKEOVERS_PER_IDLE = 3
 
 
 def team_root(private_root: Path | None = None) -> Path:
@@ -153,7 +155,7 @@ def release_producer(team: Path) -> None:
 def bind_producer(team: Path, session_id: str) -> bool:
     """A pending claim adopts the first session id a hook sees."""
     live = load_producer(team)
-    if live and live.get("session_id") == "pending" and session_id:
+    if live and live.get("session_id") == "pending" and session_id and session_id.strip():
         live["session_id"] = session_id
         _write_private(producer_live_path(team), json.dumps(live) + "\n")
         return True
@@ -248,9 +250,16 @@ def owner_asks_not_doable(plan: dict, base: Path | None = None) -> list[str]:
 # ---- watchdog decision -----------------------------------------------------
 
 def watchdog_action(state: str, live: dict | None, *, now: datetime, idle_since: datetime | None,
-                    nudged_at: datetime | None, session_active_at: datetime | None) -> str:
+                    nudged_at: datetime | None, session_active_at: datetime | None,
+                    takeover_at: datetime | None = None, takeover_count: int = 0) -> str:
     """NONE, NUDGE (message the live producer) or TAKEOVER (run the wake task)."""
     if state not in {"IDLE", "STALLED"}:
+        return "NONE"
+    # Within cooldown period after a takeover
+    if takeover_at and now - takeover_at < timedelta(minutes=TAKEOVER_COOLDOWN_MINUTES):
+        return "NONE"
+    # Max takeovers reached for this idle stretch
+    if takeover_count >= MAX_TAKEOVERS_PER_IDLE:
         return "NONE"
     alive = bool(live) and session_active_at is not None and \
         now - session_active_at < timedelta(minutes=PRODUCER_ALIVE_MINUTES)
@@ -271,16 +280,20 @@ def _read_time(path: Path) -> datetime | None:
 
 
 def watchdog_check(repo: Path, team: Path, now=None) -> str:
-    """Record idle-since / nudged-at markers and print the action for the watchdog task."""
+    """Record idle-since / nudged-at / takeover markers and print the action for the watchdog task."""
     now = _utc(now)
     state, reason = status(repo, team, now)
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
+    takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
     if state not in {"IDLE", "STALLED"}:
         idle_file.unlink(missing_ok=True)
         nudge_file.unlink(missing_ok=True)
+        takeover_file.unlink(missing_ok=True)
+        takeover_count_file.unlink(missing_ok=True)
         return f"NONE {state}: {reason}"
     if not idle_file.is_file():
         _write_private(idle_file, now.isoformat())
+        takeover_count_file.unlink(missing_ok=True)
     live = load_producer(team)
     active = None
     if live:
@@ -290,12 +303,24 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
             active = datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc)
         else:
             active = _read_time_iso(live.get("claimed"))
+    takeover_count = 0
+    if takeover_count_file.is_file():
+        try:
+            takeover_count = int(takeover_count_file.read_text(encoding="utf-8").strip())
+        except (ValueError, OSError):
+            takeover_count = 0
     action = watchdog_action(state, live, now=now, idle_since=_read_time(idle_file),
-                             nudged_at=_read_time(nudge_file), session_active_at=active)
+                             nudged_at=_read_time(nudge_file), session_active_at=active,
+                             takeover_at=_read_time(takeover_file), takeover_count=takeover_count)
     if action == "NUDGE":
         _write_private(nudge_file, now.isoformat())
     if action == "TAKEOVER":
         nudge_file.unlink(missing_ok=True)
+        _write_private(takeover_file, now.isoformat())
+        _write_private(takeover_count_file, str(takeover_count + 1))
+    if action == "NONE" and takeover_count >= MAX_TAKEOVERS_PER_IDLE:
+        session = (live or {}).get("session_id", "none")
+        return f"NONE {state}: WAITING owner: {takeover_count} takeovers did not restart the chain (producer session {session})"
     session = (live or {}).get("session_id", "none")
     return f"{action} {state}: {reason} (producer session {session})"
 

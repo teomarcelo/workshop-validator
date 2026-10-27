@@ -12,8 +12,9 @@ from workshop_validator import team_kit
 from workshop_validator.public_safety import inspect_tracked
 from workshop_validator.team_dashboard import render
 from workshop_validator.team_gates import (
-    clock24_hits, deleted_decision_files, em_dash_hits, merge_blockers,
+    clock24_hits, deleted_decision_files, em_dash_hits, is_review_stale, merge_blockers,
     missing_register_rows, removed_rows, required_reviewers, review_verdicts,
+    worktree_idle_time,
 )
 from workshop_validator.team_hooks import guard_decision, stop_decision
 
@@ -247,6 +248,94 @@ class PrivacyAndDashboardTests(unittest.TestCase):
                       [["W-901", "2026-10-26", "NOTED", "synthetic ruling"]], NOW)
         self.assertEqual(clock24_hits(html), [])
         self.assertIn("Working", html)
+
+
+class HeadBindingTests(unittest.TestCase):
+    def test_stale_review_without_head_marker(self):
+        from workshop_validator.team_gates import is_review_stale
+        self.assertTrue(is_review_stale("No HEAD marker here", "abc1234"))
+        self.assertFalse(is_review_stale("HEAD: abc1234\nVERDICT: APPROVE", "abc1234"))
+        self.assertFalse(is_review_stale("HEAD: abc1234567\nVERDICT: APPROVE", "abc1234567890"))
+        self.assertTrue(is_review_stale("HEAD: abc1234\nVERDICT: APPROVE", "def5678"))
+
+
+class SecurityReviewerRequiredTests(unittest.TestCase):
+    def test_security_reviewer_for_sensitive_paths(self):
+        from workshop_validator.team_gates import required_reviewers
+        self.assertIn("security-reviewer", required_reviewers([".github/workflows/ci.yml"]))
+        self.assertIn("security-reviewer", required_reviewers([".claude/settings.json"]))
+        self.assertIn("security-reviewer", required_reviewers(["workshop_validator/team_hooks.py"]))
+        self.assertIn("security-reviewer", required_reviewers(["workshop_validator/team_gates.py"]))
+        self.assertIn("security-reviewer", required_reviewers(["workshop_validator/watchdog.py"]))
+        self.assertNotIn("security-reviewer", required_reviewers(["docs/a.md"]))
+
+
+class WorktreeIdleTimeTests(unittest.TestCase):
+    def test_worktree_idle_time_is_newest_of_commit_and_file_mtimes(self):
+        from workshop_validator.team_gates import worktree_idle_time
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "file.txt").write_text("test")
+            file_mtime = (root / "file.txt").stat().st_mtime
+            commit_time = file_mtime - 3600
+            idle = worktree_idle_time(root, commit_time)
+            self.assertAlmostEqual(idle, (time.time() - file_mtime) / 3600, delta=0.1)
+
+
+class BindProducerBlankSessionTests(unittest.TestCase):
+    def test_bind_producer_ignores_blank_session_ids(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            team = Path(tmp) / "team"
+            team_kit.claim_producer(team, now=NOW)
+            self.assertFalse(team_kit.bind_producer(team, ""))
+            self.assertFalse(team_kit.bind_producer(team, "  "))
+            self.assertTrue(team_kit.bind_producer(team, "valid-id"))
+
+
+class WatchdogTakeoverLimitTests(unittest.TestCase):
+    def test_takeover_cooldown_and_limit(self):
+        from workshop_validator import team_kit
+        with tempfile.TemporaryDirectory() as tmp:
+            team = Path(tmp) / "team"
+            repo = Path(tmp) / "repo"
+            team.mkdir()
+            repo.mkdir()
+            team_kit.save_plan(team, plan({"id": "a", "state": "next"}), NOW)
+
+            # First takeover
+            result = team_kit.watchdog_check(repo, team, NOW)
+            self.assertIn("TAKEOVER", result)
+
+            # Within 60 minutes: should return NONE
+            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=30))
+            self.assertIn("NONE", result)
+
+            # After 60 minutes: should allow another takeover
+            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61))
+            self.assertIn("TAKEOVER", result)
+
+
+class WriteGuardSettingsProtectionTests(unittest.TestCase):
+    def test_write_guard_denies_settings_from_main_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            home = base / "home"
+            repo = base / "repo"
+            worktree = repo / ".claude" / "worktrees" / "agent-1"
+            for d in (home, repo, worktree):
+                d.mkdir(parents=True)
+
+            lookup = lambda c: worktree if Path(c).resolve() == worktree else repo
+
+            # Main checkout cannot write settings
+            self.assertFalse(guard_decision(
+                {"cwd": str(repo), "tool_input": {"file_path": str(repo / ".claude" / "settings.json")}},
+                home=home, git_root=lookup)[0])
+
+            # Worktree can write settings
+            self.assertTrue(guard_decision(
+                {"cwd": str(worktree), "tool_input": {"file_path": str(worktree / ".claude" / "settings.json")}},
+                home=home, git_root=lookup)[0])
 
 
 if __name__ == "__main__":

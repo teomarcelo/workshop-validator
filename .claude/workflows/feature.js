@@ -56,10 +56,11 @@ while (true) {
   const tests = await test()
   const verdicts = (await review()).filter(Boolean)
   const findings = [
-    ...(tests && !tests.green ? tests.failures.map(f => `test: ${f}`) : []),
+    ...(!tests ? ['test-runner returned nothing'] : !tests.green ? tests.failures.map(f => `test: ${f}`) : []),
     ...verdicts.filter(v => v.verdict !== 'APPROVE').flatMap(v => v.findings.map(f => `${v.role}: ${f}`)),
   ]
-  if (!findings.length && verdicts.length === 2) return { report, verdicts, rounds, status: 'READY_FOR_PR' }
+  const ready = tests && tests.green && verdicts.length === 2 && verdicts.every(v => v.verdict === 'APPROVE')
+  if (ready) return { report, verdicts, rounds, status: 'READY_FOR_PR' }
   if (rounds >= 2) return { report, verdicts, rounds, findings, status: 'ESCALATE' }
   rounds += 1
   log(`Fix round ${rounds}: ${findings.length} finding(s)`)

@@ -83,19 +83,46 @@ def clock24_hits(text: str) -> list[str]:
     return [m.group(0) for m in CLOCK24.finditer(text)]
 
 
-def review_verdicts(reviews: Path, pr: int) -> dict[str, str]:
+def is_review_stale(content: str, head_oid: str) -> bool:
+    """A review is stale if it doesn't contain 'HEAD: <oid>' matching the PR head."""
+    for line in content.splitlines():
+        if line.startswith("HEAD:"):
+            review_oid = line.split(":", 1)[1].strip()
+            # Match if review oid is a prefix (at least 7 chars) of the current head
+            if len(review_oid) >= 7 and head_oid.startswith(review_oid):
+                return False
+            # Or if they're exactly equal
+            if review_oid == head_oid:
+                return False
+    return True
+
+
+def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict[str, str]:
+    """Load review verdicts. If head_oid is given, mark stale reviews as STALE."""
     verdicts = {}
     for path in sorted(reviews.glob(f"pr-{pr}-*.md")):
         role = path.stem[len(f"pr-{pr}-"):]
-        found = VERDICT.findall(path.read_text(encoding="utf-8"))
-        verdicts[role] = found[-1] if found else "MISSING"
+        content = path.read_text(encoding="utf-8")
+        found = VERDICT.findall(content)
+        verdict = found[-1] if found else "MISSING"
+        if head_oid and verdict in PASSING and is_review_stale(content, head_oid):
+            verdict = "STALE"
+        verdicts[role] = verdict
     return verdicts
+
+
+SECURITY_PATHS = (".github/", ".claude/settings.json", "workshop_validator/team_hooks.py",
+                  "workshop_validator/team_gates.py", "workshop_validator/team_kit.py",
+                  "workshop_validator/watchdog.py")
 
 
 def required_reviewers(changed: list[str]) -> list[str]:
     roles = list(ALWAYS_REVIEWERS)
     if any(name.startswith(RULE_PATHS) for name in changed):
         roles.append("rule-auditor")
+    if any(name.startswith(".github/") or name == ".claude/settings.json" or
+           name in SECURITY_PATHS[2:] for name in changed):
+        roles.append("security-reviewer")
     return roles
 
 
@@ -168,13 +195,13 @@ def _gh_json(repo: Path, *args: str):
     return json.loads(out.stdout or "null")
 
 
-def merged_tree_gates(repo: Path, head: str) -> bool:
-    """Run tests and gates on origin/main merged with the PR head, in a temp worktree."""
+def merged_tree_gates(repo: Path, oid: str) -> bool:
+    """Run tests and gates on origin/main merged with the exact oid, in a temp worktree."""
     with tempfile.TemporaryDirectory() as tmp:
         tree = Path(tmp) / "merged"
         _git(repo, "worktree", "add", "--detach", str(tree), "origin/main")
         try:
-            merge = subprocess.run(["git", "merge", "--no-edit", "--no-ff", f"origin/{head}"],
+            merge = subprocess.run(["git", "merge", "--no-edit", "--no-ff", oid],
                                    cwd=tree, capture_output=True, text=True)
             if merge.returncode:
                 print("merged-tree: FAIL merge conflict with main")
@@ -206,39 +233,57 @@ def wait_main_ci(repo: Path, sha: str, timeout_s: int = 1500) -> str:
 
 
 def revert_by_pr(repo: Path, pr: int, sha: str) -> str:
-    branch = f"automation/{datetime.now().date().isoformat()}-revert-pr-{pr}"
-    _git(repo, "fetch", "origin", "main")
-    _git(repo, "checkout", "-b", branch, "origin/main")
-    _git(repo, "revert", "--no-edit", sha)
-    _git(repo, "push", "-u", "origin", branch)
-    url = subprocess.run(["gh", "pr", "create", "--title", f"revert: PR #{pr} broke main CI",
-                          "--body", f"Main CI failed after #{pr} merged ({sha[:10]}). Same-turn revert per the merge policy."],
-                         cwd=repo, capture_output=True, text=True).stdout.strip()
-    return url
+    """Create a revert PR in a temporary worktree. Returns PR URL or raises on error."""
+    branch = f"automation/{datetime.now().date().isoformat()}-revert-pr-{pr}-{sha[:7]}"
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp) / "revert"
+            _git(repo, "fetch", "origin", "main")
+            _git(repo, "worktree", "add", "--detach", str(tree), "origin/main")
+            try:
+                _git(tree, "checkout", "-b", branch)
+                _git(tree, "revert", "--no-edit", sha)
+                _git(tree, "push", "-u", "origin", branch)
+                url = subprocess.run(["gh", "pr", "create", "--title", f"revert: PR #{pr} broke main CI",
+                                      "--body", f"Main CI failed after #{pr} merged ({sha[:10]}). Same-turn revert per the merge policy."],
+                                     cwd=tree, capture_output=True, text=True, check=True).stdout.strip()
+                return url
+            finally:
+                _git(repo, "worktree", "remove", "--force", str(tree), check=False)
+    except subprocess.CalledProcessError as exc:
+        print(f"merge-when-green: REVERT FAILED PR #{pr}: {exc}", file=sys.stderr)
+        raise
 
 
 def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False) -> int:
-    info = _gh_json(repo, "pr", "view", str(pr), "--json", "headRefName,files,state,baseRefName")
+    info = _gh_json(repo, "pr", "view", str(pr), "--json",
+                    "headRefName,headRefOid,isCrossRepository,files,state,baseRefName")
     if not info or info.get("state") != "OPEN" or info.get("baseRefName") != "main":
         print(f"merge-when-green: REFUSED PR #{pr} is not an open PR into main")
         return 2
+    if info.get("isCrossRepository"):
+        print(f"merge-when-green: REFUSED PR #{pr} is from a cross-repository fork")
+        return 2
     head = info["headRefName"]
+    head_oid = info.get("headRefOid", "")
     if not head.startswith("automation/"):
         print(f"merge-when-green: REFUSED head branch is not automation/*")
         return 2
     checks = _gh_json(repo, "pr", "checks", str(pr), "--json", "name,state,bucket") or []
     changed = [f["path"] for f in info.get("files", [])]
-    problems = merge_blockers(checks, review_verdicts(team / "reviews", pr), required_reviewers(changed))
+    problems = merge_blockers(checks, review_verdicts(team / "reviews", pr, head_oid),
+                              required_reviewers(changed))
     if problems:
         print(f"merge-when-green: WAIT {'; '.join(problems[:5])}")
         return 1
-    _git(repo, "fetch", "origin", "main", head)
-    if not merged_tree_gates(repo, head):
+    _git(repo, "fetch", "origin", head)
+    if not merged_tree_gates(repo, head_oid):
         return 1
     if dry_run:
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
         return 0
-    merged = subprocess.run(["gh", "pr", "merge", str(pr), "--squash", "--delete-branch"],
+    merged = subprocess.run(["gh", "pr", "merge", str(pr), "--squash", "--delete-branch",
+                             "--match-head-commit", head_oid],
                             cwd=repo, capture_output=True, text=True)
     if merged.returncode:
         print(f"merge-when-green: FAIL gh pr merge exited {merged.returncode}")
@@ -249,8 +294,11 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False) -> 
         print(f"merge-when-green: MERGED PR #{pr}, main CI green")
         return 0
     if result == "failure":
-        url = revert_by_pr(repo, pr, sha)
-        print(f"merge-when-green: REVERTING PR #{pr}, main CI red; revert PR {url}. Log an escape.")
+        try:
+            url = revert_by_pr(repo, pr, sha)
+            print(f"merge-when-green: REVERTING PR #{pr}, main CI red; revert PR {url}. Log an escape.")
+        except subprocess.CalledProcessError:
+            pass
         return 1
     print(f"merge-when-green: MERGED PR #{pr}, main CI not finished; check `gh run list --branch main`")
     return 3
@@ -271,6 +319,16 @@ def parse_worktrees(porcelain: str) -> list[dict]:
     return items
 
 
+def worktree_idle_time(path: Path, commit_time: float) -> float:
+    """Idle hours = newest of commit time and file mtimes in the worktree (skip .git)."""
+    if not path.is_dir():
+        return 999.0
+    file_mtimes = [p.stat().st_mtime for p in path.rglob("*")
+                   if p.is_file() and ".git" not in p.parts]
+    newest = max([commit_time] + file_mtimes, default=commit_time)
+    return (time.time() - newest) / 3600
+
+
 def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0) -> int:
     """Remove agent worktrees whose PR merged, that are clean and idle for an hour."""
     removed, kept = [], 0
@@ -281,9 +339,14 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0)
         if path.resolve() == main_tree or not branch:
             continue
         dirty = _git(path, "status", "--porcelain", check=False).strip() if path.is_dir() else ""
-        idle = (time.time() - team_kit._newest_mtime([path])) / 3600 if path.is_dir() else idle_hours
-        merged = _gh_json(repo, "pr", "list", "--state", "merged", "--head", branch, "--json", "number")
-        if dirty or idle < idle_hours or not merged:
+        commit_time = team_kit._branch_commit_time(repo, branch)
+        idle = worktree_idle_time(path, commit_time)
+        merged_prs = _gh_json(repo, "pr", "list", "--state", "merged", "--head", branch,
+                              "--json", "number,headRefOid") or []
+        # Only delete branch if its current oid matches the merged PR's headRefOid
+        branch_oid = _git(repo, "rev-parse", branch, check=False).strip() if branch else ""
+        safe_to_delete = any(pr.get("headRefOid") == branch_oid for pr in merged_prs) if merged_prs else False
+        if dirty or idle < idle_hours or not safe_to_delete:
             kept += 1
             continue
         if not dry_run:

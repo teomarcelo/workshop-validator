@@ -14,7 +14,7 @@ Task loop (docs/AGENT_TEAM.md, "Producer loop"):
 1. Write the brief from `briefs/TEMPLATE.md` into `~/.workshop-validator/team/briefs/<id>.md`. It is complete; the executor gets nothing else.
 2. Start a fresh executor (Sonnet, effort high, `isolation: worktree`) or the `feature` workflow, naming the brief by path and the branch `automation/<date>-<slug>`. Mark the step running: `team_kit step <id> running --branch <b>`.
 3. Push the branch, open a PR with the report in the body.
-4. Fresh reviewers write `~/.workshop-validator/team/reviews/pr-<N>-<role>.md` ending in `VERDICT: APPROVE|VETO` (`CLEAR|BLOCK` for safety-scanner). When a reviewer replies in chat instead (rule-auditor, safety-scanner), save its reply verbatim as that file with the verdict as the last line. Opus for security, privacy, compliance, auth or shared code.
+4. Fresh reviewers write `~/.workshop-validator/team/reviews/pr-<N>-<role>.md` starting with `HEAD: <sha>` (the PR's headRefOid) and ending in `VERDICT: APPROVE|VETO` (`CLEAR|BLOCK` for safety-scanner). When a reviewer replies in chat instead (rule-auditor, safety-scanner), save its reply verbatim as that file with `HEAD: <sha>` as the first line and the verdict as the last line. Opus for security, privacy, compliance, auth or shared code.
 5. Findings become a new brief for a new agent. Two failed rounds: escalate to Opus and log it.
 6. `team_gates merge-when-green <N>`: CI, verdicts, gates on the merged tree, squash merge, main CI, same-turn revert by PR when red. Never ask the owner to merge.
 7. Register row, ledger row (`team_kit ledger ...`), standup, `team_kit step <id> done`, `team_dashboard`, `team_gates worktree-cleanup`.
