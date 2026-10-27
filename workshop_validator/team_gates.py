@@ -2,6 +2,7 @@
 
     python -m workshop_validator.team_gates all [--base origin/main] [--private]
     python -m workshop_validator.team_gates em-dash|decision-rows|register|clock12
+    python -m workshop_validator.team_gates prove-tests <pr>   # new tests fail on base, per code file
     python -m workshop_validator.team_gates merge-when-green <pr> [--dry-run]
     python -m workshop_validator.team_gates worktree-cleanup [--dry-run]
 
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -307,12 +309,16 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
     if problems:
         print(f"merge-when-green: WAIT {'; '.join(problems[:5])}")
         return 1
-    # Fetch main too, so the merged-tree gates run against current main.
-    fetched = run(["git", "fetch", "origin", "main", head], repo)
+    # Fetch the base branch too, so the merged-tree gates run against current main.
+    base_name = info.get("baseRefName")
+    fetched = run(["git", "fetch", "origin", base_name, head], repo)
     if fetched.returncode:
-        print(f"merge-when-green: FAIL git fetch origin main {head} exited {fetched.returncode}")
+        print(f"merge-when-green: FAIL git fetch origin {base_name} {head} exited {fetched.returncode}")
         return 1
     if not merged_tree_gates(repo, head_oid, runner=runner):
+        return 1
+    # New or changed tests must fail on base code: base = merge-base(PR base branch, head).
+    if not prove_tests(repo, f"origin/{base_name}", head_oid, runner=runner):
         return 1
     if dry_run:
         print(f"merge-when-green: READY PR #{pr} (dry run, not merged)")
@@ -404,6 +410,322 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
     return 0
 
 
+# ---- prove-tests -----------------------------------------------------------
+#
+# prove-tests checks that the new or changed tests of a branch actually test its
+# code change. Base is merge-base(<base ref>, head). In a temp worktree at head:
+#   1. every new or changed test must be ok on head;
+#   2. for each changed workshop_validator/*.py file, that ONE file is swapped to
+#      its base version (removed when new in head, restored when deleted) while
+#      the others stay at head, and at least one new test must fail or error.
+# Statuses come from a tiny runner module that writes per-test JSON. Skips,
+# expected failures, unexpected successes and missing results are UNPROVEN.
+# The runner starts with `python -I`, imports json and unittest first, then
+# appends the worktree to the END of sys.path. A PR that adds or changes a root
+# file named like a stdlib module is UNPROVEN. Result keys must equal the ids.
+# SKIP only when no code file changed; code without a new or changed test is UNPROVEN.
+
+_HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+\d+(?:,\d+)? @@ ?(.*)$")
+_CLASS = re.compile(r"^class\s+([A-Za-z_]\w*)")
+_TEST_DEF = re.compile(r"^(\s*)(?:async\s+)?def\s+(test\w*)\s*\(")
+PROOF_STATUSES = ("fail", "error")
+RUNNER_NAME = "_prove_tests_runner.py"
+STDLIB_SHADOW_NAMES = frozenset({"json.py", "unittest.py", "os.py", "sys.py", "types.py",
+                                 "re.py", "io.py", "pathlib.py", "subprocess.py"})
+RUNNER_SOURCE = '''"""prove-tests runner: run each test id, write {id: status} JSON. Exit 0 when written.
+
+Started with `python -I`: stdlib json and unittest load before the worktree joins
+the END of sys.path, so a root file cannot shadow them.
+"""
+import json
+import unittest
+import os
+import sys
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.append(HERE)
+os.environ["RUN_BROWSER_SMOKE"] = "1"
+os.environ["PYTHONDONTWRITEBYTECODE"] = "1"
+os.environ["PYTHONPATH"] = HERE
+
+
+class JsonResult(unittest.TestResult):
+    def __init__(self):
+        super().__init__()
+        self.status = {}
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self.status.setdefault(test.id(), "ok")
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self.status[test.id()] = "fail"
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self.status[test.id()] = "error"
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self.status[test.id()] = "skip"
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self.status[test.id()] = "expectedFailure"
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self.status[test.id()] = "unexpectedSuccess"
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            failed = issubclass(err[0], test.failureException)
+            self.status[test.id()] = "fail" if failed else "error"
+
+
+def main(argv):
+    out, ids = argv[1], argv[2:]
+    loader = unittest.TestLoader()
+    statuses = {}
+    for tid in ids:
+        result = JsonResult()
+        try:
+            loader.loadTestsFromName(tid).run(result)
+        except Exception:
+            statuses[tid] = "error"
+            continue
+        if tid in result.status:
+            statuses[tid] = result.status[tid]
+        elif result.errors or result.failures:
+            statuses[tid] = "error"  # import error or class/module fixture error
+        else:
+            statuses[tid] = "missing"
+    package = sys.modules.get("workshop_validator")
+    where = os.path.realpath(getattr(package, "__file__", None) or HERE)
+    if not where.startswith(HERE + os.sep) and where != HERE:
+        print(f"prove-tests runner: workshop_validator imported from {where}, not the worktree")
+        return 3
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(statuses, fh)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
+'''
+CHROMIUM_CHECK = ("from playwright.sync_api import sync_playwright\n"
+                  "p = sync_playwright().start()\n"
+                  "try:\n"
+                  "    b = p.chromium.launch(headless=True)\n"
+                  "    b.close()\n"
+                  "finally:\n"
+                  "    p.stop()\n")
+
+
+def parse_new_test_ids(diff: str) -> list[str]:
+    """Ids (tests.module.Class.test_x) of test methods a diff adds or changes under tests/.
+
+    The class comes from the class line in the hunk, else from the `@@ ... @@ class X`
+    hunk header. A `def test_` line is a test even when it also contains "class ".
+    A test is changed only by an added `def test_` line or an added line inside its
+    body. Removed lines never mark a test, so a removal-only diff yields no ids.
+    """
+    ids: list[str] = []
+    module = cls = method = None
+    method_indent, changed, in_header, in_string = 0, False, False, False
+
+    def flush():
+        if module and cls and method and changed:
+            tid = f"{module}.{cls}.{method}"
+            if tid not in ids:
+                ids.append(tid)
+
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            flush()
+            module = cls = method = None
+            in_header, in_string = True, False
+            continue
+        if in_header and line.startswith("+++ "):
+            path = line[6:] if line.startswith("+++ b/") else ""
+            module = (path[:-3].replace("/", ".")
+                      if path.startswith("tests/") and path.endswith(".py") else None)
+            continue
+        hunk = _HUNK.match(line)
+        if hunk:
+            flush()
+            in_header, in_string, method, changed = False, False, None, False
+            found = _CLASS.match(hunk.group(1))
+            cls = found.group(1) if found else None
+            continue
+        if in_header or not module or not line or line[0] not in " +-":
+            continue
+        tag, text = line[0], line[1:]
+        if tag == "-":
+            continue  # removed lines are not in head; they mark no test
+        quotes = text.count('"""') + text.count("'''")
+        if in_string:
+            if tag == "+" and method:
+                changed = True
+            in_string = quotes % 2 == 0
+            continue
+        stripped = text.strip()
+        indent = len(text) - len(text.lstrip())
+        if stripped and not stripped.startswith("#"):
+            test_def = _TEST_DEF.match(text)
+            if test_def:
+                flush()
+                method, method_indent, changed = test_def.group(2), indent, tag == "+"
+                if indent == 0:
+                    cls = method = None
+            elif method and indent > method_indent:
+                changed = changed or tag == "+"
+            else:
+                flush()
+                method = None
+                if indent == 0:
+                    found = _CLASS.match(text)
+                    cls = found.group(1) if found else None
+        elif stripped and method and tag == "+":
+            changed = True
+        if quotes % 2 == 1:
+            in_string = True
+    flush()
+    return ids
+
+
+def _run_test_ids(run, python: Path, tree: Path, out_json: Path, ids: list[str]):
+    """({id: status}, None) from the runner module, or (None, reason)."""
+    if out_json.exists():
+        out_json.unlink()
+    result = run([str(python), "-I", str(tree / RUNNER_NAME), str(out_json), *ids], tree)
+    if result.returncode:
+        return None, f"test runner exited {result.returncode}"
+    try:
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None, "test runner wrote no results"
+    if not isinstance(data, dict) or set(data) != set(ids):
+        return None, "test runner results do not match the requested tests"
+    return {tid: str(data[tid]) for tid in ids}, None
+
+
+def stdlib_shadow_files(name_only: str) -> list[str]:
+    """Root-level paths from `git diff --name-only` named like a guarded stdlib module."""
+    return [f for f in name_only.splitlines()
+            if f and "/" not in f and f.casefold() in STDLIB_SHADOW_NAMES]
+
+
+def _counts(statuses: dict[str, str]) -> str:
+    tally: dict[str, int] = {}
+    for status in statuses.values():
+        tally[status] = tally.get(status, 0) + 1
+    return ", ".join(f"{n} {s}" for s, n in sorted(tally.items()))
+
+
+def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
+    """Prove the new or changed tests fail on base code, one changed code file at a time.
+
+    Prints one line: PASS, FAIL (new tests fail on head), UNPROVEN (no proof, named
+    per file) or SKIP (no workshop_validator/*.py file changed).
+    """
+    run = runner or _default_runner
+    merge_base = run(["git", "merge-base", base_ref, head_oid], Path(repo))
+    base = (merge_base.stdout or "").strip()
+    if merge_base.returncode or not base:
+        print(f"prove-tests: UNPROVEN no merge-base of {base_ref} and {head_oid[:10]}")
+        return False
+
+    shadows = stdlib_shadow_files(_git(repo, "diff", "--name-only", "--no-renames",
+                                       "--diff-filter=d", base, head_oid, runner=runner))
+    if shadows:
+        print("prove-tests: UNPROVEN root file named like a stdlib module added or changed: "
+              + ", ".join(shadows))
+        return False
+
+    code_out = _git(repo, "diff", "--name-only", "--no-renames", base, head_oid, "--",
+                    "workshop_validator/", runner=runner)
+    code_files = [f for f in code_out.splitlines() if f.endswith(".py")]
+    if not code_files:
+        print("prove-tests: SKIP no code change")
+        return True
+
+    test_ids = parse_new_test_ids(_git(repo, "diff", "--no-renames", base, head_oid, "--",
+                                       "tests/", runner=runner))
+    if not test_ids:
+        print(f"prove-tests: UNPROVEN code changed ({', '.join(code_files)}) "
+              "but no new or changed test found")
+        return False
+
+    python = repo / ".venv" / "bin" / "python"
+    if run([str(python), "-c", CHROMIUM_CHECK], Path(repo)).returncode:
+        print("prove-tests: UNPROVEN headless Chromium did not launch from .venv")
+        return False
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tree = Path(tmp) / "prove"
+        out_json = Path(tmp) / "results.json"
+        try:
+            try:
+                _git(repo, "worktree", "add", "--detach", str(tree), head_oid, runner=runner)
+            except subprocess.CalledProcessError as exc:
+                print(f"prove-tests: UNPROVEN git worktree add exited {exc.returncode}")
+                return False
+            tree.mkdir(parents=True, exist_ok=True)
+            (tree / RUNNER_NAME).write_text(RUNNER_SOURCE, encoding="utf-8")
+
+            head, reason = _run_test_ids(run, python, tree, out_json, test_ids)
+            if reason:
+                print(f"prove-tests: UNPROVEN on head: {reason}")
+                return False
+            not_ok = {t: s for t, s in head.items() if s != "ok"}
+            if not_ok:
+                verdict = "FAIL" if all(s in PROOF_STATUSES for s in not_ok.values()) else "UNPROVEN"
+                listed = ", ".join(f"{t} ({s})" for t, s in list(not_ok.items())[:3])
+                print(f"prove-tests: {verdict} new tests not ok on head: {listed}")
+                return False
+
+            proved, unproven = [], []
+            for code_file in code_files:
+                path = tree / code_file
+                head_bytes = path.read_bytes() if path.is_file() else None
+                shown = run(["git", "show", f"{base}:{code_file}"], tree)
+                try:
+                    if shown.returncode == 0:  # exists on base, even when empty
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        path.write_text(shown.stdout or "", encoding="utf-8")
+                    elif path.exists():  # new in head
+                        path.unlink()
+                    statuses, reason = _run_test_ids(run, python, tree, out_json, test_ids)
+                finally:
+                    if head_bytes is None:
+                        if path.exists():
+                            path.unlink()
+                    else:
+                        path.write_bytes(head_bytes)
+                if reason:
+                    unproven.append(f"{code_file} ({reason})")
+                    continue
+                failed = [t for t, s in statuses.items() if s in PROOF_STATUSES]
+                if failed:
+                    proved.append(f"{code_file} {len(failed)}/{len(test_ids)} fail on base")
+                else:
+                    unproven.append(f"{code_file} 0 fail on base ({_counts(statuses)})")
+
+            if unproven:
+                print(f"prove-tests: UNPROVEN per file: {'; '.join(unproven + proved)}")
+                return False
+            print(f"prove-tests: PASS {len(test_ids)} new or changed test(s) ok on head; "
+                  f"per file: {'; '.join(proved)}")
+            return True
+        finally:
+            _git(repo, "worktree", "remove", "--force", str(tree), check=False, runner=runner)
+            _git(repo, "worktree", "prune", check=False, runner=runner)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Producer-team merge gates.")
     parser.add_argument("--repo", default=".")
@@ -416,6 +738,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--private", action="store_true", help="Also run the private-data gates")
     sub.add_parser("register")
     sub.add_parser("clock12")
+    pt = sub.add_parser("prove-tests")
+    pt.add_argument("pr", type=int)
     mwg = sub.add_parser("merge-when-green")
     mwg.add_argument("pr", type=int)
     mwg.add_argument("--dry-run", action="store_true")
@@ -433,6 +757,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if gate_register(team) else 1
     if args.cmd == "clock12":
         return 0 if gate_clock12(team) else 1
+    if args.cmd == "prove-tests":
+        info = _gh_json(repo, "pr", "view", str(args.pr), "--json", "headRefOid,baseRefName") or {}
+        head_oid = str(info.get("headRefOid") or "").strip()
+        base_name = str(info.get("baseRefName") or "").strip()
+        if not head_oid or not base_name:
+            print(f"prove-tests: UNPROVEN cannot read head and base of PR #{args.pr}")
+            return 1
+        return 0 if prove_tests(repo, f"origin/{base_name}", head_oid) else 1
     if args.cmd == "merge-when-green":
         return merge_when_green(repo, team, args.pr, args.dry_run)
     if args.cmd == "worktree-cleanup":

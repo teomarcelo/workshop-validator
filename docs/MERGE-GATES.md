@@ -11,6 +11,7 @@ summary line, plus a fresh reviewer verdict where judgment is needed.
 | Code | unit tests, `compileall` | rule-auditor when `workshop_validator/`, `.claude/`, `.cursor/` or CLAUDE.md change | CI |
 | Browser | synthetic Chromium smoke | | CI |
 | Merged tree | tests, `public_safety`, `compileall` on origin/main merged with the PR head | | `merge-when-green` |
+| New tests | `team_gates prove-tests` (base is the merge-base with the PR base branch; new or changed tests pass on head; each changed `workshop_validator/*.py` file, swapped to base alone, makes at least one of them fail or error; skips and no tests are UNPROVEN; SKIP only with no code change) | | `merge-when-green` |
 | Report render | | visual-qa (score 8 or more), accessibility-auditor, instructor-panel for big changes | brief |
 | Claims | | evidence-auditor | brief |
 | Private data | | privacy-reviewer (Opus) | brief |
@@ -18,6 +19,8 @@ summary line, plus a fresh reviewer verdict where judgment is needed.
 | Names and brands | | compliance-reviewer (Opus) | brief |
 | Private team data | `team_gates register` (append-only snapshot), `team_gates clock12` (dashboard and standups) | | `team_gates all --private` |
 | Release to the public | owner's yes | | owner |
+
+prove-tests guards against weak or mistaken tests, not hostile ones; review still reads test code that writes files, calls `os._exit` or patches `sys.modules`.
 
 ## Review verdicts
 Reviewers reply in chat. The producer saves each reply with
