@@ -586,10 +586,12 @@ class ExactLocatorTests(unittest.TestCase):
         step = self._make_step()
         result = run_personal(state, step)
 
-        self.assertEqual(result.status, "UI_MISMATCH",
-                        "Should be UI_MISMATCH when multiple Settings exist")
-        self.assertIn("Settings did not open", result.note,
-                     "Should report Settings did not open")
+        self.assertEqual(result.status, "NEEDS_REVIEW",
+                        "Should be NEEDS_REVIEW when multiple Settings exist")
+        self.assertTrue(result.freeze,
+                       "Should freeze when ambiguous")
+        self.assertIn("More than one Settings control", result.note,
+                     "Should report multiple Settings controls")
         page.close()
 
     @patch('workshop_validator.guide_walk.return_home')

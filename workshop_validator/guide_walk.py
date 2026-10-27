@@ -575,15 +575,21 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
 
     # Try role-based click first
     if click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings"):
-        pass  # Success via role
+        # Role-based click succeeded, continue to personal_root check
+        pass
     else:
         # Fallback: exact text click within profile panel
         clicked = False
+        ambiguous_count = 0
         for root in _roots(state.page):
             try:
                 loc = root.get_by_text("Settings", exact=True)
-                if _count(loc) != 1:
-                    continue  # Ambiguous or missing
+                count = _count(loc)
+                if count > 1:
+                    ambiguous_count = count
+                    break  # Multiple visible Settings elements
+                if count != 1:
+                    continue  # Missing
                 target = _visible_match(loc)
                 if target is None:
                     continue
@@ -592,6 +598,14 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
                 break
             except Exception:
                 continue
+
+        if ambiguous_count > 1:
+            return CheckResult(
+                "NEEDS_REVIEW",
+                "More than one Settings control is in the profile menu; the step needs review.",
+                (),
+                freeze=True,
+            )
 
         if not clicked:
             # Diagnostic: what was found?
