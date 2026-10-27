@@ -25,7 +25,7 @@ from .team_state import _write_private
 
 EM_DASH = "\u2014"
 TEXT_SUFFIXES = (".md", ".mdc")
-ROW_PATTERN = re.compile(r"^\|\s*(W-\d{3,})\s*\|")
+ROW_PATTERN = re.compile(r"^\|\s*(" + team_kit.DECISION_ID_RE + r")\s*\|")
 CLOCK24 = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b(?!\s*(?:AM|PM|am|pm))")
 VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
 PASSING = {"APPROVE", "CLEAR"}

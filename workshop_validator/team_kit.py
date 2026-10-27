@@ -20,6 +20,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 
 from .team_state import _write_private, is_open, load as load_job
 
@@ -380,17 +381,42 @@ def _read_time_iso(value) -> datetime | None:
 
 # ---- decide register row ---------------------------------------------------
 
-VALID_DECISION_STATUSES = ("NOTED", "RESOLVED", "REVISIT", "DEFERRED")
+VALID_DECISION_STATUSES = ("RECOMMENDED", "NOTED", "OPEN", "RESOLVED", "SUPERSEDED")
+# Register row id: ASCII digits only, at least three. team_gates.ROW_PATTERN reuses it.
+DECISION_ID_RE = r"W-[0-9]{3,}"
+DECISION_ID_PATTERN = re.compile(DECISION_ID_RE)
+# Cc control, Cf format (U+200B, U+202E), Zl line sep (U+2028), Zp para sep (U+2029).
+_REFUSED_CATEGORIES = ("Cc", "Cf", "Zl", "Zp")
+
+
+def _check_register_cell(value: str, name: str) -> None:
+    """Refuse a value that could break or disguise one DECISIONS.md cell."""
+    if any(unicodedata.category(c) in _REFUSED_CATEGORIES for c in value):
+        raise ValueError(f"{name} contains control, format or line-separator characters")
+    if len(value.splitlines()) > 1:
+        raise ValueError(f"{name} spans more than one line")
+    if "|" in value:
+        raise ValueError(f"{name} contains pipe character")
 
 
 def append_decision(team: Path, decision_id: str, decision_status: str, text: str, repo: Path = None, now=None) -> Path:
     """Append one decision row to DECISIONS.md and render dashboard."""
-    if not decision_id or not decision_id.startswith("W-"):
-        raise ValueError("decision_id must start with 'W-'")
+    # Validate decision_id format (fullmatch: no trailing newline, ASCII digits only)
+    if not decision_id or not DECISION_ID_PATTERN.fullmatch(decision_id):
+        raise ValueError("decision_id must match W-[0-9]{3,}")
+
+    for value, name in [(decision_id, "--id"), (text or "", "--text")]:
+        _check_register_cell(value, name)
+
+    # Check for whitespace-only text
+    if not text or not text.strip():
+        raise ValueError("text cannot be empty or whitespace-only")
+
+    # Validate status
+    if decision_status == "DECIDED":
+        raise ValueError("DECIDED status requires owner rows via producer hand edit")
     if decision_status not in VALID_DECISION_STATUSES:
         raise ValueError(f"status must be one of {VALID_DECISION_STATUSES}")
-    if not text or not text.strip():
-        raise ValueError("text cannot be empty")
 
     register = team / "DECISIONS.md"
     existing = register.read_text(encoding="utf-8") if register.is_file() else ""
@@ -449,7 +475,7 @@ def main(argv: list[str] | None = None) -> int:
     rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
     dec = sub.add_parser("decide", help="Append decision row and render dashboard")
     dec.add_argument("--id", required=True, help="Decision ID (e.g., W-001)")
-    dec.add_argument("--status", required=True, help="Decision status (NOTED, RESOLVED, REVISIT, DEFERRED)")
+    dec.add_argument("--status", required=True, help="Decision status (RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED)")
     dec.add_argument("--text", required=True, help="Decision text")
     args = parser.parse_args(argv)
 
