@@ -438,12 +438,15 @@ class MergedTreeGatesTests(unittest.TestCase):
             runner = FakeRunner()
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertTrue(team_gates.merged_tree_gates(repo, OID, runner=runner))
-            # Find git commands with merge (may include -c flags for noreply email)
-            merges = [c for c, _ in runner.calls if "merge" in c and "--no-ff" in c]
-            self.assertEqual(len(merges), 1)
-            self.assertIn("--no-edit", merges[0])
-            self.assertIn("--no-ff", merges[0])
-            self.assertIn(OID, merges[0])
+            # Find git merge command (may include -c flags for noreply email)
+            merge_calls = [(c, cwd) for c, cwd in runner.calls if "merge" in c and "--no-ff" in c]
+            self.assertEqual(len(merge_calls), 1)
+            merge_cmd, merge_cwd = merge_calls[0]
+            self.assertIn("--no-edit", merge_cmd)
+            self.assertIn("--no-ff", merge_cmd)
+            self.assertIn(OID, merge_cmd)
+            # Merge must run in temp worktree, not main checkout
+            self.assertNotEqual(merge_cwd, repo)
             self.assertEqual(runner.find("git", "worktree", "add")[0][0][-1], "origin/main")
 
 
