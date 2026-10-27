@@ -237,12 +237,12 @@ class AtomicDecideWriteTests(unittest.TestCase):
             self.assertTrue(current == original_content or "W-002" in current)
 
 
-# Security re-review: Synthetic merge commit and empty email detection
-class SyntheticMergeCommitTests(unittest.TestCase):
-    """Security re-review: Skip GitHub's synthetic merge commit in PR checks."""
+# Security re-review: Real merge commits and PR_HEAD validation
+class RealMergeCommitTests(unittest.TestCase):
+    """Security re-review: Real merge commits with bad emails must fail."""
 
-    def test_synthetic_merge_commit_skipped(self):
-        """GitHub's synthetic merge commit (2-parent merge of origin/main) should be skipped."""
+    def test_real_merge_commit_with_bad_email_fails(self):
+        """Real merge commit on a branch with non-noreply email should FAIL the check."""
         with tempfile.TemporaryDirectory() as tmp:
             repo = Path(tmp)
             subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
@@ -253,26 +253,29 @@ class SyntheticMergeCommitTests(unittest.TestCase):
             (repo / "base.txt").write_text("base")
             subprocess.run(["git", "add", "base.txt"], cwd=repo, check=True, capture_output=True)
             subprocess.run(["git", "commit", "-m", "base"], cwd=repo, check=True, capture_output=True)
-            base_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
             subprocess.run(["git", "branch", "origin_main"], cwd=repo, check=True, capture_output=True)
 
-            # Create PR branch with valid commits
-            subprocess.run(["git", "checkout", "-b", "pr-branch"], cwd=repo, check=True, capture_output=True)
-            (repo / "pr.txt").write_text("pr")
-            subprocess.run(["git", "add", "pr.txt"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "commit", "-m", "pr commit"], cwd=repo, check=True, capture_output=True)
-            pr_sha = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True, text=True).stdout.strip()
+            # Create feature branch from origin_main
+            subprocess.run(["git", "checkout", "-b", "feature"], cwd=repo, check=True, capture_output=True)
+            (repo / "feature.txt").write_text("feature")
+            subprocess.run(["git", "add", "feature.txt"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "commit", "-m", "feature commit"], cwd=repo, check=True, capture_output=True)
 
-            # Create synthetic merge commit (GitHub does this on pull_request events)
-            # Use a non-noreply email for the merge commit author
+            # Create another branch from origin_main
             subprocess.run(["git", "checkout", "origin_main"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "config", "user.email", "github-actions@github.com"], cwd=repo, check=True, capture_output=True)
-            subprocess.run(["git", "merge", "--no-ff", "pr-branch", "-m", "Merge PR"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "checkout", "-b", "main-branch"], cwd=repo, check=True, capture_output=True)
 
-            # Without fix: would fail because synthetic merge has non-noreply email
-            # With fix: synthetic merge is skipped via HEAD^2
+            # Merge feature into main-branch with a non-noreply email (real merge, not synthetic)
+            subprocess.run(["git", "config", "user.email", "bad@example.com"], cwd=repo, check=True, capture_output=True)
+            subprocess.run(["git", "merge", "--no-ff", "feature", "-m", "Merge feature"], cwd=repo, check=True, capture_output=True)
+
+            # This is a REAL merge commit on a branch (not GitHub's synthetic merge)
+            # It should FAIL because the merge commit has a non-noreply email
+            # On 3dcb21c: wrongly passes (HEAD^2 skip catches it)
+            # After fix: correctly fails
             ok, msg = check_commit_emails(repo, "origin_main", "HEAD")
-            self.assertTrue(ok, f"Should skip synthetic merge commit: {msg}")
+            self.assertFalse(ok, "Real merge commit with bad email should FAIL")
+            self.assertIn("non-github noreply email", msg.lower())
 
     def test_pr_head_env_used_when_set(self):
         """When PR_HEAD env is set, use it instead of HEAD."""
@@ -297,6 +300,20 @@ class SyntheticMergeCommitTests(unittest.TestCase):
             # Pass PR_HEAD directly to check_commit_emails
             ok, msg = check_commit_emails(repo, "origin_main", pr_sha)
             self.assertTrue(ok)
+
+    def test_invalid_pr_head_fails_closed(self):
+        """Invalid PR_HEAD value should fail closed with validation error."""
+        from workshop_validator.public_safety import OID_PATTERN
+
+        # Valid OID (40 hex chars)
+        self.assertTrue(OID_PATTERN.match("a" * 40))
+
+        # Invalid values
+        self.assertFalse(OID_PATTERN.match("not-a-valid-oid"))
+        self.assertFalse(OID_PATTERN.match("a" * 39))  # Too short
+        self.assertFalse(OID_PATTERN.match("a" * 41))  # Too long
+        self.assertFalse(OID_PATTERN.match("g" * 40))  # Invalid hex char
+        self.assertFalse(OID_PATTERN.match(""))  # Empty
 
 
 class EmptyEmailDetectionTests(unittest.TestCase):

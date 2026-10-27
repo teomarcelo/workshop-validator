@@ -35,6 +35,7 @@ HOME_PATH_PATTERN = re.compile(  # public-safety: pattern
     r"(?:/Users/[^/\s]+/|/home/[^/\s]+/|C:\\Users\\)", re.IGNORECASE  # public-safety: pattern
 )  # public-safety: pattern
 GUIDE_NAME_PATTERN = re.compile(r"[A-Z]{3}\d{3}_FULL_")  # public-safety: pattern
+OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 
 
 def inspect_tracked(root: Path, names: list[str]) -> tuple[str, ...]:
@@ -140,10 +141,7 @@ def _count_bad_emails(git_log_output: str) -> int:
 
 
 def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str = "HEAD") -> tuple[bool, str]:
-    """Check that all commits between base_ref and head_ref have allowed emails.
-
-    Skips head_ref if it's a 2-parent merge of base_ref (GitHub's synthetic merge commit).
-    """
+    """Check that all commits between base_ref and head_ref have allowed emails."""
     try:
         # Check if base ref exists
         check_base = subprocess.run(
@@ -152,27 +150,6 @@ def check_commit_emails(root: Path, base_ref: str = "origin/main", head_ref: str
         )
         if check_base.returncode != 0:
             return False, f"base ref {base_ref} not found; fetch it first"
-
-        # Check if head_ref is a 2-parent merge of base_ref (GitHub synthetic merge)
-        # If so, use HEAD^2 (the PR's actual last commit)
-        parents = subprocess.run(
-            ["git", "rev-parse", "--verify", f"{head_ref}^2"],
-            cwd=root, capture_output=True, text=True
-        )
-        if parents.returncode == 0:
-            # HEAD has a second parent, check if it's a merge with base_ref
-            merge_base = subprocess.run(
-                ["git", "merge-base", base_ref, head_ref],
-                cwd=root, capture_output=True, text=True
-            )
-            first_parent = subprocess.run(
-                ["git", "rev-parse", f"{head_ref}^1"],
-                cwd=root, capture_output=True, text=True
-            )
-            # If first parent equals merge-base, this is a synthetic merge of base_ref
-            if (merge_base.returncode == 0 and first_parent.returncode == 0 and
-                merge_base.stdout.strip() == first_parent.stdout.strip()):
-                head_ref = f"{head_ref}^2"
 
         # Get commit range with NUL-separated author and committer emails
         result = subprocess.run(
@@ -242,10 +219,17 @@ def main(argv: list[str] | None = None) -> int:
 
         # Check commit emails
         if args.check_emails:
-            # Use PR_HEAD from environment (set in CI on pull_request events) to avoid
-            # checking GitHub's synthetic merge commit
+            # Use PR_HEAD from environment (set in CI on pull_request events) to check
+            # the PR's real commits instead of GitHub's synthetic merge commit
             pr_head = os.environ.get("PR_HEAD", "").strip()
-            head_ref = pr_head if pr_head else "HEAD"
+            if pr_head:
+                # Validate PR_HEAD is a valid 40-hex git oid
+                if not OID_PATTERN.match(pr_head):
+                    print("Public safety gate: PR_HEAD must be 40 hex characters", file=sys.stderr)
+                    return 1
+                head_ref = pr_head
+            else:
+                head_ref = "HEAD"
             email_ok, email_msg = check_commit_emails(root, head_ref=head_ref)
             if not email_ok:
                 print(f"Public safety gate: {email_msg}", file=sys.stderr)
