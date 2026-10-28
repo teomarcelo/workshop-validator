@@ -48,6 +48,10 @@ _LOADING_TEXT = re.compile(r"\bLoading\b|Loading assistant|Nothing here yet", re
 class StillLoading(Exception):
     """The expected control was still behind a loading signal at the time limit."""
 
+    def __init__(self, cap_s: float | None = None):
+        super().__init__()
+        self.cap_s = cap_s
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -340,6 +344,9 @@ def settle(
 ) -> None:
     """Poll until ready. Still loading at the limit is not a mismatch."""
     start = state.clock()
+    # A limit bounds the not-loading mismatch wait; a page that keeps loading is cut at
+    # min(timeout_s, step time left) when a limit is given, or timeout_s alone when no limit.
+    loading_cap = state.timeout_s if limit is None else min(state.timeout_s, _time_left(state))
     polls = 0
     while True:
         polls += 1
@@ -354,13 +361,13 @@ def settle(
             loading_now = False
         elapsed = state.clock() - start
         cap = state.timeout_s if limit is None else limit
-        if loading_now and elapsed >= state.timeout_s and polls >= 2:
-            raise StillLoading()
+        if loading_now and elapsed >= loading_cap and polls >= 2:
+            raise StillLoading(loading_cap)
         if not loading_now and elapsed >= cap and polls >= 2:
             raise BrowserActionError("The guide target did not match the observed page.")
         if polls > 2000:
             if loading_now:
-                raise StillLoading()
+                raise StillLoading(loading_cap)
             raise BrowserActionError("The guide target did not match the observed page.")
         _sleep(state, state.interval_s)
 
@@ -375,8 +382,18 @@ def require(
 ) -> CheckResult | None:
     try:
         settle(state, ready, loading, limit)
-    except StillLoading:
-        return CheckResult("NOT_RUN", LOADING_NOTE, ())
+    except StillLoading as e:
+        cap_s = e.cap_s if e.cap_s is not None else state.timeout_s
+        if cap_s < state.timeout_s:
+            note = "The page was still loading when this step ran out of time, so this step was not marked failed."
+        else:
+            rounded = round(cap_s)
+            plural = "s" if rounded != 1 else ""
+            note = (
+                f"The page was still loading after about {rounded} second{plural}, "
+                "so this step was not marked failed."
+            )
+        return CheckResult("NOT_RUN", note, ())
     except BrowserActionError:
         return CheckResult("UI_MISMATCH", failure_note, ())
     return None
@@ -3554,18 +3571,135 @@ def _api_name_ready(page) -> bool:
     url = str(getattr(page, "url", "") or "").lower()
     if "/setup/flows" in url:
         return False
-    if labeled(page, "API Name") is not None:
-        return True
+    # Only a visible API Name counts; Flow Builder can keep a hidden copy in the DOM.
+    for root in _roots(page):
+        loc = _labeled(root, "API Name")
+        if loc is not None and _visible(loc):
+            return True
     return present(page, "textbox", "API Name")
 
 
-def _choose_resource_variable(page) -> None:
-    """API Name stays hidden until the resource type is Variable."""
+_RESOURCE_TYPES = frozenset({
+    "Variable", "Constant", "Formula", "Text Template", "Stage", "Choice",
+    "Record Choice Set", "Picklist Choice Set", "Collection Choice Set",
+})
+_RESOURCE_PICK_WAIT_S = 10.0
+
+
+def _plain(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _resource_type_box(page):
+    """The visible Resource Type control: (frame, role, element), or (None, "", None)."""
+    for root in _roots(page):
+        for role in ("combobox", "button"):
+            loc = _by_role(root, role, "Resource Type", exact=True)
+            target = None if loc is None else _visible_match(loc)
+            if target is not None:
+                return root, role, target
+    return None, "", None
+
+
+def _read_attr(target, name: str) -> str:
+    try:
+        return _plain(target.get_attribute(name, timeout=1000))
+    except Exception:
+        return ""
+
+
+def _shown_value(target) -> str:
+    """The value the Resource Type control shows: an input's value, else its own text."""
+    for read in ("input_value", "inner_text"):
+        fn = getattr(target, read, None)
+        try:
+            text = _plain(fn(timeout=1000)) if callable(fn) else ""
+        except Exception:
+            text = ""
+        if text:
+            return text
+    return ""
+
+
+def _resource_is_variable(page) -> bool:
     if _api_name_ready(page):
-        return
+        return True
+    _root, _role, box = _resource_type_box(page)
+    return box is not None and _shown_value(box) == "Variable"
+
+
+def _highlighted_option(root, box) -> str:
+    """Visible text of the one option the combobox highlights (aria-activedescendant)."""
+    active = _read_attr(box, "aria-activedescendant")
+    if not active:
+        return ""
+    quoted = active.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        loc = root.locator(f'[id="{quoted}"]')
+        if _count(loc) != 1:
+            return ""
+        return _plain(_first(loc).inner_text(timeout=1000))
+    except Exception:
+        return ""
+
+
+def _resource_type_diagnostic(page) -> str:
+    """Safe facts only: roles, states, counts and allow-listed resource type labels."""
+    root, role, box = _resource_type_box(page)
+    expanded = _read_attr(box, "aria-expanded") if box is not None else ""
+    expanded = expanded if expanded in ("true", "false") else "none"
+    scope = root if root is not None else page
+    named = _by_role(scope, "option", "Variable", exact=True)
+    has = named is not None and _count(named) > 0
+    shown = has and _visible(named)
+    labels = []
+    total = 0
+    try:
+        options = scope.get_by_role("option")
+        total = _count(options)
+        for index in range(min(total, 6)):
+            try:
+                text = _plain(options.nth(index).inner_text(timeout=1000))
+            except Exception:
+                text = ""
+            labels.append(text if text in _RESOURCE_TYPES else "other")
+    except Exception:
+        pass
+    return (
+        f"Diagnostic: control role {role or 'none'}; aria-expanded {expanded}; "
+        f"option Variable present {'yes' if has else 'no'}, visible {'yes' if shown else 'no'}; "
+        f"{total} options; labels: {', '.join(labels) or 'none'}."
+    )
+
+
+def _choose_resource_variable(state: WalkState) -> CheckResult | None:
+    """API Name stays hidden until the resource type is Variable. The choice is read from the page."""
+    page = state.page
+    if _api_name_ready(page):
+        return None
     if not present(page, "option", "Variable"):
         click_role(page, "combobox", "Resource Type") or click_role(page, "button", "Resource Type")
     click_role(page, "option", "Variable")
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
+    note = "Resource Type could not be set to Variable."
+    missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
+    if missed is None or missed.status != "UI_MISMATCH":
+        return missed
+    root, _role, box = _resource_type_box(page)
+    if (
+        box is not None
+        and _read_attr(box, "aria-expanded") == "true"
+        and _highlighted_option(root, box) == "Variable"
+    ):
+        try:
+            box.press("Enter", timeout=3000)
+        except Exception:
+            pass
+        limit = min(limit, _time_left(state))
+        missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
+        if missed is None or missed.status != "UI_MISMATCH":
+            return missed
+    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
 
 
 def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
@@ -3587,7 +3721,9 @@ def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
         return _stop_here(missed)
     if not (click_role(state.page, "button", "New Resource") or click_role(state.page, "link", "New Resource")):
         return CheckResult("UI_MISMATCH", "New Resource did not open.", (), freeze=True)
-    _choose_resource_variable(state.page)
+    unset = _choose_resource_variable(state)
+    if unset is not None:
+        return _stop_here(unset)
     missed = require(
         state,
         lambda: _api_name_ready(state.page),

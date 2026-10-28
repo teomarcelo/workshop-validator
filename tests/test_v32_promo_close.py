@@ -318,7 +318,9 @@ class PromoScopeTests(unittest.TestCase):
 
         page.on_click = click
         result = guide_walk.run_screen_flow(state_for(page), flow_step())
-        self.assertEqual((result.status, result.note), ("NOT_RUN", guide_walk.LOADING_NOTE))
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertIn("still loading", result.note)
+        self.assertIn("not marked failed", result.note)
 
     def test_wait_after_a_close_is_cut_to_the_steps_time_left(self):
         page = flows_list(promo_page(FLOWS_URL))
