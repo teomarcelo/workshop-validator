@@ -623,5 +623,135 @@ class _HiddenTarget(_Target):
         return _SelectedTab(self.reads)
 
 
+
+class _DetachingStates(dict):
+    """aria states that raise for one key once DETACHED is set, like a read of a detached element."""
+
+    def __init__(self, key):
+        super().__init__()
+        self.key = key
+        self.detached = False
+
+    def get(self, key, default=None):
+        if self.detached and key == self.key:
+            raise TimeoutError("element is not attached to the DOM")
+        return super().get(key, default)
+
+
+class ClickedTabGuardTests(unittest.TestCase):
+    """V25: the nearest own tab only, and a failed read after the click is never evidence."""
+
+    def test_outer_tab_turning_selected_while_the_inner_own_tab_stays_unselected_is_not_evidence(self):
+        page = Page(HOME, body="Widgets")
+        inner, outer = ("tab", "Widgets inner"), ("tab", "Widgets section")
+        page.roles.update({inner, outer})
+        page.tab_of[("text", "Widgets")] = [inner, outer]
+        page.aria_states[(*inner, "aria-selected")] = "false"
+        page.aria_states[(*outer, "aria-selected")] = "false"
+
+        def react(kind, name):
+            if name == "Widgets":
+                page.aria_states[(*outer, "aria-selected")] = "true"
+
+        page.on_click = react
+        clock = PollClock()
+        outcome = walk(page, tab_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "NEEDS_REVIEW")
+        self.assertEqual(outcome.evidence.get("t2", ()), ())
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "text", "Widgets")])
+
+    def test_tab_read_that_fails_after_the_click_is_not_evidence(self):
+        page, own, _ = tab_page()
+        page.aria_states = _DetachingStates((*own, "aria-selected"))
+        page.aria_states[(*own, "aria-selected")] = "false"
+
+        def react(kind, name):
+            if name == "Widgets":
+                page.aria_states.detached = True
+
+        page.on_click = react
+        clock = PollClock()
+        outcome = walk(page, tab_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "NEEDS_REVIEW")
+        self.assertEqual(outcome.evidence.get("t2", ()), ())
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "text", "Widgets")])
+
+    def test_tab_read_that_works_before_and_after_the_click_passes(self):
+        page, own, _ = tab_page()
+        page.aria_states = _DetachingStates((*own, "aria-selected"))
+        page.aria_states[(*own, "aria-selected")] = "false"
+
+        def react(kind, name):
+            if name == "Widgets":
+                page.aria_states[(*own, "aria-selected")] = "true"
+
+        page.on_click = react
+        outcome = walk(page, tab_step(), PollClock(), page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "PASS")
+        self.assertEqual(outcome.evidence["t2"], ("t2:after-state:-Widgets-tab-selected",))
+
+
+class _Heading:
+    def __init__(self, texts):
+        self.texts = texts
+
+    def count(self):
+        return len(self.texts)
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self, timeout=None):
+        return self.texts[0]
+
+
+class _HeadedDialog:
+    """A visible dialog whose headings are given per selector."""
+
+    def __init__(self, headings):
+        self.headings = headings
+
+    def count(self):
+        return 1
+
+    def nth(self, index):
+        return self
+
+    def is_visible(self):
+        return True
+
+    def locator(self, selector):
+        return _Heading(self.headings.get(selector, []))
+
+
+class _DialogRoot:
+    def __init__(self, dialog):
+        self.dialog = dialog
+        self.frames = []
+
+    def locator(self, selector):
+        return self.dialog if selector == "[role='dialog']" else _Heading([])
+
+
+class TargetDialogHeadingOrderTests(unittest.TestCase):
+    """V25: an empty heading does not hide a real heading after it."""
+
+    def test_empty_first_heading_followed_by_a_named_one_reads_the_named_one(self):
+        from workshop_validator.guide_walk import _target_dialogs
+
+        dialog = _HeadedDialog({"h1": ["  "], "h2": ["Load Items"], "[role='heading']": [""]})
+        named = _target_dialogs(_DialogRoot(dialog), frozenset({"load items"}))
+        self.assertEqual(named, frozenset({"load items"}))
+
+    def test_dialog_with_only_empty_headings_is_not_named(self):
+        from workshop_validator.guide_walk import _target_dialogs
+
+        dialog = _HeadedDialog({"h1": [""], "h2": ["  "]})
+        self.assertEqual(_target_dialogs(_DialogRoot(dialog), frozenset({"load items"})), frozenset())
+
+
 if __name__ == "__main__":
     unittest.main()
