@@ -240,6 +240,89 @@ class RowActionsTests(unittest.TestCase):
         self.assertEqual(clicks, [])
         self.assertNotIn("Rows matched", note)
 
+    # Privacy (W-090): a label that only contains the row name or a control word is "other".
+    def assert_label_is_other(self, label):
+        page = files_page({"Report Alpha": [label]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: other.", note)
+        self.assertNotIn("Jane", note)
+
+    def test_label_containing_the_row_name_is_other(self):
+        self.assert_label_is_other("Report Alpha by Jane Smith")
+
+    def test_label_starting_with_show_actions_is_other(self):
+        self.assert_label_is_other("Show Actions for Jane Smith")
+
+    def test_label_starting_with_a_control_word_is_other(self):
+        self.assert_label_is_other("Edit Jane Smith")
+
+    # Look-alike: only "Show [N] [more] actions" names the row's actions button.
+    def test_show_bulk_actions_is_not_the_actions_button(self):
+        page = files_page({"Report Alpha": ["Show Bulk Actions"]})
+        open_menu_on(page, "Show Bulk Actions")
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: other.", note)
+
+    def test_show_actions_panel_is_not_the_actions_button(self):
+        page = files_page({"Report Alpha": ["Show Actions Panel"]})
+        open_menu_on(page, "Show Actions Panel")
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: other.", note)
+
+    # Robustness: a failed read ends in the normal not-found note, never a crash.
+    def test_label_read_that_raises_is_skipped(self):
+        page = files_page({"Report Alpha": ["Edit"]})
+        original = Loc.get_attribute
+
+        def get_attribute(self, name, timeout=None):
+            if (self.kind, self.name) == ("button", "Edit") and name == "aria-label":
+                raise RuntimeError("synthetic read failure")
+            return original(self, name, timeout)
+
+        with mock.patch.object(Loc, "get_attribute", get_attribute):
+            note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("buttons in the row: 1; button labels: Edit.", note)
+
+    def test_visibility_read_that_raises_is_skipped(self):
+        page = files_page({"Report Alpha": ["Edit", "Share"]})
+        original = Loc.is_visible
+
+        def is_visible(self):
+            if (self.kind, self.name) == ("button", "Edit"):
+                raise RuntimeError("synthetic read failure")
+            return original(self)
+
+        with mock.patch.object(Loc, "is_visible", is_visible):
+            note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("buttons in the row: 1; button labels: Share.", note)
+
+    def test_menu_button_lookup_that_raises_is_skipped(self):
+        page = files_page({"Report Alpha": ["Edit"]})
+        original = Loc.locator
+
+        def locator(self, selector):
+            if (self.kind, self.name) == ("row", "Report Alpha") and "aria-haspopup" in selector:
+                raise RuntimeError("synthetic lookup failure")
+            return original(self, selector)
+
+        with mock.patch.object(Loc, "locator", locator):
+            note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("menu buttons in the row: 0; buttons in the row: 1; button labels: Edit.", note)
+
+    def test_button_lookup_that_raises_is_skipped(self):
+        page = files_page({"Report Alpha": ["Show Actions"]})
+        open_menu_on(page, "Show Actions")
+        original = Loc.get_by_role
+
+        def get_by_role(self, role, name=None, exact=True):
+            if (self.kind, self.name) == ("row", "Report Alpha") and role == "button":
+                raise RuntimeError("synthetic lookup failure")
+            return original(self, role, name, exact)
+
+        with mock.patch.object(Loc, "get_by_role", get_by_role):
+            note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("buttons in the row: 0; button labels: none.", note)
+
 
 if __name__ == "__main__":
     unittest.main()
