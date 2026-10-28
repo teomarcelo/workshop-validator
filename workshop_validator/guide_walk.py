@@ -2249,6 +2249,62 @@ def _exact_menuitem(page, item: str):
 
 
 DOWNLOAD_NOTE = "A browser download cannot be read from the page, so this needs review."
+DOWNLOAD_WAIT_S = 15.0
+
+
+def _is_download(item: str) -> bool:
+    return bool(re.search(r"\bdownload\b", item, re.I))
+
+
+def _click_for_download(state: WalkState, click: Callable[[], bool], got: list) -> bool:
+    """Click inside the page's download wait (V31). A download that fires is put in GOT."""
+    expect = getattr(state.page, "expect_download", None)
+    if not callable(expect):
+        return click()
+    wait_s = max(1.0, min(DOWNLOAD_WAIT_S, _time_left(state)))
+    clicked = False
+    try:
+        with expect(timeout=wait_s * 1000) as info:
+            clicked = click()
+            if not clicked:
+                raise BrowserActionError("not clicked")
+        got.append(info.value)
+    except Exception:
+        pass
+    return clicked
+
+
+def _discard_download(download) -> None:
+    """Never keep a download: cancel it, then delete its temp file."""
+    for name in ("cancel", "delete"):
+        try:
+            getattr(download, name)()
+        except Exception:
+            continue
+
+
+def _download_result(step: GuideStep, note: str, named: str, got: list) -> CheckResult:
+    """PASS only when the download's file name, minus its extension, is the guide's named file."""
+    if not got:
+        return CheckResult("NEEDS_REVIEW", f"{note} {DOWNLOAD_NOTE}", (), freeze=True)
+    download = got[0]
+    try:
+        filename = str(download.suggested_filename or "")
+    except Exception:
+        filename = ""
+    for each in got:
+        _discard_download(each)
+    stem = re.sub(r"\.[^.\s]+$", "", filename)
+    if norm(stem) == norm(named):
+        evidence = f"download started: {filename}"
+        return passed(step, evidence, f"{note} {evidence}")
+    return CheckResult(
+        "NEEDS_REVIEW",
+        # W-090: the other file's name is not printed; it may name something outside the guide.
+        f"{note} A download started as {'a file with a different name' if filename else 'an unnamed file'}, "
+        f"not {named}. {DOWNLOAD_NOTE}",
+        (), freeze=True,
+    )
 
 
 def _menu_open(page) -> bool:
@@ -2288,9 +2344,15 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
             return False
         return require(state, item_shown, "", limit=state.page_wait_s) is None
 
+    downloads: list = []
+
     def click_item() -> bool:
         menuitem = _exact_menuitem(state.page, item)
-        return menuitem is not None and _click_locator(menuitem)
+        if menuitem is None:
+            return False
+        if _is_download(item):
+            return _click_for_download(state, lambda: _click_locator(menuitem), downloads)
+        return _click_locator(menuitem)
 
     missed = require(
         state,
@@ -2336,8 +2398,8 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
         if stop is not None:
             return stop
     note = f"Opened the dropdown in the {row} row and clicked {item}."
-    if re.search(r"\bdownload\b", item, re.I):
-        return CheckResult("NEEDS_REVIEW", f"{note} {DOWNLOAD_NOTE}", (), freeze=True)
+    if _is_download(item):
+        return _download_result(step, note, row, downloads)
     return CheckResult(
         "NEEDS_REVIEW", f"{note} No change could be read from the page.", (), freeze=True,
     )
