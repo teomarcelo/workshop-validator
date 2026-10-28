@@ -2060,6 +2060,109 @@ def _safe_label(label: str, row: str) -> str:
     return "other"
 
 
+_ROW_READ_TIMEOUT_MS = 1000
+
+# One read per matched row: for each matched row, "same" when it is this very element
+# (the page and its main frame both find it), "holds" when this row holds it, else "".
+_ROW_CONTAINS_JS = (
+    '(el, others) => others.map(other => el === other ? "same" : el.contains(other) ? "holds" : "")'
+)
+
+# W-092: true when EL (or an element in it) shows exactly TARGET as its visible text,
+# whitespace-normalized. Elements inside SKIP, or holding SKIP, are not counted.
+_ROW_EXACT_JS = """(el, [target, skip]) => {
+    const norm = text => (text || "").split(/\\s+/).filter(Boolean).join(" ");
+    for (const node of [el, ...el.querySelectorAll("*")]) {
+        if (skip && (skip.contains(node) || node.contains(skip))) continue;
+        if (!node.getClientRects().length) continue;
+        if (norm(node.innerText) === target) return true;
+    }
+    return false;
+}"""
+
+
+def _row_exact(item, target: str, skip=None):
+    """What the page read (True or False); None when the read failed or timed out."""
+    try:
+        return item.evaluate(_ROW_EXACT_JS, [target, skip], timeout=_ROW_READ_TIMEOUT_MS)
+    except Exception:
+        return None
+
+
+def _innermost_row(rows: list, row: str):
+    """(the row to use or None, per-row 'holds another match' flags, reason or "").
+
+    The innermost matched row is used only when it shows the exact name ROW and no
+    other matched row shows another exact ROW outside it (W-092). A failed or slow read
+    keeps the row, so the scan refuses instead of guessing. A row read as the very same
+    element as an earlier match counts once.
+    """
+    target = " ".join(row.split())
+    holds = [False] * len(rows)
+    first = list(range(len(rows)))  # index of the first match that is the same element
+    handles = []
+    try:
+        try:
+            for item in rows:
+                handles.append(item.element_handle(timeout=_ROW_READ_TIMEOUT_MS))
+        except Exception:
+            return None, holds, ""
+        for i, item in enumerate(rows):
+            try:
+                found = item.evaluate(_ROW_CONTAINS_JS, handles, timeout=_ROW_READ_TIMEOUT_MS)
+            except Exception:
+                continue
+            if isinstance(found, list):
+                holds[i] = "holds" in found
+                first[i] = next((k for k, value in enumerate(found) if value == "same"), i)
+        unique = [i for i in range(len(rows)) if first[i] == i]
+        innermost = [i for i in unique if not holds[i]]
+        if len(innermost) != 1:
+            return None, holds, ""
+        inner = innermost[0]
+        exact = _row_exact(rows[inner], target) is True and all(
+            _row_exact(rows[i], target, handles[inner]) is False
+            for i in range(len(rows)) if i != inner
+        )
+        if not exact:
+            return None, holds, (
+                " The innermost row was not used: it does not show the exact name,"
+                " or another row shows it too."
+            )
+        return rows[inner], holds, ""
+    finally:
+        for handle in handles:
+            try:
+                handle.dispose()
+            except Exception:
+                pass
+
+
+def _row_shape(item) -> str:
+    """Tag, role, aria-rowindex and box size of a matched row; no text, ids or URLs (W-090)."""
+    def read(fn):
+        try:
+            return str(fn() or "")
+        except Exception:
+            return ""
+
+    wait = _ROW_READ_TIMEOUT_MS
+    tag = read(lambda: item.evaluate("el => el.tagName.toLowerCase()", timeout=wait)).lower()
+    role = read(lambda: item.get_attribute("role", timeout=wait)).lower()
+    index = read(lambda: item.get_attribute("aria-rowindex", timeout=wait))
+    tag = tag if re.fullmatch(r"[a-z][a-z0-9-]{0,19}", tag) else "unknown"
+    role = role if re.fullmatch(r"[a-z]{1,20}", role) else "none"
+    index = index if re.fullmatch(r"\d{1,6}", index) else "none"
+    size = "unknown"
+    try:
+        box = item.bounding_box(timeout=_ROW_READ_TIMEOUT_MS)
+        if box:
+            size = f"{round(float(box['width']))}x{round(float(box['height']))}"
+    except Exception:
+        pass
+    return f"tag {tag}, role {role}, rowindex {index}, size {size}"
+
+
 def _row_menu_button(page, row: str):
     """The one menu button inside the one visible row named ROW, or None."""
     return _row_menu_scan(page, row)[0]
@@ -2095,6 +2198,17 @@ def _row_menu_scan(page, row: str):
                         continue
             except Exception:
                 pass
+    if len(rows) > 1:
+        # V29: one visible row can match twice when a matched row holds another matched row.
+        # Use the innermost only when it is the one row showing the exact name (W-092).
+        inner, holds, reason = _innermost_row(rows, row)
+        if inner is None:
+            details = " ".join(
+                f"Row {i}: {_row_shape(item)}, contains a match: {'yes' if held else 'no'}."
+                for i, (item, held) in enumerate(zip(rows[:3], holds), 1)
+            )
+            return None, f"Rows matched: {len(rows)}. {details}{reason}"
+        rows = [inner]
     if len(rows) != 1:
         return None, f"Rows matched: {len(rows)}."
     try:
