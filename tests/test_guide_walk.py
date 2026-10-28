@@ -161,7 +161,8 @@ class Loc:
 
     def is_visible(self):
         self.page.reads += 1
-        return self.count() > 0
+        # page.hidden holds elements that are in the DOM but not shown.
+        return self.count() > 0 and (self.kind, self.name) not in getattr(self.page, "hidden", ())
 
     def is_enabled(self):
         return self.page.enabled.get((self.kind, self.name), True)
@@ -224,6 +225,12 @@ class Loc:
 
     def locator(self, selector):
         """Controls inside this element, from page.children."""
+        if selector.startswith("xpath=ancestor-or-self::"):
+            # The element's enclosing tabs, from page.tab_of: one (kind, name), or a list
+            # nearest first. "[1]" keeps the nearest; without it XPath gives document order.
+            own = getattr(self.page, "tab_of", {}).get((self.kind, self.name))
+            tabs = [] if not own else [own] if isinstance(own[0], str) else list(own)
+            return _ListLoc(self.page, tabs[:1] if selector.endswith("[1]") else tabs[::-1])
         inside = self.page.children.get((self.kind, self.name), ())
         inside = [item for item in inside if item in self.page.roles]
         if "aria-haspopup" in selector:
@@ -332,6 +339,8 @@ class Page:
         self.in_popup = set()  # (kind, name) shown inside a menu or listbox popup
         self.children = {}  # (kind, name) -> controls inside that element
         self.has_popup = set()  # (kind, name) with aria-haspopup set
+        self.tab_of = {}  # (kind, name) -> its own enclosing role=tab element
+        self.hidden = set()  # (kind, name) in the DOM but not visible
         self.state_reads = 0
         self.reads = 0
         self.snapshots = []
@@ -1825,7 +1834,12 @@ class WalkTests(unittest.TestCase):
         self.assertTrue(any(
             event[0] == "click" and "App Launcher" in event for event in page.events
         ))
-        self.assertEqual(clock.now, 0)
+        # V22: one bounded poll (timeout_s=0, interval 1 s) before NEEDS_REVIEW, one click.
+        self.assertEqual(clock.now, 1)
+        self.assertEqual(
+            [event for event in page.events if event[0] == "click"],
+            [("click", "html", "App Launcher")],
+        )
 
     def test_missing_control_fails_only_after_research_and_five_minutes(self):
         calls = []

@@ -158,7 +158,7 @@ class TestSavePolling(unittest.TestCase):
             sleeps.append(seconds)
             clock.now += seconds
 
-        state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2, sleeper=None)
+        state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=clock, timeout_s=90, interval_s=2, sleeper=None)
 
         with patch.object(g, "_control_visible", return_value=True), \
              patch.object(g, "_locator_for_name", return_value=mock_loc), \
@@ -199,7 +199,7 @@ class TestSavePolling(unittest.TestCase):
                 page._status_elements.append(elem)
 
         # The poll runs only through an injected sleeper (here routed to the patched _sleep).
-        state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2,
+        state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=clock, timeout_s=90, interval_s=2,
                                 sleeper=lambda seconds: None)
 
         from workshop_validator import guide_walk as g
@@ -277,7 +277,7 @@ class TestSavePollingClock(unittest.TestCase):
 
     def test_save_without_sleeper_or_page_wait_does_not_use_real_time(self):
         page = FakePage("https://example.lightning.force.com/lightning/page/home")
-        state = SimpleNamespace(page=page, clock=lambda: 0.0, timeout_s=90, interval_s=2, sleeper=None)
+        state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=lambda: 0.0, timeout_s=90, interval_s=2, sleeper=None)
         result = self.run_click(state, "Save")
         self.assertEqual(result.status, "NEEDS_REVIEW")
         self.assertTrue(result.freeze)
@@ -286,7 +286,7 @@ class TestSavePollingClock(unittest.TestCase):
         page = FakePage("https://example.lightning.force.com/lightning/page/home")
         waits = []
         page.wait_for_timeout = lambda ms: waits.append(ms)
-        state = SimpleNamespace(page=page, clock=lambda: 0.0, timeout_s=6, interval_s=2, sleeper=None)
+        state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=lambda: 0.0, timeout_s=6, interval_s=2, sleeper=None)
         result = self.run_click(state, "Submit")
         self.assertEqual(result.status, "NEEDS_REVIEW")
         self.assertEqual(waits, [2000, 2000, 2000])
@@ -302,13 +302,14 @@ class TestSavePollingClock(unittest.TestCase):
                 raise AssertionError("the Save poll is timed by a clock that never moves")
             return 0.0
 
-        state = SimpleNamespace(page=page, clock=frozen_clock, timeout_s=4, interval_s=1,
+        state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=frozen_clock, timeout_s=4, interval_s=1,
                                 sleeper=sleeps.append)
         result = self.run_click(state, "Save")
         self.assertEqual(result.status, "NEEDS_REVIEW")
         self.assertEqual(sleeps, [1, 1, 1, 1])
 
-    def test_names_containing_save_do_not_poll(self):
+    def test_names_containing_save_poll_as_plain_clicks(self):
+        """V22: every click polls (bounded) before NEEDS_REVIEW; names containing Save are plain clicks."""
         for name in ("Save to list view", "Saved items", "Submit for approval"):
             with self.subTest(name=name):
                 sleeps = []
@@ -319,11 +320,39 @@ class TestSavePollingClock(unittest.TestCase):
                     clock.now += seconds
 
                 page = FakePage("https://example.lightning.force.com/lightning/page/home")
-                state = SimpleNamespace(page=page, clock=clock, timeout_s=90, interval_s=2,
+                state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=clock, timeout_s=90, interval_s=2,
                                         sleeper=sleeper)
                 result = self.run_click(state, name)
                 self.assertEqual(result.status, "NEEDS_REVIEW")
-                self.assertEqual(sleeps, [])
+                self.assertEqual(sleeps, [2.0] * 45)
+
+    def test_new_status_message_is_save_only_evidence_during_the_poll(self):
+        """V6 stays: a new success message counts only for Save or Submit, also on a later poll."""
+        from contextlib import ExitStack
+        from unittest.mock import patch
+        from workshop_validator import guide_walk as g
+
+        for name, expected in (("Save to list view", "NEEDS_REVIEW"), ("Save", "PASS")):
+            with self.subTest(name=name):
+                clock = FakeClock()
+
+                def sleeper(seconds):
+                    clock.now += seconds
+
+                def messages(page):
+                    return frozenset({"Widget Alpha was created."}) if clock.now >= 4 else frozenset()
+
+                page = FakePage("https://example.lightning.force.com/lightning/page/home")
+                state = SimpleNamespace(page=page, page_wait_s=90, step_deadline=None, clock=clock,
+                                        timeout_s=10, interval_s=2, sleeper=sleeper)
+                mock_loc = SimpleNamespace(get_attribute=lambda attr: None)
+                with ExitStack() as stack:
+                    for item in _no_evidence_patches(g, patch, mock_loc):
+                        stack.enter_context(item)
+                    stack.enter_context(patch.object(g, "_read_status_messages", side_effect=messages))
+                    stack.enter_context(patch.object(g, "_classify_save_message", return_value="success"))
+                    result = g._act_click(state, step("a", "E1", "T1", "1", f"Click {name}."), name)
+                self.assertEqual(result.status, expected)
 
 
 if __name__ == "__main__":

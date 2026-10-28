@@ -4197,6 +4197,68 @@ def _detect_suspect_flags(
     return tuple(flags)
 
 
+def _clicked_tab_selected(loc) -> bool:
+    """The clicked element's own tab (itself or its nearest role=tab ancestor) is selected.
+
+    Only that one element is read; another tab on the page is never evidence.
+    """
+    target = _visible_match(loc)
+    if target is None:
+        return False
+    try:
+        tab = target.locator("xpath=ancestor-or-self::*[@role='tab'][1]")
+        if _count(tab) == 0:
+            return False
+        return str(_first(tab).get_attribute("aria-selected", timeout=1000) or "").lower() == "true"
+    except Exception:
+        return False
+
+
+# A step's time cap ends the click poll this many seconds early. Page reads take real
+# time (each may wait up to about 1 s), so the last wait plus one full re-read and
+# the result must fit inside the cap.
+_POLL_CAP_MARGIN_S = 5.0
+
+# Position, filler and role words that never name a click target or a dialog.
+_CLICK_FILLER_WORDS = frozenset({
+    "bottom", "top", "middle", "left", "right", "panel", "page", "list",
+    "field", "button", "link", "tab", "click", "then", "once", "scroll", "find",
+})
+
+
+def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
+    """Headings of visible dialogs that equal one of the step's target names (W-084).
+
+    Only a dialog's heading is read; its body text never names it. A target with
+    fewer than 4 letters is left out, so a heading with no letters never matches.
+    """
+    targets = frozenset(t for t in targets if sum(ch.isalnum() for ch in t) >= 4)
+    named: set[str] = set()
+    for root in _roots(page):
+        for selector in ("[role='dialog']", "[role='alertdialog']", "[aria-modal='true']"):
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                try:
+                    item = loc.nth(index)
+                    if hasattr(item, "is_visible") and not item.is_visible():
+                        continue
+                    title = ""
+                    for heading_sel in ("h1", "h2", "h3", "[role='heading']"):
+                        heading_loc = item.locator(heading_sel)
+                        if _count(heading_loc) > 0:
+                            title = (heading_loc.first.inner_text(timeout=500) or "").strip()
+                            if title:
+                                break
+                except Exception:
+                    continue
+                if norm(title) in targets:
+                    named.add(norm(title))
+    return frozenset(named)
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -4225,11 +4287,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             target_names.add(norm(bare_quoted))
 
     # Exclude position/filler/role words
-    excluded_words = {
-        "bottom", "top", "middle", "left", "right", "panel", "page", "list",
-        "field", "button", "link", "tab", "click", "then", "once", "scroll", "find"
-    }
-    target_names = {t for t in target_names if t not in excluded_words}
+    target_names = {t for t in target_names if t not in _CLICK_FILLER_WORDS}
 
     # Capture before-state for suspect detection and evidence verification
     before_names = _visible_names_snapshot(state.page)
@@ -4242,9 +4300,14 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_dialogs = _count_visible_dialogs(state.page)
     before_messages = _read_status_messages(state.page)
     before_has_saved = _words_visible(state.page, "successfully saved")
+    before_named_dialogs = _target_dialogs(state.page, frozenset(target_names))
 
     loc = _locator_for_name(state.page, name)
-    if loc is None or not _click_locator(loc):
+    if loc is None:
+        return None
+    # The clicked element's own tab, already selected before the click, is not evidence.
+    before_tab = _clicked_tab_selected(loc)
+    if not _click_locator(loc):
         return None
     if norm(name) in {"files", "files tab"} and _in_setup(state.page):
         _open_files_home(state)
@@ -4305,6 +4368,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         break
         except Exception:
             pass
+    if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
+        evidence_desc = f"after-state: {name} tab selected"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
     if not evidence_desc and before_url != after_url:
@@ -4387,18 +4452,29 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 evidence_desc = f"after-state: {target} appeared"
                 break
 
-    # If no immediate evidence and this is a Save/Submit control, poll for delayed banner
-    # The poll never reads a real clock: elapsed time is the sum of the walk's own
-    # waits. With no wait primitive (no sleeper, no page wait) it does not poll.
-    if not evidence_desc and is_save_submit and _can_poll_wait(state):
-        timeout_s = float(state.timeout_s)
+    # V22: with no immediate evidence, every click polls for a delayed after-state
+    # (a still-loading page is not a failure). The control is never clicked again.
+    # Elapsed time is the sum of the walk's own waits; the step cap is read from the
+    # walk's clock. With no wait primitive (no sleeper, no page wait) it does not poll.
+    # It ends at timeout_s, page_wait_s or the step's time cap, whichever comes first.
+    if not evidence_desc and _can_poll_wait(state):
+        timeout_s = min(float(state.timeout_s), float(state.page_wait_s))
         interval_s = float(state.interval_s) if state.interval_s > 0 else 2.0
         waited = 0.0
 
         while not evidence_desc:
-            # Sleep before next check
-            _poll_wait(state, interval_s)
-            waited += interval_s
+            # Never sleep past the step cap (less a margin) and, after the first
+            # wait, past timeout_s; the last wait is shortened so the page is read
+            # once more before giving up.
+            budget = _time_left(state) - _POLL_CAP_MARGIN_S
+            if waited > 0:
+                budget = min(budget, timeout_s - waited)
+            if budget <= 0:
+                note = f"Clicked {name}, but no change could be read from the page."
+                return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+            wait_s = min(interval_s, budget)
+            _poll_wait(state, wait_s)
+            waited += wait_s
 
             # Re-capture after-state
             after_names = _visible_names_snapshot(state.page)
@@ -4407,15 +4483,15 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
             after_dialogs = _count_visible_dialogs(state.page)
 
-            # Check for evidence again
-            if after_dialogs > before_dialogs:
+            # A dialog seen only during the poll counts only when it is visible, new
+            # since the click and its heading equals a target name (W-084). A native
+            # dialog accepted during the poll is never evidence.
+            if after_dialogs > before_dialogs and (
+                _target_dialogs(state.page, frozenset(target_names)) - before_named_dialogs
+            ):
                 evidence_desc = "after-state: dialog opened"
 
-            accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
-            if not evidence_desc and accepted:
-                evidence_desc = "after-state: dialog text read"
-
-            if not evidence_desc:
+            if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
                 new_messages = after_messages - before_messages
                 for msg in new_messages:
@@ -4423,7 +4499,11 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         evidence_desc = "after-state: success message visible"
                         break
 
-            if not evidence_desc and not before_has_saved and _words_visible(state.page, "successfully saved"):
+            # The page-wide saved text is evidence only for Save/Submit during the poll.
+            if (
+                not evidence_desc and is_save_submit and not before_has_saved
+                and _words_visible(state.page, "successfully saved")
+            ):
                 evidence_desc = "after-state: success message visible"
 
             if not evidence_desc:
@@ -4438,6 +4518,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                                 break
                 except Exception:
                     pass
+            if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
+                evidence_desc = f"after-state: {name} tab selected"
 
             if not evidence_desc and before_url != after_url:
                 from urllib.parse import urlparse
@@ -4452,8 +4534,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                     ))
 
                     if not is_error:
-                        after_url_lower = after_url.lower()
-                        page_title_lower = norm(_page_title(state.page))
+                        # Only a real change counts: a new URL path (a query or fragment
+                        # change is not navigation), or a title that differs from before.
+                        path_changed = before_parsed.path != after_parsed.path
+                        poll_title = norm(_page_title(state.page))
+                        title_changed = poll_title != norm(before_title)
+                        after_url_lower = after_parsed.path.lower() if path_changed else ""
+                        page_title_lower = poll_title if title_changed else ""
                         url_tokens = set(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
                         title_tokens = _re_mod.findall(r'[a-z0-9]+', page_title_lower)
                         ignored = {"salesforce", "lightning", "force", "com"}
@@ -4504,13 +4591,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if evidence_desc:
                 break
 
-            # Check if timeout reached
-            if waited >= timeout_s:
-                # Timeout reached, return NEEDS_REVIEW
-                note = f"Clicked {name}, but no change could be read from the page."
-                return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
 
-    # If no evidence found after immediate check (and not a Save/Submit control), return NEEDS_REVIEW
+    # If no evidence found after the immediate check and the poll, return NEEDS_REVIEW
     if not evidence_desc:
         note = f"Clicked {name}, but no change could be read from the page."
         return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
