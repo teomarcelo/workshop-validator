@@ -3559,13 +3559,125 @@ def _api_name_ready(page) -> bool:
     return present(page, "textbox", "API Name")
 
 
-def _choose_resource_variable(page) -> None:
-    """API Name stays hidden until the resource type is Variable."""
+_RESOURCE_TYPES = frozenset({
+    "Variable", "Constant", "Formula", "Text Template", "Stage", "Choice",
+    "Record Choice Set", "Picklist Choice Set", "Collection Choice Set",
+})
+_RESOURCE_PICK_WAIT_S = 10.0
+
+
+def _plain(value) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _resource_type_box(page):
+    """The visible Resource Type control: (frame, role, element), or (None, "", None)."""
+    for root in _roots(page):
+        for role in ("combobox", "button"):
+            loc = _by_role(root, role, "Resource Type", exact=True)
+            target = None if loc is None else _visible_match(loc)
+            if target is not None:
+                return root, role, target
+    return None, "", None
+
+
+def _read_attr(target, name: str) -> str:
+    try:
+        return _plain(target.get_attribute(name, timeout=1000))
+    except Exception:
+        return ""
+
+
+def _shown_value(target) -> str:
+    """The value the Resource Type control shows: an input's value, else its own text."""
+    for read in ("input_value", "inner_text"):
+        fn = getattr(target, read, None)
+        try:
+            text = _plain(fn(timeout=1000)) if callable(fn) else ""
+        except Exception:
+            text = ""
+        if text:
+            return text
+    return ""
+
+
+def _resource_is_variable(page) -> bool:
     if _api_name_ready(page):
-        return
+        return True
+    _root, _role, box = _resource_type_box(page)
+    return box is not None and _shown_value(box) == "Variable"
+
+
+def _highlighted_option(root, box) -> str:
+    """Visible text of the one option the combobox highlights (aria-activedescendant)."""
+    active = _read_attr(box, "aria-activedescendant")
+    if not active:
+        return ""
+    quoted = active.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        loc = root.locator(f'[id="{quoted}"]')
+        if _count(loc) != 1:
+            return ""
+        return _plain(_first(loc).inner_text(timeout=1000))
+    except Exception:
+        return ""
+
+
+def _resource_type_diagnostic(page) -> str:
+    """Safe facts only: roles, states, counts and allow-listed resource type labels."""
+    root, role, box = _resource_type_box(page)
+    expanded = _read_attr(box, "aria-expanded") if box is not None else ""
+    scope = root if root is not None else page
+    named = _by_role(scope, "option", "Variable", exact=True)
+    has = named is not None and _count(named) > 0
+    shown = has and _visible(named)
+    labels = []
+    total = 0
+    try:
+        options = scope.get_by_role("option")
+        total = _count(options)
+        for index in range(min(total, 6)):
+            try:
+                text = _plain(options.nth(index).inner_text(timeout=1000))
+            except Exception:
+                text = ""
+            labels.append(text if text in _RESOURCE_TYPES else "other")
+    except Exception:
+        pass
+    return (
+        f"Diagnostic: control role {role or 'none'}; aria-expanded {expanded or 'none'}; "
+        f"option Variable present {'yes' if has else 'no'}, visible {'yes' if shown else 'no'}; "
+        f"{total} options; labels: {', '.join(labels) or 'none'}."
+    )
+
+
+def _choose_resource_variable(state: WalkState) -> CheckResult | None:
+    """API Name stays hidden until the resource type is Variable. The choice is read from the page."""
+    page = state.page
+    if _api_name_ready(page):
+        return None
     if not present(page, "option", "Variable"):
         click_role(page, "combobox", "Resource Type") or click_role(page, "button", "Resource Type")
     click_role(page, "option", "Variable")
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S)
+    note = "Resource Type could not be set to Variable."
+    missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
+    if missed is None or missed.status != "UI_MISMATCH":
+        return missed
+    root, _role, box = _resource_type_box(page)
+    if (
+        box is not None
+        and _read_attr(box, "aria-expanded") == "true"
+        and _highlighted_option(root, box) == "Variable"
+    ):
+        try:
+            box.press("Enter", timeout=3000)
+        except Exception:
+            pass
+        missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
+        if missed is None or missed.status != "UI_MISMATCH":
+            return missed
+    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
 
 
 def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
@@ -3587,7 +3699,9 @@ def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
         return _stop_here(missed)
     if not (click_role(state.page, "button", "New Resource") or click_role(state.page, "link", "New Resource")):
         return CheckResult("UI_MISMATCH", "New Resource did not open.", (), freeze=True)
-    _choose_resource_variable(state.page)
+    unset = _choose_resource_variable(state)
+    if unset is not None:
+        return _stop_here(unset)
     missed = require(
         state,
         lambda: _api_name_ready(state.page),
