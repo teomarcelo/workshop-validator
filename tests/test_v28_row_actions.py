@@ -150,6 +150,71 @@ class RowActionsTests(unittest.TestCase):
         note = self.assert_not_found(page, "Report_Alpha-Final")
         self.assertIn("button labels: Report_Alpha-Final, Share.", note)
 
+    def test_actions_button_is_used_not_an_earlier_button(self):
+        page = files_page({"Report Alpha": ["Edit", "Show Actions"]})
+        self.assert_found(page, "Report Alpha", "Show Actions")
+
+    def test_person_name_label_is_other(self):
+        page = files_page({"Report Alpha": ["Jane Smith"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: other.", note)
+        self.assertNotIn("Jane", note)
+
+    def test_date_label_is_other(self):
+        page = files_page({"Report Alpha": ["Oct 28 2026"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: other.", note)
+        self.assertNotIn("2026", note)
+
+    def test_control_word_label_is_shown(self):
+        page = files_page({"Report Alpha": ["Edit"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: Edit.", note)
+
+    def test_plain_target_name_label_is_shown(self):
+        page = files_page({"Report Alpha": ["Report Alpha"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: Report Alpha.", note)
+
+    def test_first_two_labels_are_shown_in_order(self):
+        page = files_page({"Report Alpha": ["Delete", "Edit", "Share"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: Delete, Edit.", note)
+
+    def test_first_label_of_a_button_is_shown(self):
+        page = files_page({"Report Alpha": ["Jane Smith"]})
+        attrs = {("button", "Jane Smith", "aria-label"): "Edit"}
+        original = Loc.get_attribute
+
+        def get_attribute(self, name, timeout=None):
+            if (self.kind, self.name, name) in attrs:
+                return attrs[(self.kind, self.name, name)]
+            return original(self, name, timeout)
+
+        with mock.patch.object(Loc, "get_attribute", get_attribute):
+            note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: Edit.", note)
+
+    def test_show_n_more_actions_label_is_shown(self):
+        page = files_page({"Report Alpha": ["Show Actions", "Show 2 more actions"]})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("button labels: Show Actions, Show 2 more actions.", note)
+
+    def test_every_known_control_word_is_shown(self):
+        words = (
+            "Show Actions", "Actions", "More", "Edit", "Delete", "Download", "Share",
+            "Preview", "Upload", "Open", "View", "Menu", "Options",
+        )
+        for word in words:
+            with self.subTest(word=word):
+                note = self.assert_not_found(files_page({"Report Alpha": [word, word]}), "Report Alpha")
+                self.assertIn(f"button labels: {word}, {word}.", note)
+
+    def test_row_without_buttons_lists_none(self):
+        page = files_page({"Report Alpha": []})
+        note = self.assert_not_found(page, "Report Alpha")
+        self.assertIn("buttons in the row: 0; button labels: none.", note)
+
     def test_note_counts_rows_when_no_row_matches(self):
         page = files_page({"Report Beta": ["Show Actions"]})
         note = self.assert_not_found(page, "Report Alpha")

@@ -2045,9 +2045,17 @@ def _button_labels(button) -> list[str]:
     return labels
 
 
+_NOTE_CONTROL_WORDS = (
+    "actions", "more", "edit", "delete", "download", "share",
+    "preview", "upload", "open", "view", "menu", "options",
+)
+
+
 def _safe_label(label: str, row: str) -> str:
-    """A label safe for a note: the row name, or letters, digits and spaces up to 30; else 'other'."""
-    if label == row or re.fullmatch(r"[A-Za-z0-9 ]{1,30}", label):
+    """A label safe for a note (W-090): the row name or a known control word; else 'other'."""
+    if label == row:
+        return label
+    if label.lower() in _NOTE_CONTROL_WORDS or _ROW_ACTIONS_LABEL.fullmatch(label):
         return label
     return "other"
 
