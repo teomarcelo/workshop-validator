@@ -1,6 +1,7 @@
 import contextlib
 import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -281,6 +282,104 @@ class KeepOrgTests(unittest.TestCase):
             link.symlink_to(outside, target_is_directory=True)
             self.assertRefusedUnchanged(root, link)
             self.assertRefusedUnchanged(root, root / "runs")
+
+    def assertRefusedQuietly(self, root, run_dir):
+        """Exit 2, gate.json byte-identical, one output line, no private path."""
+        gate_file = Path(root, "gate.json")
+        before = gate_file.read_bytes()
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(self._keep(root, run_dir), 2)
+        self.assertEqual(gate_file.read_bytes(), before)
+        text = out.getvalue()
+        self.assertEqual(len(text.strip().splitlines()), 1, text)
+        self.assertTrue(text.startswith("Refused: "), text)
+        self.assertNotIn(str(Path(root).resolve()), text)
+        self.assertNotIn(str(root), text)
+
+    def test_refuses_an_older_run_replayed_after_a_newer_real_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_a = _keep_org_root(folder)
+            self.assertEqual(self._keep(root, run_a), 0)
+            self.assertEqual(load_gate(root)["org"], 1)
+            # Run B on the same org really fails: the gate moves on and freezes.
+            run_b = run_a.parent / "20990102T000000Z-org2"
+            run_b.mkdir()
+            (run_b / "summary.json").write_text(json.dumps(
+                {"org": 2, "outcome": "failed", "stop_step": "s5"}), encoding="utf-8")
+            (run_b / "verdicts.json").write_text(json.dumps({"run_id": run_b.name, "verdicts": [
+                {"step_id": "s5", "verdict": "REAL", "frames": "f.png"}]}), encoding="utf-8")
+            save_gate(root, {"org": 2, "frozen": True, "reason": "x", "last_outcome": "failed",
+                             "last_run": run_b.name})
+            self.assertRefusedQuietly(root, run_a)
+
+    def test_refuses_a_second_keep_for_the_same_run(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            save_gate(root, {"org": 2, "frozen": True, "reason": "x", "last_run": run_dir.name,
+                             "kept_org_reason": {"step_id": "s2", "verdict": "FALSE_FAILURE",
+                                                 "run_id": run_dir.name}})
+            self.assertRefusedQuietly(root, run_dir)
+
+    def test_a_kept_reason_that_is_not_an_object_does_not_crash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            save_gate(root, {"org": 2, "frozen": True, "reason": "x", "last_run": run_dir.name,
+                             "kept_org_reason": "junk"})
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self._keep(root, run_dir), 0)
+            self.assertEqual(load_gate(root)["kept_org_reason"]["run_id"], run_dir.name)
+
+    def test_refuses_a_run_folder_at_the_wrong_depth_inside_runs(self):
+        for depth in ("shallow", "deep"):
+            with self.subTest(depth=depth), tempfile.TemporaryDirectory() as folder:
+                root, run_dir = _keep_org_root(folder)
+                if depth == "shallow":
+                    other = root / "runs" / run_dir.name
+                else:
+                    other = run_dir / run_dir.name
+                other.mkdir()
+                for name in ("summary.json", "verdicts.json"):
+                    (other / name).write_bytes((run_dir / name).read_bytes())
+                self.assertRefusedQuietly(root, other)
+
+    def test_mistyped_or_unreadable_files_refuse_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            rows = [{"step_id": "s2", "verdict": ["FALSE_FAILURE"], "frames": "f.png"}]
+            self.assertRefusedQuietly(*_keep_org_root(folder, verdicts=rows))
+        with tempfile.TemporaryDirectory() as folder:
+            self.assertRefusedQuietly(*_keep_org_root(folder, stop=["s2"]))
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            Path(root, "gate.json").write_text(json.dumps([{"org": 2}]), encoding="utf-8")
+            self.assertRefusedQuietly(root, run_dir)
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads any file")
+    def test_unreadable_verdicts_file_refuses_without_a_traceback(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            verdicts = run_dir / "verdicts.json"
+            verdicts.chmod(0)
+            try:
+                self.assertRefusedQuietly(root, run_dir)
+            finally:
+                verdicts.chmod(0o600)
+
+    def test_load_gate_refuses_a_gate_that_is_not_an_object(self):
+        with tempfile.TemporaryDirectory() as folder:
+            Path(folder, "gate.json").write_text("[1, 2]", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_gate(Path(folder))
+
+    def test_refuses_a_summary_that_is_not_an_object(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            (run_dir / "summary.json").write_text(json.dumps([{"org": 2}]), encoding="utf-8")
+            self.assertRefusedQuietly(root, run_dir)
+
+    def test_refuses_a_verdicts_object_with_no_run_id(self):
+        with tempfile.TemporaryDirectory() as folder:
+            unnamed = {"verdicts": [{"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            self.assertRefusedQuietly(*_keep_org_root(folder, verdicts=unnamed))
 
     def test_keep_org_needs_reset_gate(self):
         with tempfile.TemporaryDirectory() as folder:

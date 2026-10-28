@@ -56,6 +56,8 @@ def load_gate(root: Path) -> dict:
     if not path.is_file():
         return {"org": 0, "frozen": False, "reason": ""}
     gate = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(gate, dict):
+        raise ValueError("malformed gate.json")
     if "org" not in gate:
         gate["org"] = int(gate.get("completed_clean") or 0)
     return gate
@@ -411,7 +413,7 @@ def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
     """
     data = _read_json(run_dir / "verdicts.json")
     if isinstance(data, dict):
-        if str(data.get("run_id") or "") != run_id:
+        if data.get("run_id") != run_id:
             raise ValueError("verdicts.json is for another run")
         rows = data.get("verdicts")
     else:
@@ -429,7 +431,9 @@ def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
 def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     """Unfreeze and undo this run's org move, only for a verified FALSE_FAILURE stop.
 
-    Touches only gate.json. Refuses (exit 2, nothing changed) otherwise.
+    This unfreezes without a fix: the same validator bug can stop the same org again.
+    Only the gate's last run counts, and each run is kept at most once. Touches only
+    gate.json. Refuses (exit 2, one line, nothing changed) otherwise.
     """
     def refuse(reason: str) -> int:
         print(f"Refused: {reason}. The gate is unchanged.")
@@ -437,8 +441,8 @@ def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
 
     runs = (Path(private_root) / "runs").resolve()
     run_dir = Path(run_dir).expanduser().resolve()
-    if not run_dir.is_relative_to(runs):
-        return refuse("the run folder is not inside the private runs folder")
+    if run_dir.parent.parent != runs:
+        return refuse("the run folder is not <private root>/runs/<org-key>/<run-id>")
     run_id = run_dir.name
     try:
         summary = _read_json(run_dir / "summary.json")
@@ -448,10 +452,17 @@ def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
+        # Every verdict on the stop step must be FALSE_FAILURE; a mixed record keeps the move.
+        found = verdicts.get(stop)
     except ValueError as error:
         return refuse(str(error))
-    # Every verdict on the stop step must be FALSE_FAILURE; a mixed record keeps the move.
-    found = verdicts.get(stop)
+    except (OSError, TypeError):
+        return refuse("the run files or gate.json could not be read")
+    if gate.get("last_run") != run_id:
+        return refuse("the run is not the gate's last run")
+    kept = gate.get("kept_org_reason")
+    if isinstance(kept, dict) and kept.get("run_id") == run_id:
+        return refuse("this run already kept its org")
     if found != {"FALSE_FAILURE"}:
         return refuse(f"stop step {stop} is {'/'.join(sorted(found or ())) or 'not verified'}, "
                       "not FALSE_FAILURE")
@@ -476,8 +487,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     parser.add_argument("--reset-gate", action="store_true", help="Unfreeze after a verified fix.")
     parser.add_argument("--keep-org", metavar="RUN_DIR",
-                        help="With --reset-gate: undo that run's org move when step-verifier "
-                             "judged its stop step FALSE_FAILURE.")
+                        help="With --reset-gate: undo the last run's org move when step-verifier "
+                             "judged its stop step FALSE_FAILURE. Unfreezes without a fix, so the "
+                             "same bug can stop the same org again. One use per run.")
     parser.add_argument("--json", action="store_true", help="Print a sanitized JSON summary.")
     parser.add_argument("--no-open", action="store_true", help="Do not open the live report in the browser.")
     args = parser.parse_args(argv)
