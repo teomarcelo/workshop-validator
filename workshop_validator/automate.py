@@ -12,6 +12,7 @@ outside the repository and are never printed.
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 import argparse
 import json
 import sys
@@ -126,6 +127,16 @@ def outcome_of(result) -> tuple[str, str]:
     return SUCCESS, ""
 
 
+def stopping_step_of(steps):
+    """The last non-NOT_RUN step before a NOT_RUN tail, or None when nothing ran."""
+    for i, step in enumerate(steps):
+        if step.status != "NOT_RUN":
+            # Check if all remaining steps are NOT_RUN
+            if all(s.status == "NOT_RUN" for s in steps[i + 1:]):
+                return step
+    return None
+
+
 def gate_outcome_of(result) -> str:
     """Classify for the org-move decision, judging only the stopping step.
 
@@ -136,14 +147,7 @@ def gate_outcome_of(result) -> str:
     if not steps:
         return outcome_of(result)[0]
 
-    # Find the stopping step: the last non-NOT_RUN step before a NOT_RUN tail
-    stopping_step = None
-    for i, step in enumerate(steps):
-        if step.status != "NOT_RUN":
-            # Check if all remaining steps are NOT_RUN
-            if all(s.status == "NOT_RUN" for s in steps[i + 1:]):
-                stopping_step = step
-                break
+    stopping_step = stopping_step_of(steps)
 
     # No stopping step means the walk ran to the end
     if stopping_step is None:
@@ -200,6 +204,7 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
     for step in result.report_steps:
         counts[step.status] = counts.get(step.status, 0) + 1
     first = next((s for s in result.report_steps if s.status not in {"PASS", "NOT_RUN"}), None)
+    stop = stopping_step_of(result.report_steps)
     return {
         "org": index + 1,
         "orgs": total,
@@ -211,6 +216,7 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
         "first_failure": None if first is None else {
             "step_id": first.step_id, "page": first.page, "status": first.status,
         },
+        "stop_step": None if stop is None else stop.step_id,
         "run_dir": str(run_dir),
     }
 
@@ -373,17 +379,114 @@ def reset_gate(private_root: Path) -> int:
     return 0
 
 
+_VERDICTS = {"CONFIRMED_PASS", "REAL", "FALSE_FAILURE", "FALSE_PASS", "UNCLEAR"}
+
+
+def _read_json(path: Path):
+    """Read a run file; a bad file raises ValueError (json errors are ValueErrors)."""
+    if not path.is_file() or path.is_symlink():
+        raise ValueError(f"missing {path.name}")
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _board_stop_step(run_dir: Path) -> str | None:
+    """Stop step from board.json order, for summaries written before stop_step existed."""
+    board = _read_json(run_dir / "board.json")
+    try:
+        steps = [SimpleNamespace(step_id=str(st["step_id"]), status=str(st["status"]))
+                 for section in board["sections"] for task in section["tasks"] for st in task["steps"]]
+    except (KeyError, TypeError):
+        raise ValueError("malformed board.json") from None
+    stop = stopping_step_of(steps)
+    return None if stop is None else stop.step_id
+
+
+def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
+    """Read verdicts.json as {step_id: every verdict given to that step}.
+
+    Schema: {"run_id": str, "verdicts": [{"step_id": str, "verdict": one of _VERDICTS,
+    "frames": str}]}. The step-verifier's own form (extra "status", "evidence", "mode",
+    "frames" as a list) and a bare list of verdict rows are read too, never written.
+    A run_id that names another run, or any malformed row, is refused.
+    """
+    data = _read_json(run_dir / "verdicts.json")
+    if isinstance(data, dict):
+        if str(data.get("run_id") or "") != run_id:
+            raise ValueError("verdicts.json is for another run")
+        rows = data.get("verdicts")
+    else:
+        rows = data
+    if not isinstance(rows, list):
+        raise ValueError("malformed verdicts.json")
+    verdicts: dict[str, set[str]] = {}
+    for row in rows:
+        if not isinstance(row, dict) or row.get("verdict") not in _VERDICTS or not row.get("step_id"):
+            raise ValueError("malformed verdicts.json")
+        verdicts.setdefault(str(row["step_id"]), set()).add(str(row["verdict"]))
+    return verdicts
+
+
+def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
+    """Unfreeze and undo this run's org move, only for a verified FALSE_FAILURE stop.
+
+    Touches only gate.json. Refuses (exit 2, nothing changed) otherwise.
+    """
+    def refuse(reason: str) -> int:
+        print(f"Refused: {reason}. The gate is unchanged.")
+        return 2
+
+    runs = (Path(private_root) / "runs").resolve()
+    run_dir = Path(run_dir).expanduser().resolve()
+    if not run_dir.is_relative_to(runs):
+        return refuse("the run folder is not inside the private runs folder")
+    run_id = run_dir.name
+    try:
+        summary = _read_json(run_dir / "summary.json")
+        if not isinstance(summary, dict) or isinstance(summary.get("org"), bool) \
+                or not isinstance(summary.get("org"), int) or summary["org"] < 1:
+            raise ValueError("malformed summary.json")
+        stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
+        verdicts = load_verdicts(run_dir, run_id)
+        gate = load_gate(private_root)
+    except ValueError as error:
+        return refuse(str(error))
+    # Every verdict on the stop step must be FALSE_FAILURE; a mixed record keeps the move.
+    found = verdicts.get(stop)
+    if found != {"FALSE_FAILURE"}:
+        return refuse(f"stop step {stop} is {'/'.join(sorted(found or ())) or 'not verified'}, "
+                      "not FALSE_FAILURE")
+    run_index = summary["org"] - 1
+    if gate.get("org") != run_index + 1:
+        return refuse(f"the gate is not on the org right after org {run_index + 1}")
+    gate.update({
+        "org": run_index,
+        "frozen": False,
+        "reason": "",
+        "kept_org_reason": {"step_id": str(stop), "verdict": "FALSE_FAILURE", "run_id": run_id},
+    })
+    save_gate(private_root, gate)
+    print(f"Gate open. Org kept: stop step {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the current verification org.")
     parser.add_argument("--guide")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     parser.add_argument("--reset-gate", action="store_true", help="Unfreeze after a verified fix.")
+    parser.add_argument("--keep-org", metavar="RUN_DIR",
+                        help="With --reset-gate: undo that run's org move when step-verifier "
+                             "judged its stop step FALSE_FAILURE.")
     parser.add_argument("--json", action="store_true", help="Print a sanitized JSON summary.")
     parser.add_argument("--no-open", action="store_true", help="Do not open the live report in the browser.")
     args = parser.parse_args(argv)
     root = Path(args.private_root).expanduser()
+    if args.keep_org and not args.reset_gate:
+        parser.error("--keep-org needs --reset-gate")
     if args.reset_gate:
+        if args.keep_org:
+            return reset_gate_keep_org(root, Path(args.keep_org))
         return reset_gate(root)
     if not args.guide:
         parser.error("--guide is required unless --reset-gate is given")

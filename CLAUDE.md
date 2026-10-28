@@ -107,6 +107,7 @@ RUN_BROWSER_SMOKE=1 .venv/bin/python -m unittest tests.test_browser_worker tests
 .venv/bin/python -m workshop_validator.public_safety      # tracked-file gate
 .venv/bin/python -m workshop_validator.automate --guide <pdf> --json   # one org run
 .venv/bin/python -m workshop_validator.automate --reset-gate           # after a verified fix
+.venv/bin/python -m workshop_validator.automate --reset-gate --keep-org <run_dir>  # stop was a verified FALSE_FAILURE
 .venv/bin/python -m workshop_validator.lessons --step "<step text>"    # private lessons
 .venv/bin/python -m workshop_validator.lessons --rules                 # never: rules for agents
 .venv/bin/python -m workshop_validator.step_board --render <run_dir>   # report.html
