@@ -18,7 +18,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 
 from .browser_worker import BrowserActionError
@@ -3421,7 +3421,80 @@ class _CutWaits:
         return False
 
 
-def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun) -> CheckResult | None:
+def _redact_aria_snapshot(snapshot: str) -> str:
+    """Redact accessibility tree: keep structure, dismiss names, glyphs; replace other text."""
+    dismiss_lower = set(name.lower() for name in _POPUP_DISMISS_NAMES)
+    lines = []
+    for line in snapshot.splitlines():
+        if line.strip().startswith("/url:") or (line.strip().startswith("/") and ":" in line and not line.strip().startswith("- ")):
+            continue
+        parts = line.split('"', 2)
+        if len(parts) >= 3:
+            before, name, after = parts[0], parts[1], parts[2]
+            if name.lower() not in dismiss_lower:
+                name = "<text>"
+            if after.startswith(": "):
+                colon_text = after[2:].split()[0] if after[2:].split() else ""
+                if colon_text and (len(colon_text) <= 2 and not colon_text.isalnum() or colon_text.lower() == "x"):
+                    lines.append(f'{before}"{name}"{after}')
+                else:
+                    lines.append(f'{before}"{name}": <text>')
+            else:
+                lines.append(f'{before}"{name}"{after}')
+        else:
+            # No quoted name, check for inline text after colon
+            if ": " in line:
+                prefix, text = line.split(": ", 1)
+                if text and (len(text) <= 2 and not text.isalnum() or text.lower() == "x"):
+                    lines.append(line)
+                else:
+                    lines.append(f"{prefix}: <text>")
+            else:
+                lines.append(line)
+    return " / ".join(lines)[:600] + ("..." if len(" / ".join(lines)) > 600 else "")
+
+
+def _add_dialog_diagnostic(state: WalkState, step: GuideStep, blocked: CheckResult) -> CheckResult:
+    """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed."""
+    if _time_left(state) < 2:
+        note = blocked.note + " Diagnostic: tree: skipped, step time nearly used."
+        return replace(blocked, note=note)
+
+    found = _unnamed_modal(state.page, step.text or "")
+    if not found:
+        return blocked
+
+    dialog, _title = found
+    try:
+        handle = dialog.element_handle(timeout=2000)
+    except Exception:
+        return blocked
+
+    tracked = None if handle is None else _tracked_dialog(handle)
+    if tracked is None:
+        return blocked
+
+    button = _dialog_dismiss_button(tracked)
+    click_attempted = "yes" if button is not None else "no"
+    escape_pressed = "yes" if button is None else "no"
+
+    try:
+        still_visible = "yes" if handle.is_visible() else "no"
+    except Exception:
+        still_visible = "yes"
+
+    try:
+        snapshot = tracked.aria_snapshot(timeout=1500)
+        tree = _redact_aria_snapshot(snapshot)
+    except Exception:
+        tree = "unavailable"
+
+    note = (f"{blocked.note} Diagnostic: click attempted {click_attempted}; "
+            f"Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}.")
+    return replace(blocked, note=note)
+
+
+def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun, collect_diagnostic: bool = True) -> CheckResult | None:
     """W-080: close the unrelated pop-up, then rerun ONLY the action that missed.
 
     RERUN returns None when the action now completed, or a CheckResult. Actions
@@ -3433,6 +3506,8 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
             return blocked
         closed = _close_unrelated_popup(state, step)
         if not closed:
+            if collect_diagnostic:
+                blocked = _add_dialog_diagnostic(state, step, blocked)
             return blocked
         state.popup_notes.append(_popup_note(closed))
         with _CutWaits(state):
@@ -3446,6 +3521,8 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
         if result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL") and not renamed:
             return _after_popup_result()
         return result
+    if collect_diagnostic:
+        blocked = _add_dialog_diagnostic(state, step, blocked)
     return blocked
 
 
