@@ -19,6 +19,7 @@ import time
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
+import shlex
 from urllib.parse import urlparse
 
 from .browser_worker import BrowserActionError
@@ -68,6 +69,18 @@ class ResearchResult:
 
     pending: bool = False
     candidate: str = ""
+
+
+@dataclass(frozen=True)
+class CloseAttempt:
+    """Result of one dialog close attempt."""
+
+    click_attempted: bool = False
+    click_raised: bool = False
+    escape_pressed: bool = False
+    escape_raised: bool = False
+    still_visible: bool = True
+    handle: object = None
 
 
 @dataclass(frozen=True)
@@ -3310,17 +3323,19 @@ def _dialog_gone(state: WalkState, handle, wait_s: float = 6.0) -> bool:
         waited += 0.5
 
 
-def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
-    """Close one unnamed pop-up with its own dismiss control. Returns its title, or None."""
+def _close_unrelated_popup(state: WalkState, step: GuideStep) -> tuple[str | None, CloseAttempt]:
+    """Close one unnamed pop-up with its own dismiss control. Returns (title, attempt)."""
     found = _unnamed_modal(state.page, step.text or "")
     if not found:
-        return None
+        return None, CloseAttempt()
     dialog, title = found
-    return title if _close_dialog(state, dialog) else None
+    attempt = _close_dialog(state, dialog)
+    success = not attempt.still_visible and not attempt.click_raised and not attempt.escape_raised
+    return (title if success else None), attempt
 
 
-def _close_dialog(state: WalkState, dialog) -> bool:
-    """Close this dialog with its own dismiss control (exact name), else Escape. True when it went away."""
+def _close_dialog(state: WalkState, dialog) -> CloseAttempt:
+    """Close this dialog with its own dismiss control (exact name), else Escape. Returns what happened."""
     # Track this element, not its position: another dialog can take the same index.
     try:
         handle = dialog.element_handle(timeout=2000)
@@ -3328,20 +3343,36 @@ def _close_dialog(state: WalkState, dialog) -> bool:
         handle = None
     tracked = None if handle is None else _tracked_dialog(handle)
     if tracked is None:
-        return False
+        return CloseAttempt()
+
     button = _dialog_dismiss_button(tracked)
+    click_attempted = button is not None
+    click_raised = False
+    escape_pressed = False
+    escape_raised = False
+
     if button is not None:
         try:
             button.click(timeout=5000)
         except Exception:
-            return False
+            click_raised = True
     else:
         keyboard = getattr(state.page, "keyboard", None)
         try:
             keyboard.press("Escape")
+            escape_pressed = True
         except Exception:
-            return False
-    return _dialog_gone(state, handle)
+            escape_raised = True
+
+    still_visible = not _dialog_gone(state, handle)
+    return CloseAttempt(
+        click_attempted=click_attempted,
+        click_raised=click_raised,
+        escape_pressed=escape_pressed,
+        escape_raised=escape_raised,
+        still_visible=still_visible,
+        handle=handle,
+    )
 
 
 PROMO_CLOSED_NOTE = "Environment: closed a promotional pop-up the guide does not mention (owner rule W-080)."
@@ -3359,7 +3390,10 @@ def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
     if PROMO_CLOSED_NOTE in state.popup_notes:
         return blocked
     item = _promo_item(state.page, step.text or "")
-    if item is None or not _close_dialog(state, item):
+    if item is None:
+        return blocked
+    attempt = _close_dialog(state, item)
+    if attempt.still_visible or attempt.click_raised or attempt.escape_raised:
         return blocked
     state.popup_notes.append(PROMO_CLOSED_NOTE)
     return blocked if _promo_over(state, step) else None
@@ -3421,76 +3455,157 @@ class _CutWaits:
         return False
 
 
+_ARIA_ROLES = frozenset([
+    "alert", "alertdialog", "application", "article", "banner", "button", "cell", "checkbox",
+    "columnheader", "combobox", "complementary", "contentinfo", "definition", "dialog", "directory",
+    "document", "feed", "figure", "form", "grid", "gridcell", "group", "heading", "img", "link",
+    "list", "listbox", "listitem", "log", "main", "marquee", "math", "menu", "menubar", "menuitem",
+    "menuitemcheckbox", "menuitemradio", "navigation", "none", "note", "option", "paragraph",
+    "presentation", "progressbar", "radio", "radiogroup", "region", "row", "rowgroup", "rowheader",
+    "scrollbar", "search", "searchbox", "separator", "slider", "spinbutton", "status", "switch",
+    "tab", "table", "tablist", "tabpanel", "term", "textbox", "timer", "toolbar", "tooltip", "tree",
+    "treegrid", "treeitem",
+])
+_ALLOWED_ATTRS = frozenset(["level", "checked", "expanded", "disabled", "pressed", "selected"])
+_ALLOWED_GLYPHS = frozenset(["×", "✕", "✖", "x", "X"])
+
+
+def _parse_aria_line(line: str) -> tuple[str, str, str, dict, str] | None:
+    """Parse aria_snapshot line into (indent, role, name, attrs, value). None if property line or text node."""
+    stripped = line.lstrip()
+    if not stripped.startswith("- "):
+        return None
+    if stripped.startswith("- /"):
+        return None
+    if stripped.startswith("- text:"):
+        return None
+
+    indent = line[: len(line) - len(stripped)]
+    rest = stripped[2:]
+
+    # Extract role (first word, may have trailing colon)
+    parts = rest.split(None, 1)
+    if not parts:
+        return None
+    role = parts[0].rstrip(":")
+    remainder = parts[1] if len(parts) > 1 else ""
+
+    # Parse quoted name if present
+    name = ""
+    if remainder.startswith('"'):
+        try:
+            # Find the closing quote, handling escapes
+            i = 1
+            while i < len(remainder):
+                if remainder[i] == '\\' and i + 1 < len(remainder):
+                    i += 2
+                    continue
+                if remainder[i] == '"':
+                    name = remainder[1:i]
+                    remainder = remainder[i + 1:].lstrip()
+                    break
+                i += 1
+        except Exception:
+            pass
+
+    # Parse attributes [key=val]
+    attrs = {}
+    while remainder.startswith("["):
+        end = remainder.find("]")
+        if end == -1:
+            break
+        attr_str = remainder[1:end]
+        if "=" in attr_str:
+            key, val = attr_str.split("=", 1)
+            attrs[key.strip()] = val.strip()
+        remainder = remainder[end + 1 :].lstrip()
+
+    # Extract inline value after colon
+    value = ""
+    if remainder.startswith(":"):
+        value = remainder[1:].strip()
+
+    return indent, role, name, attrs, value
+
+
 def _redact_aria_snapshot(snapshot: str) -> str:
-    """Redact accessibility tree: keep structure, dismiss names, glyphs; replace other text."""
+    """Redact accessibility tree: keep structure, allow-listed roles/names/glyphs only."""
     dismiss_lower = set(name.lower() for name in _POPUP_DISMISS_NAMES)
     lines = []
+
     for line in snapshot.splitlines():
-        if line.strip().startswith("/url:") or (line.strip().startswith("/") and ":" in line and not line.strip().startswith("- ")):
+        parsed = _parse_aria_line(line)
+        if parsed is None:
             continue
-        parts = line.split('"', 2)
-        if len(parts) >= 3:
-            before, name, after = parts[0], parts[1], parts[2]
-            if name.lower() not in dismiss_lower:
-                name = "<text>"
-            if after.startswith(": "):
-                colon_text = after[2:].split()[0] if after[2:].split() else ""
-                if colon_text and (len(colon_text) <= 2 and not colon_text.isalnum() or colon_text.lower() == "x"):
-                    lines.append(f'{before}"{name}"{after}')
-                else:
-                    lines.append(f'{before}"{name}": <text>')
+
+        indent, role, name, attrs, value = parsed
+
+        # Role: keep if in ARIA roles set, else "<role>"
+        if role.lower() not in _ARIA_ROLES:
+            role = "<role>"
+
+        # Name: keep only if exactly matches dismiss name (case-insensitive)
+        if name:
+            if name.lower() in dismiss_lower:
+                name_out = f' "{name}"'
             else:
-                lines.append(f'{before}"{name}"{after}')
+                name_out = ' "<text>"'
         else:
-            # No quoted name, check for inline text after colon
-            if ": " in line:
-                prefix, text = line.split(": ", 1)
-                if text and (len(text) <= 2 and not text.isalnum() or text.lower() == "x"):
-                    lines.append(line)
-                else:
-                    lines.append(f"{prefix}: <text>")
+            name_out = ""
+
+        # Attrs: keep only allowed ones
+        attrs_out = ""
+        for key in _ALLOWED_ATTRS:
+            if key in attrs:
+                attrs_out += f" [{key}={attrs[key]}]"
+
+        # Value: keep only if exactly an allowed glyph
+        value_out = ""
+        if value:
+            if value in _ALLOWED_GLYPHS:
+                value_out = f": {value}"
             else:
-                lines.append(line)
+                value_out = ": <text>"
+
+        lines.append(f"{indent}- {role}{name_out}{attrs_out}{value_out}")
+
     return " / ".join(lines)[:600] + ("..." if len(" / ".join(lines)) > 600 else "")
 
 
-def _add_dialog_diagnostic(state: WalkState, step: GuideStep, blocked: CheckResult) -> CheckResult:
+def _add_dialog_diagnostic(state: WalkState, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0) -> CheckResult:
     """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed."""
-    if _time_left(state) < 2:
-        note = blocked.note + " Diagnostic: tree: skipped, step time nearly used."
-        return replace(blocked, note=note)
+    click_attempted = "yes" if attempt.click_attempted else "no"
+    escape_pressed = "yes" if attempt.escape_pressed else "no"
+    still_visible = "yes" if attempt.still_visible else "no"
 
-    found = _unnamed_modal(state.page, step.text or "")
-    if not found:
-        return blocked
+    time_left = _time_left(state)
+    if time_left < 2:
+        tree = "skipped, step time nearly used"
+    elif attempt.handle is None:
+        tree = "dialog gone"
+    else:
+        try:
+            # Check if dialog is actually gone at snapshot time
+            if not attempt.handle.is_visible():
+                tree = "dialog gone"
+            else:
+                tracked = _tracked_dialog(attempt.handle)
+                if tracked is None:
+                    tree = "unavailable"
+                else:
+                    timeout_ms = min(1500, int((time_left - 1.0) * 1000))
+                    if timeout_ms <= 0:
+                        tree = "skipped, step time nearly used"
+                    else:
+                        snapshot = tracked.aria_snapshot(timeout=timeout_ms)
+                        tree = _redact_aria_snapshot(snapshot)
+        except Exception:
+            tree = "unavailable"
 
-    dialog, _title = found
-    try:
-        handle = dialog.element_handle(timeout=2000)
-    except Exception:
-        return blocked
-
-    tracked = None if handle is None else _tracked_dialog(handle)
-    if tracked is None:
-        return blocked
-
-    button = _dialog_dismiss_button(tracked)
-    click_attempted = "yes" if button is not None else "no"
-    escape_pressed = "yes" if button is None else "no"
-
-    try:
-        still_visible = "yes" if handle.is_visible() else "no"
-    except Exception:
-        still_visible = "yes"
-
-    try:
-        snapshot = tracked.aria_snapshot(timeout=1500)
-        tree = _redact_aria_snapshot(snapshot)
-    except Exception:
-        tree = "unavailable"
-
-    note = (f"{blocked.note} Diagnostic: click attempted {click_attempted}; "
-            f"Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}.")
+    if loop_count > 0:
+        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} closes; click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+    else:
+        note = f"{blocked.note} Diagnostic: click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     return replace(blocked, note=note)
 
 
@@ -3501,15 +3616,19 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun,
     that already ran in this step are never repeated. A rerun that misses again
     stays ENV_BLOCKED: a pop-up never becomes a real failure. Closing is never evidence.
     """
+    last_attempt = None
+    loop_count = 0
     for _ in range(_POPUP_CLOSE_LIMIT):
         if _time_left(state) <= 0:
             return blocked
-        closed = _close_unrelated_popup(state, step)
-        if not closed:
+        title, attempt = _close_unrelated_popup(state, step)
+        last_attempt = attempt
+        if not title:
             if collect_diagnostic:
-                blocked = _add_dialog_diagnostic(state, step, blocked)
+                blocked = _add_dialog_diagnostic(state, attempt, blocked, loop_count)
             return blocked
-        state.popup_notes.append(_popup_note(closed))
+        loop_count += 1
+        state.popup_notes.append(_popup_note(title))
         with _CutWaits(state):
             result = rerun()
         if result is None:
@@ -3521,8 +3640,8 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun,
         if result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL") and not renamed:
             return _after_popup_result()
         return result
-    if collect_diagnostic:
-        blocked = _add_dialog_diagnostic(state, step, blocked)
+    if collect_diagnostic and last_attempt:
+        blocked = _add_dialog_diagnostic(state, last_attempt, blocked, loop_count)
     return blocked
 
 
