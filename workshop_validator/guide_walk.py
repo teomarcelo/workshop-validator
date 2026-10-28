@@ -13,6 +13,7 @@ The password is never changed here.
 
 from __future__ import annotations
 
+import itertools
 import re
 import time
 import unicodedata
@@ -3003,6 +3004,20 @@ def _dialog_dismiss_button(dialog):
     return None
 
 
+_POPUP_MARKS = itertools.count(1)
+
+
+def _tracked_dialog(handle):
+    """A locator bound to this dialog element by a data mark, not to its position among dialogs."""
+    try:
+        frame = handle.owner_frame()
+        mark = f"wv-popup-{next(_POPUP_MARKS)}"
+        handle.evaluate("(el, mark) => el.setAttribute('data-wv-popup', mark)", mark)
+        return frame.locator(f"[data-wv-popup='{mark}']")
+    except Exception:
+        return None
+
+
 def _time_left(state: WalkState) -> float:
     """Seconds left in this step's time cap (the cap runs from the step's start)."""
     if state.step_deadline is None:
@@ -3037,9 +3052,10 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
         handle = dialog.element_handle(timeout=2000)
     except Exception:
         handle = None
-    if handle is None:
+    tracked = None if handle is None else _tracked_dialog(handle)
+    if tracked is None:
         return None
-    button = _dialog_dismiss_button(dialog)
+    button = _dialog_dismiss_button(tracked)
     if button is not None:
         try:
             button.click(timeout=5000)

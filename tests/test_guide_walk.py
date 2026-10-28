@@ -213,6 +213,15 @@ class Loc:
         """The fake element is keyed by (kind, name), so it is its own handle."""
         return self
 
+    def owner_frame(self):
+        return self.page
+
+    def evaluate(self, script, arg=None):
+        """Only the data mark is supported: page.locator("[data-wv-popup='<mark>']") finds this element."""
+        if "data-wv-popup" not in script:
+            raise NotImplementedError(script)
+        self.page.marks[arg] = (self.kind, self.name)
+
     def locator(self, selector):
         """Controls inside this element, from page.children."""
         inside = self.page.children.get((self.kind, self.name), ())
@@ -330,6 +339,7 @@ class Page:
         self._frames = None
         self.keys = []
         self.keyboard = _Keyboard(self)
+        self.marks = {}  # data-wv-popup mark -> (kind, name) of the marked element
 
     @property
     def frames(self):
@@ -349,6 +359,9 @@ class Page:
             return Loc(self, "body")
         if "spinner" in selector or "progressbar" in selector:
             return Loc(self, "spinner")
+        mark = re.fullmatch(r"\[data-wv-popup='([^']+)'\]", selector)
+        if mark:
+            return Loc(self, *self.marks.get(mark.group(1), ("css", selector)))
         # Handle [role='...'] selectors
         role_match = re.search(r"""\[role=['"](\w+)['"]\]""", selector)
         if role_match:
@@ -3532,6 +3545,102 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
             ("click", "link", "Settings"),
         ])
 
+    # V19 fix round 2: each resume guard has a test that fails when the guard is removed.
+
+    def toggling_row_page(self, first_click_fails):
+        """A row dropdown that toggles. The first click opens the menu without Delete and a pop-up covers it."""
+        page = Page("https://example.lightning.force.com/lightning/o/Report/home", body="Reports")
+        row, button = ("row", "Report Alpha"), ("button", "Show actions")
+        page.roles.update({row, button})
+        page.children[row] = [button]
+        page.has_popup.add(button)
+        menu, delete = ("menu", "Actions"), ("menuitem", "Delete")
+        shown = []
+        page.closed = False
+
+        def react(kind, name):
+            if (kind, name) == button:
+                if menu in page.roles:  # A second click closes the menu.
+                    page.roles.difference_update({menu, delete})
+                    return
+                page.roles.add(menu)
+                if not shown:
+                    shown.append(self.add_popup(page, "Welcome Tour", "Close"))
+                    if first_click_fails:
+                        raise RuntimeError("click intercepted by the pop-up")
+            elif name == "Close":
+                page.roles.discard(shown[-1])
+                page.closed = True  # The menu stays open; Delete is not in it yet.
+
+        page.on_click = react
+        return page, menu, delete
+
+    def walk_with_late_item(self, page, menu, delete):
+        """Delete appears in the open menu only after time passes (a delayed menu)."""
+        clock = Clock()
+
+        def sleeper(seconds):
+            clock.sleep(seconds)
+            if page.closed and menu in page.roles:
+                page.roles.add(delete)
+
+        return walk_guide(
+            page, inventory_of(self.row_step()),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=sleeper,
+        )
+
+    def test_open_row_menu_without_item_after_close_is_not_clicked_again(self):
+        page, menu, delete = self.toggling_row_page(first_click_fails=False)
+        outcome = self.walk_with_late_item(page, menu, delete)
+        self.assertEqual(
+            [event for event in self.clicks(page) if event[2] == "Show actions"],
+            [("click", "button", "Show actions")],
+        )
+        self.assertIn(("click", "button", "Close"), page.events)
+        self.assertNotEqual(outcome.statuses["row"], "PASS")
+
+    def test_blocked_row_click_with_menu_open_after_close_is_not_clicked_again(self):
+        page, menu, delete = self.toggling_row_page(first_click_fails=True)
+        outcome = self.walk_with_late_item(page, menu, delete)
+        self.assertEqual(
+            [event for event in self.clicks(page) if event[2] == "Show actions"],
+            [("click", "button", "Show actions")],
+        )
+        self.assertIn(("click", "button", "Close"), page.events)
+        self.assertNotEqual(outcome.statuses["row"], "PASS")
+
+    def test_blocked_view_profile_with_panel_open_after_close_is_not_clicked_again(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+        page.roles.add(("button", "View profile"))
+        settings = ("link", "Settings")
+        shown = []
+
+        def react(kind, name):
+            if name == "View profile":
+                if settings in page.roles:  # View profile toggles: a second click closes the panel.
+                    page.roles.discard(settings)
+                    return
+                shown.append(self.add_popup(page, "Help Agent", "Close"))
+                raise RuntimeError("click intercepted by the pop-up")
+            elif name == "Close":
+                page.roles.discard(shown[-1])
+                page.roles.add(settings)  # The panel opened behind the pop-up.
+            elif name == "Settings":
+                page.values["First Name"] = "Synthetic"
+
+        page.on_click = react
+        item = step(
+            "settings", SETUP, "Task 1: Update your user.", "1",
+            "Select the profile picture and select Settings.",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(self.clicks(page), [
+            ("click", "button", "View profile"),
+            ("click", "button", "Close"),
+            ("click", "link", "Settings"),
+        ])
+        self.assertEqual(outcome.statuses["settings"], "PASS")
+
     def test_closes_and_resumes_stay_inside_one_time_cap_for_the_step(self):
         page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
         shown = [self.add_popup(page, "Tip 1", "Close")]
@@ -3584,6 +3693,55 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         outcome = self.walk(page, (self.accounts_step(),))
         self.assertIn('closed "Tip A" pop-up', outcome.notes["open-accounts"])
         self.assertIn(("click", "link", "Accounts"), page.events)
+
+    def test_dismiss_button_is_searched_in_the_tracked_dialog_when_another_takes_its_index(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        first = self.add_popup(page, "Tip A", "Close")
+        second = []
+
+        class Positional:
+            """Like a real locator: nth(i) is whatever dialog is at index i when it is read."""
+
+            def __init__(self, index=None):
+                self.index = index
+
+            def _now(self):
+                items = sorted(item for item in page.roles if item[0] == "dialog")
+                if self.index is not None and self.index < len(items):
+                    return Loc(page, *items[self.index])
+                return Loc(page, "dialog", "")
+
+            def count(self):
+                return len([item for item in page.roles if item[0] == "dialog"])
+
+            def nth(self, index):
+                return Positional(index)
+
+            def element_handle(self, timeout=None):
+                handle = self._now()
+                if not second:  # Right after the handle is taken, a new dialog takes index 0.
+                    second.append(self_test.add_popup(page, "Tip 0", "Dismiss"))
+                return handle
+
+            def __getattr__(self, name):
+                return getattr(self._now(), name)
+
+        self_test = self
+        plain = page.locator
+        page.locator = lambda selector: Positional() if selector == "[role='dialog']" else plain(selector)
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(first)
+            elif name == "Dismiss":
+                page.roles.discard(second[0])
+            if not any(item[0] == "dialog" for item in page.roles):
+                page.roles.add(("link", "Accounts"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(self.clicks(page)[0], ("click", "button", "Close"))
+        self.assertIn('closed "Tip A" pop-up', outcome.notes["open-accounts"])
 
     def test_ok_is_clicked_only_when_it_is_the_only_button(self):
         page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
