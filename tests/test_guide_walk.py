@@ -3743,6 +3743,56 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         self.assertEqual(self.clicks(page)[0], ("click", "button", "Close"))
         self.assertIn('closed "Tip A" pop-up', outcome.notes["open-accounts"])
 
+    def test_untracked_dialog_is_not_clicked_and_escape_is_not_pressed(self):
+        def fails(*args, **kwargs):
+            raise RuntimeError("synthetic: element detached")
+
+        for broken in ("evaluate", "element_handle"):
+            for buttons in (("Close",), ()):
+                with self.subTest(broken=broken, buttons=buttons):
+                    page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+                    dialog = self.add_popup(page, "Welcome Tour", *buttons)
+
+                    def react(kind, name, page=page, dialog=dialog):
+                        if name == "Close":
+                            page.roles.discard(dialog)
+                            page.roles.add(("link", "Accounts"))
+
+                    def on_key(key, page=page, dialog=dialog):
+                        if key == "Escape":
+                            page.roles.discard(dialog)
+                            page.roles.add(("link", "Accounts"))
+
+                    page.on_click = react
+                    page.on_key = on_key
+                    with patch.object(Loc, broken, fails):
+                        outcome = self.walk(page, (self.accounts_step(),))
+                    self.assertEqual(self.clicks(page), [])
+                    self.assertNotIn("Escape", page.keys)
+                    self.assertEqual(outcome.statuses["open-accounts"], "ENV_BLOCKED")
+                    self.assertNotIn("W-080", outcome.notes["open-accounts"])
+
+    def test_two_dialogs_closed_in_one_run_get_different_marks(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        first = self.add_popup(page, "Tip A", "Close")
+        second = []
+
+        def react(kind, name):
+            if name == "Close" and first in page.roles:
+                page.roles.discard(first)
+                second.append(self.add_popup(page, "Tip B", "Dismiss"))
+            elif name == "Dismiss":
+                page.roles.discard(second[0])
+                page.roles.add(("link", "Accounts"))
+
+        page.on_click = react
+        # Short waits so two closes fit inside the one time cap for the step.
+        outcome = self.walk(page, (self.accounts_step(),), page_wait_s=4, page_poll_s=1)
+        self.assertIn('closed "Tip A" pop-up', outcome.notes["open-accounts"])
+        self.assertIn('closed "Tip B" pop-up', outcome.notes["open-accounts"])
+        self.assertEqual(len(page.marks), 2)
+        self.assertEqual(sorted(page.marks.values()), sorted([first, second[0]]))
+
     def test_ok_is_clicked_only_when_it_is_the_only_button(self):
         page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
         self.add_popup(page, "Welcome Tour", "Get started", "OK")

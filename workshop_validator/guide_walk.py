@@ -3009,6 +3009,7 @@ _POPUP_MARKS = itertools.count(1)
 
 def _tracked_dialog(handle):
     """A locator bound to this dialog element by a data mark, not to its position among dialogs."""
+    # The mark is left in place on purpose: marks never repeat, and re-marking overwrites.
     try:
         frame = handle.owner_frame()
         mark = f"wv-popup-{next(_POPUP_MARKS)}"
