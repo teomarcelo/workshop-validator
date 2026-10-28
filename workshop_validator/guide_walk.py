@@ -4197,6 +4197,23 @@ def _detect_suspect_flags(
     return tuple(flags)
 
 
+def _clicked_tab_selected(loc) -> bool:
+    """The clicked element's own tab (itself or its nearest role=tab ancestor) is selected.
+
+    Only that one element is read; another tab on the page is never evidence.
+    """
+    target = _visible_match(loc)
+    if target is None:
+        return False
+    try:
+        tab = target.locator("xpath=ancestor-or-self::*[@role='tab'][1]")
+        if _count(tab) == 0:
+            return False
+        return str(_first(tab).get_attribute("aria-selected", timeout=1000) or "").lower() == "true"
+    except Exception:
+        return False
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -4305,6 +4322,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         break
         except Exception:
             pass
+    if not evidence_desc and _clicked_tab_selected(loc):
+        evidence_desc = f"after-state: {name} tab selected"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
     if not evidence_desc and before_url != after_url:
@@ -4387,11 +4406,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 evidence_desc = f"after-state: {target} appeared"
                 break
 
-    # If no immediate evidence and this is a Save/Submit control, poll for delayed banner
+    # V22: with no immediate evidence, every click polls for a delayed after-state
+    # (a still-loading page is not a failure). The control is never clicked again.
     # The poll never reads a real clock: elapsed time is the sum of the walk's own
     # waits. With no wait primitive (no sleeper, no page wait) it does not poll.
-    if not evidence_desc and is_save_submit and _can_poll_wait(state):
-        timeout_s = float(state.timeout_s)
+    # It ends at timeout_s, page_wait_s or the step's time cap, whichever comes first.
+    if not evidence_desc and _can_poll_wait(state):
+        timeout_s = min(float(state.timeout_s), float(state.page_wait_s))
         interval_s = float(state.interval_s) if state.interval_s > 0 else 2.0
         waited = 0.0
 
@@ -4407,15 +4428,16 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
             after_dialogs = _count_visible_dialogs(state.page)
 
-            # Check for evidence again
-            if after_dialogs > before_dialogs:
+            # Check for evidence again. A dialog seen only during the poll counts when
+            # the step names it (W-083); an unrelated pop-up is never evidence.
+            if after_dialogs > before_dialogs and not _unnamed_modal_title(state.page, step.text or ""):
                 evidence_desc = "after-state: dialog opened"
 
             accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
             if not evidence_desc and accepted:
                 evidence_desc = "after-state: dialog text read"
 
-            if not evidence_desc:
+            if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
                 new_messages = after_messages - before_messages
                 for msg in new_messages:
@@ -4438,6 +4460,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                                 break
                 except Exception:
                     pass
+            if not evidence_desc and _clicked_tab_selected(loc):
+                evidence_desc = f"after-state: {name} tab selected"
 
             if not evidence_desc and before_url != after_url:
                 from urllib.parse import urlparse
@@ -4505,12 +4529,12 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 break
 
             # Check if timeout reached
-            if waited >= timeout_s:
+            if waited >= timeout_s or _time_left(state) <= 0:
                 # Timeout reached, return NEEDS_REVIEW
                 note = f"Clicked {name}, but no change could be read from the page."
                 return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
 
-    # If no evidence found after immediate check (and not a Save/Submit control), return NEEDS_REVIEW
+    # If no evidence found after the immediate check and the poll, return NEEDS_REVIEW
     if not evidence_desc:
         note = f"Clicked {name}, but no change could be read from the page."
         return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
