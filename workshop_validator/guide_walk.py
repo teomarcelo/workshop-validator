@@ -3118,16 +3118,21 @@ _BUILDER_CANVAS_SELECTOR = (
     "builder_platform_interaction-canvas-container"
 )
 # Phrases that mark a dialog as a product promotion, not part of any guide step.
-# The guide names no control in it, so nothing in it is ever clicked.
+# The guide names no control in it: only its own dismiss control (or Escape) is used (W-080).
 _PROMO_PHRASES = ("go mobile",)
 PROMO_NOTE = "A promotional dialog covered the page; the guide names no control to close it."
 
 
 def _promo_dialog(page, allowed: str = "") -> bool:
     """A visible dialog whose text marks it as a promotion the step does not name."""
+    return _promo_item(page, allowed) is not None
+
+
+def _promo_item(page, allowed: str = ""):
+    """The first visible promotion dialog the step does not name, or None."""
     phrases = [phrase for phrase in _PROMO_PHRASES if phrase not in norm(allowed)]
     if not phrases:
-        return False
+        return None
     for root in _roots(page):
         for role in ("dialog", "alertdialog"):
             try:
@@ -3143,8 +3148,8 @@ def _promo_dialog(page, allowed: str = "") -> bool:
                 except Exception:
                     continue
                 if any(phrase in text for phrase in phrases):
-                    return True
-    return False
+                    return item
+    return None
 
 
 def _promo_over(state: WalkState, step: GuideStep) -> bool:
@@ -3294,6 +3299,11 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
     if not found:
         return None
     dialog, title = found
+    return title if _close_dialog(state, dialog) else None
+
+
+def _close_dialog(state: WalkState, dialog) -> bool:
+    """Close this dialog with its own dismiss control (exact name), else Escape. True when it went away."""
     # Track this element, not its position: another dialog can take the same index.
     try:
         handle = dialog.element_handle(timeout=2000)
@@ -3301,20 +3311,53 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
         handle = None
     tracked = None if handle is None else _tracked_dialog(handle)
     if tracked is None:
-        return None
+        return False
     button = _dialog_dismiss_button(tracked)
     if button is not None:
         try:
             button.click(timeout=5000)
         except Exception:
-            return None
+            return False
     else:
         keyboard = getattr(state.page, "keyboard", None)
         try:
             keyboard.press("Escape")
         except Exception:
-            return None
-    return title if _dialog_gone(state, handle) else None
+            return False
+    return _dialog_gone(state, handle)
+
+
+PROMO_CLOSED_NOTE = "Environment: closed a promotional pop-up the guide does not mention (owner rule W-080)."
+
+
+def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
+    """W-080 for a promotion: None when none covers the page, or when this step's one close removed it.
+
+    Only the dialog's own dismiss control (or Escape) is used, never its promoted action.
+    A promotion that cannot be closed, or comes back after its close, stays ENV_BLOCKED.
+    """
+    if not _promo_over(state, step):
+        return None
+    blocked = CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
+    if PROMO_CLOSED_NOTE in state.popup_notes:
+        return blocked
+    item = _promo_item(state.page, step.text or "")
+    if item is None or not _close_dialog(state, item):
+        return blocked
+    state.popup_notes.append(PROMO_CLOSED_NOTE)
+    return blocked if _promo_over(state, step) else None
+
+
+def _wait_past_promo(state: WalkState, step: GuideStep, ready, note: str) -> CheckResult | None:
+    """Wait for READY. A promotion on top is closed once (W-080), then the wait runs again."""
+    while True:
+        missed = require(state, lambda: _promo_over(state, step) or ready(), note, limit=state.page_wait_s)
+        if missed:
+            return missed
+        closed_before = PROMO_CLOSED_NOTE in state.popup_notes
+        blocked = _promo_cleared(state, step)
+        if blocked or closed_before or PROMO_CLOSED_NOTE not in state.popup_notes:
+            return blocked
 
 
 def _popup_note(title: str) -> str:
@@ -3433,14 +3476,26 @@ def _not_open_result(state: WalkState, note: str) -> CheckResult:
 
 def _builder_gate(state: WalkState, step: GuideStep) -> CheckResult | None:
     """Every Flow Builder step starts here. No builder, no action."""
-    if _promo_over(state, step):
-        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
+    blocked = _promo_cleared(state, step)
+    if blocked:
+        return blocked
     if _focus_builder(state) or _flow_builder_open(state.page):
         return None
-    return _not_open_result(state, "Flow Builder is not open.")
+    return _after_promo(state, _not_open_result(state, "Flow Builder is not open."))
+
+
+def _after_promo(state: WalkState, result: CheckResult) -> CheckResult:
+    """After a promotion was closed, a missed action is not counted against the guide (W-080)."""
+    if PROMO_CLOSED_NOTE in state.popup_notes and result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL"):
+        return _after_popup_result()
+    return result
 
 
 def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
+    return _after_promo(state, _screen_flow(state, step))
+
+
+def _screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
     origin = _origin(state.page)
     if not origin:
         return CheckResult("UI_MISMATCH", "The org was not open.", (), freeze=True)
@@ -3452,16 +3507,11 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
         )
     except Exception:
         return CheckResult("UI_MISMATCH", "Flows did not open.", (), freeze=True)
-    missed = require(
-        state,
-        lambda: _promo_over(state, step) or _named_choice(state.page, "New Flow"),
-        "New Flow was not on the Flows page.",
-        limit=state.page_wait_s,
+    missed = _wait_past_promo(
+        state, step, lambda: _named_choice(state.page, "New Flow"), "New Flow was not on the Flows page."
     )
     if missed:
         return _stop_here(missed)
-    if _promo_over(state, step):
-        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if not (_click_last(state.page, "button", "New Flow") or _click_choice(state.page, "New Flow")):
         return CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True)
     missed = require(
@@ -3477,18 +3527,11 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
     if present(state.page, "button", "Create") or present(state.page, "link", "Create"):
         if not (click_role(state.page, "button", "Create") or click_role(state.page, "link", "Create")):
             return CheckResult("UI_MISMATCH", "Create was not available for the Screen Flow.", (), freeze=True)
-    missed = require(
-        state,
-        lambda: _promo_over(state, step) or _focus_builder(state),
-        "Flow Builder did not open.",
-        limit=state.page_wait_s,
-    )
+    missed = _wait_past_promo(state, step, lambda: _focus_builder(state), "Flow Builder did not open.")
     if missed and missed.status == "UI_MISMATCH" and not _promo_over(state, step):
         return _not_open_result(state, missed.note)
     if missed:
         return _stop_here(missed)
-    if _promo_over(state, step):
-        return CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if not _flow_builder_open(state.page):
         return _not_open_result(state, "Flow Builder did not open after Create was clicked.")
     return passed(step, "screen-flow", "New Flow, Screen Flow, then Create opens Flow Builder.")
