@@ -4214,6 +4214,48 @@ def _clicked_tab_selected(loc) -> bool:
         return False
 
 
+# A step's time cap ends the click poll this many seconds early, so the result is kept.
+_POLL_CAP_MARGIN_S = 0.5
+
+
+def _step_named_dialogs(page, step_text: str) -> frozenset[str]:
+    """Titles of visible dialogs that the step names as a whole word or phrase.
+
+    The title is the dialog's heading, or its first words when it has none.
+    An empty or untitled dialog is never named.
+    """
+    step_norm = norm(step_text)
+    named: set[str] = set()
+    for root in _roots(page):
+        for selector in ("[role='dialog']", "[role='alertdialog']", "[aria-modal='true']"):
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                try:
+                    item = loc.nth(index)
+                    if hasattr(item, "is_visible") and not item.is_visible():
+                        continue
+                    title = ""
+                    for heading_sel in ("h1", "h2", "h3", "[role='heading']"):
+                        heading_loc = item.locator(heading_sel)
+                        if _count(heading_loc) > 0:
+                            title = (heading_loc.first.inner_text(timeout=500) or "").strip()
+                            if title:
+                                break
+                    if not title:
+                        title = " ".join((item.inner_text(timeout=1000) or "").split()[:5])
+                except Exception:
+                    continue
+                title = norm(title)
+                if not title:
+                    continue
+                if re.search(rf"(?<!\w){re.escape(title)}(?!\w)", step_norm):
+                    named.add(title)
+    return frozenset(named)
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -4259,6 +4301,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_dialogs = _count_visible_dialogs(state.page)
     before_messages = _read_status_messages(state.page)
     before_has_saved = _words_visible(state.page, "successfully saved")
+    before_named_dialogs = _step_named_dialogs(state.page, step.text or "")
 
     loc = _locator_for_name(state.page, name)
     if loc is None or not _click_locator(loc):
@@ -4417,9 +4460,18 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         waited = 0.0
 
         while not evidence_desc:
-            # Sleep before next check
-            _poll_wait(state, interval_s)
-            waited += interval_s
+            # Never sleep past the step cap (less a margin) and, after the first
+            # wait, past timeout_s; the last wait is shortened so the page is read
+            # once more before giving up.
+            budget = _time_left(state) - _POLL_CAP_MARGIN_S
+            if waited > 0:
+                budget = min(budget, timeout_s - waited)
+            if budget <= 0:
+                note = f"Clicked {name}, but no change could be read from the page."
+                return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+            wait_s = min(interval_s, budget)
+            _poll_wait(state, wait_s)
+            waited += wait_s
 
             # Re-capture after-state
             after_names = _visible_names_snapshot(state.page)
@@ -4428,9 +4480,12 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
             after_dialogs = _count_visible_dialogs(state.page)
 
-            # Check for evidence again. A dialog seen only during the poll counts when
-            # the step names it (W-083); an unrelated pop-up is never evidence.
-            if after_dialogs > before_dialogs and not _unnamed_modal_title(state.page, step.text or ""):
+            # Check for evidence again. A dialog seen only during the poll counts only
+            # when the step names its title (W-083); an empty, short or unrelated
+            # pop-up is never evidence.
+            if after_dialogs > before_dialogs and (
+                _step_named_dialogs(state.page, step.text or "") - before_named_dialogs
+            ):
                 evidence_desc = "after-state: dialog opened"
 
             accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
@@ -4445,7 +4500,11 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         evidence_desc = "after-state: success message visible"
                         break
 
-            if not evidence_desc and not before_has_saved and _words_visible(state.page, "successfully saved"):
+            # The page-wide saved text is evidence only for Save/Submit during the poll.
+            if (
+                not evidence_desc and is_save_submit and not before_has_saved
+                and _words_visible(state.page, "successfully saved")
+            ):
                 evidence_desc = "after-state: success message visible"
 
             if not evidence_desc:
@@ -4528,11 +4587,6 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if evidence_desc:
                 break
 
-            # Check if timeout reached
-            if waited >= timeout_s or _time_left(state) <= 0:
-                # Timeout reached, return NEEDS_REVIEW
-                note = f"Clicked {name}, but no change could be read from the page."
-                return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
 
     # If no evidence found after the immediate check and the poll, return NEEDS_REVIEW
     if not evidence_desc:

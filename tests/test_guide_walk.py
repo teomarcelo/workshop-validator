@@ -225,9 +225,11 @@ class Loc:
     def locator(self, selector):
         """Controls inside this element, from page.children."""
         if selector.startswith("xpath=ancestor-or-self::"):
-            # The element's own enclosing tab, from page.tab_of (only this element's).
+            # The element's enclosing tabs, from page.tab_of: one (kind, name), or a list
+            # nearest first. "[1]" keeps the nearest; without it XPath gives document order.
             own = getattr(self.page, "tab_of", {}).get((self.kind, self.name))
-            return _ListLoc(self.page, [own] if own else [])
+            tabs = [] if not own else [own] if isinstance(own[0], str) else list(own)
+            return _ListLoc(self.page, tabs[:1] if selector.endswith("[1]") else tabs[::-1])
         inside = self.page.children.get((self.kind, self.name), ())
         inside = [item for item in inside if item in self.page.roles]
         if "aria-haspopup" in selector:

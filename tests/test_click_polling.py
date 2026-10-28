@@ -82,7 +82,44 @@ class ClickPollingTests(unittest.TestCase):
         # Step cap is min(page_wait_s + 30, 120) = 120 s, shorter than page_wait_s and timeout_s.
         outcome = walk(page, load_step(), clock, timeout_s=300, page_wait_s=200)
         self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
-        self.assertEqual(sum(clock.sleeps), 120)
+        # The poll stops half a second before the 120 s cap, so the result is kept.
+        self.assertEqual(sum(clock.sleeps), 119.5)
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
+
+    def test_long_interval_poll_ends_inside_the_step_cap(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+        clock = PollClock()
+        outcome = walk(page, load_step(), clock, timeout_s=300, interval_s=7, page_wait_s=200)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [7] * 17 + [0.5])
+        self.assertLess(clock.now, 120)
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
+
+    def test_evidence_on_the_shortened_last_poll_passes(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if clock.now > 119:
+                page.url = "https://example.lightning.force.com/lightning/n/Load"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, timeout_s=300, interval_s=7, page_wait_s=200)
+        self.assertEqual(outcome.statuses["t1"], "PASS")
+        self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-url-changed",))
+        self.assertEqual(clock.sleeps, [7] * 17 + [0.5])
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
+
+    def test_saved_text_during_the_poll_is_not_evidence_for_a_non_save_click(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.body = "Home\nRecord successfully saved"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
         self.assertEqual(clicks(page), [("click", "button", "Load")])
 
     def test_own_tab_selected_at_click_passes_without_waiting(self):
@@ -117,6 +154,19 @@ class ClickPollingTests(unittest.TestCase):
         page, own, other = tab_page()
         page.aria_states[(*own, "aria-selected")] = "false"
         page.aria_states[(*other, "aria-selected")] = "true"
+        clock = PollClock()
+        outcome = walk(page, tab_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "text", "Widgets")])
+
+    def test_selected_outer_tab_around_the_clicked_inner_tab_is_not_evidence(self):
+        page = Page(HOME, body="Widgets")
+        inner, outer = ("tab", "Widgets inner"), ("tab", "Widgets section")
+        page.roles.update({inner, outer})
+        page.tab_of[("text", "Widgets")] = [inner, outer]
+        page.aria_states[(*inner, "aria-selected")] = "false"
+        page.aria_states[(*outer, "aria-selected")] = "true"
         clock = PollClock()
         outcome = walk(page, tab_step(), clock, page_wait_s=10)
         self.assertEqual(outcome.statuses["t2"], "NEEDS_REVIEW")
@@ -162,6 +212,60 @@ class PollDialogTests(unittest.TestCase):
         self.assertEqual(clicks(page), [("click", "button", "Load Items")])
 
 
+    def test_empty_dialog_on_poll_two_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", ""))
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
+
+    def test_short_unnamed_dialog_on_poll_two_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", "Hi"))
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_dialog_title_inside_a_longer_step_word_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Download")})
+
+        def on_sleep(n):
+            if n == 2:
+                add_dialog(page, "Load")
+
+        clock = PollClock(on_sleep)
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Get items.", "1", "Click Download.")
+        outcome = walk(page, item, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_named_dialog_open_before_the_click_is_not_new_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load Items")})
+        add_dialog(page, "Load Items")
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", ""))
+
+        clock = PollClock(on_sleep)
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Load items.", "1", "Click Load Items.")
+        outcome = walk(page, item, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load Items")])
+
+
 class _NoTab:
     """A locator with no match that records reads; a real one waits its timeout on a read."""
 
@@ -204,6 +308,45 @@ class ClickedTabReadTests(unittest.TestCase):
         reads = []
         self.assertFalse(_clicked_tab_selected(_Target(reads)))
         self.assertEqual(reads, [])
+
+    def test_hidden_clicked_element_is_not_read_and_not_evidence(self):
+        from workshop_validator.guide_walk import _clicked_tab_selected
+
+        reads = []
+        self.assertFalse(_clicked_tab_selected(_HiddenTarget(reads)))
+        self.assertEqual(reads, [])
+
+
+class _SelectedTab:
+    """A selected role=tab that records each read."""
+
+    def __init__(self, reads):
+        self.reads = reads
+
+    def count(self):
+        return 1
+
+    @property
+    def first(self):
+        return self
+
+    def get_attribute(self, name, timeout=None):
+        self.reads.append(name)
+        return "true"
+
+
+class _HiddenTarget(_Target):
+    """The clicked element is in the DOM but not visible; its own tab reads as selected."""
+
+    def is_visible(self):
+        return False
+
+    @property
+    def first(self):
+        return self
+
+    def locator(self, selector):
+        return _SelectedTab(self.reads)
 
 
 if __name__ == "__main__":
