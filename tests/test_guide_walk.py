@@ -173,7 +173,7 @@ class Loc:
             if self.page.state_reads < self.page.reveal_state_after:
                 return None
             return self.page.checked.get((self.kind, self.name))
-        elif name in ("aria-selected", "aria-pressed", "aria-expanded"):
+        elif name in ("aria-selected", "aria-pressed", "aria-expanded", "aria-current", "role", "class"):
             return self.page.aria_states.get((self.kind, self.name, name))
         return None
 
@@ -218,7 +218,9 @@ class Loc:
         return self.page
 
     def evaluate(self, script, arg=None):
-        """Only the data mark is supported: page.locator("[data-wv-popup='<mark>']") finds this element."""
+        """The data mark (page.locator("[data-wv-popup='<mark>']") finds this element) and the tag name."""
+        if "tagName" in script:
+            return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
         if "data-wv-popup" not in script:
             raise NotImplementedError(script)
         self.page.marks[arg] = (self.kind, self.name)
@@ -230,7 +232,18 @@ class Loc:
             # nearest first. "[1]" keeps the nearest; without it XPath gives document order.
             own = getattr(self.page, "tab_of", {}).get((self.kind, self.name))
             tabs = [] if not own else [own] if isinstance(own[0], str) else list(own)
+            # The XPath predicate: a role=tab element, or (when asked) one carrying aria-current.
+            tabs = [
+                item for item in tabs
+                if (item[0] == "tab" and "@role='tab'" in selector)
+                or ("@aria-current" in selector
+                    and self.page.aria_states.get((*item, "aria-current")) is not None)
+            ]
             return _ListLoc(self.page, tabs[:1] if selector.endswith("[1]") else tabs[::-1])
+        if selector.startswith("xpath=ancestor::"):
+            # The element's nearest enclosing tab or list item, from page.item_of.
+            holder = getattr(self.page, "item_of", {}).get((self.kind, self.name))
+            return _ListLoc(self.page, [holder] if holder else [])
         inside = self.page.children.get((self.kind, self.name), ())
         inside = [item for item in inside if item in self.page.roles]
         if "aria-haspopup" in selector:
@@ -366,6 +379,9 @@ class Page:
     def locator(self, selector):
         if selector == "body":
             return Loc(self, "body")
+        if selector in getattr(self, "css", {}):
+            # Elements a CSS selector matches, from page.css.
+            return _ListLoc(self, self.css[selector])
         if "spinner" in selector or "progressbar" in selector:
             return Loc(self, "spinner")
         mark = re.fullmatch(r"\[data-wv-popup='([^']+)'\]", selector)

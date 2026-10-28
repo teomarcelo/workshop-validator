@@ -4197,21 +4197,111 @@ def _detect_suspect_flags(
     return tuple(flags)
 
 
-def _clicked_tab_selected(loc) -> bool:
-    """The clicked element's own tab (itself or its nearest role=tab ancestor) is selected.
+def _clicked_item_state(loc) -> str:
+    """How the clicked element's own item reads as selected: "tab", "nav item" or "".
 
-    Only that one element is read; another tab on the page is never evidence.
+    The own item is the clicked element itself or its nearest ancestor that is a
+    role=tab or carries aria-current. Selected means aria-selected="true" ("tab")
+    or aria-current="page" ("nav item"). Only that one element is read; another
+    item on the page is never evidence.
     """
     target = _visible_match(loc)
     if target is None:
-        return False
+        return ""
     try:
-        tab = target.locator("xpath=ancestor-or-self::*[@role='tab'][1]")
-        if _count(tab) == 0:
-            return False
-        return str(_first(tab).get_attribute("aria-selected", timeout=1000) or "").lower() == "true"
+        own = target.locator("xpath=ancestor-or-self::*[@role='tab' or @aria-current][1]")
+        if _count(own) == 0:
+            return ""
+        item = _first(own)
+        if str(item.get_attribute("aria-selected", timeout=1000) or "").lower() == "true":
+            return "tab"
+        if str(item.get_attribute("aria-current", timeout=1000) or "") == "page":
+            return "nav item"
+        return ""
     except Exception:
-        return False
+        return ""
+
+
+def _clicked_tab_selected(loc) -> bool:
+    """The clicked element's own tab or nav item is selected (see _clicked_item_state)."""
+    return bool(_clicked_item_state(loc))
+
+
+# The app navigation bar's current item. UNVERIFIED: which of these the live nav
+# item carries has not been confirmed; each is read only as an exact text match.
+_APP_NAV_CURRENT = (
+    "one-app-nav-bar [aria-current='page']",
+    "one-app-nav-bar .slds-is-active a",
+)
+
+
+def _current_nav_item(page, targets) -> str:
+    """The target name the app nav's current item shows as its whole visible text, else ""."""
+    for root in _roots(page):
+        for selector in _APP_NAV_CURRENT:
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 8)):
+                try:
+                    item = loc.nth(index)
+                    if not item.is_visible():
+                        continue
+                    text = norm(item.inner_text(timeout=1000) or "")
+                except Exception:
+                    continue
+                if text and text in targets:
+                    return text
+    return ""
+
+
+_SAFE_TOKEN = re.compile(r"[a-z][a-z0-9-]{0,30}")
+
+
+def _safe_token(value) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return "-"
+    return text if _SAFE_TOKEN.fullmatch(text) else "other"
+
+
+def _element_states(element) -> str:
+    """Tag, role, aria states and slds-is-active of one element; no text, ids or URLs."""
+    try:
+        tag = element.evaluate("el => el.tagName.toLowerCase()")
+    except Exception:
+        tag = ""
+    parts = [_safe_token(tag)]
+    for attr in ("role", "aria-selected", "aria-current", "aria-pressed", "aria-expanded"):
+        try:
+            value = element.get_attribute(attr, timeout=1000)
+        except Exception:
+            value = None
+        parts.append(f"{attr}={_safe_token(value)}")
+    try:
+        classes = str(element.get_attribute("class", timeout=1000) or "").split()
+    except Exception:
+        classes = []
+    parts.append(f"slds-is-active={'yes' if 'slds-is-active' in classes else 'no'}")
+    return " ".join(parts)
+
+
+def _clicked_element_note(loc) -> str:
+    """A short, safe description of the clicked element and its nearest tab or list item."""
+    target = _visible_match(loc)
+    if target is None:
+        return " Clicked element: not visible after the click."
+    note = f" Clicked element: {_element_states(target)}"
+    try:
+        holder = target.locator("xpath=ancestor::*[@role='tab' or @role='listitem' or self::li][1]")
+        if _count(holder) > 0:
+            note += f"; nearest tab or list item: {_element_states(_first(holder))}"
+        else:
+            note += "; no tab or list item around it"
+    except Exception:
+        note += "; no tab or list item around it"
+    return note + "."
 
 
 # A step's time cap ends the click poll this many seconds early. Page reads take real
@@ -4307,12 +4397,15 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         return None
     # The clicked element's own tab, already selected before the click, is not evidence.
     before_tab = _clicked_tab_selected(loc)
+    before_nav = _current_nav_item(state.page, frozenset(target_names))
     if not _click_locator(loc):
         return None
+    opened_files_home = False
     if norm(name) in {"files", "files tab"} and _in_setup(state.page):
         _open_files_home(state)
         if _in_setup(state.page):
             return None
+        opened_files_home = True
 
     # Capture after-state and verify the click had an effect
     after_names = _visible_names_snapshot(state.page)
@@ -4368,8 +4461,15 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         break
         except Exception:
             pass
-    if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
-        evidence_desc = f"after-state: {name} tab selected"
+    if not evidence_desc and not before_tab:
+        own_state = _clicked_item_state(loc)
+        if own_state:
+            evidence_desc = f"after-state: {name} {own_state} selected"
+    # The walk opened the Files home itself: the app nav's current item must show the name.
+    if not evidence_desc and opened_files_home and not before_nav:
+        current = _current_nav_item(state.page, frozenset(target_names))
+        if current:
+            evidence_desc = f"after-state: {current} nav item current"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
     if not evidence_desc and before_url != after_url:
@@ -4471,6 +4571,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 budget = min(budget, timeout_s - waited)
             if budget <= 0:
                 note = f"Clicked {name}, but no change could be read from the page."
+                note += _clicked_element_note(loc)
                 return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
             wait_s = min(interval_s, budget)
             _poll_wait(state, wait_s)
@@ -4518,8 +4619,14 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                                 break
                 except Exception:
                     pass
-            if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
-                evidence_desc = f"after-state: {name} tab selected"
+            if not evidence_desc and not before_tab:
+                own_state = _clicked_item_state(loc)
+                if own_state:
+                    evidence_desc = f"after-state: {name} {own_state} selected"
+            if not evidence_desc and opened_files_home and not before_nav:
+                current = _current_nav_item(state.page, frozenset(target_names))
+                if current:
+                    evidence_desc = f"after-state: {current} nav item current"
 
             if not evidence_desc and before_url != after_url:
                 from urllib.parse import urlparse
@@ -4595,6 +4702,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     # If no evidence found after the immediate check and the poll, return NEEDS_REVIEW
     if not evidence_desc:
         note = f"Clicked {name}, but no change could be read from the page."
+        note += _clicked_element_note(loc)
         return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
 
     # PASS with after-state evidence
