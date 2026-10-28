@@ -2300,7 +2300,9 @@ def _download_result(step: GuideStep, note: str, named: str, got: list) -> Check
         return passed(step, evidence, f"{note} {evidence}")
     return CheckResult(
         "NEEDS_REVIEW",
-        f"{note} A download started as {filename or 'an unnamed file'}, not {named}. {DOWNLOAD_NOTE}",
+        # W-090: the other file's name is not printed; it may name something outside the guide.
+        f"{note} A download started as {'a file with a different name' if filename else 'an unnamed file'}, "
+        f"not {named}. {DOWNLOAD_NOTE}",
         (), freeze=True,
     )
 

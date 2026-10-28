@@ -135,12 +135,51 @@ class DownloadEvidenceTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["s0"], "PASS")
 
     def test_other_file_name_is_needs_review_and_deleted(self):
-        page = files_page(["Report Alpha"], "Report Beta.csv")
-        outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
+        page = files_page(["Report Alpha", "Report Beta"], "Report Beta.csv")
+        outcome = self.walk(
+            page, STEP_TEXT.format(row="Report Alpha"), STEP_TEXT.format(row="Report Beta"),
+        )
         self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
         self.assertIn(DOWNLOAD_NOTE, outcome.notes["s0"])
-        self.assertIn("Report Beta.csv", outcome.notes["s0"])
+        self.assertIn("a file with a different name", outcome.notes["s0"])
         self.assertIn("delete", page.download.calls)
+        self.assertEqual(outcome.statuses["s1"], "NOT_RUN")  # the wrong file freezes the walk
+
+    def test_other_file_name_is_not_printed_in_the_note(self):
+        page = files_page(["Report Alpha"], "Gamma Private Notes.csv")
+        outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
+        self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
+        self.assertNotIn("Gamma", outcome.notes["s0"])
+        self.assertNotIn("Private Notes", outcome.notes["s0"])
+        self.assertIn("a file with a different name", outcome.notes["s0"])
+
+    def test_extra_dotted_part_before_extension_is_not_a_match(self):
+        for filename in ("Report Alpha.v2.pdf", "Report Alpha.pdf.exe"):
+            with self.subTest(filename=filename):
+                page = files_page(["Report Alpha"], filename)
+                outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
+                self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
+                self.assertNotIn("download started:", outcome.notes["s0"])
+
+    def test_non_download_menu_item_gets_no_download_wait(self):
+        page = files_page(["Report Alpha"], "Report Alpha.csv")
+        react = page.on_click
+
+        def with_edit(kind, name):
+            react(kind, name)
+            if kind == "button" and name in BUTTONS:
+                page.roles.add(("menuitem", "Edit"))
+
+        page.on_click = with_edit
+        text = "Click the dropdown arrow to the far right of Report Alpha and click Edit."
+        outcome = self.walk(page, text)
+        self.assertIn(("click", "menuitem", "Edit"), page.events)
+        self.assertEqual(page.waits, [])
+        self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
+        self.assertEqual(
+            outcome.notes["s0"],
+            "Opened the dropdown in the Report Alpha row and clicked Edit. No change could be read from the page.",
+        )
 
     def test_longer_file_name_is_not_a_match(self):
         page = files_page(["Report Alpha"], "Report Alpha copy.csv")
@@ -200,6 +239,7 @@ class DownloadEvidenceTests(unittest.TestCase):
         page.on_click = refuse
         outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
         self.assertNotEqual(outcome.statuses["s0"], "PASS")
+        self.assertEqual(outcome.statuses["s0"], "UI_MISMATCH")
         self.assertTrue(page.exits)
         self.assertNotIn(True, page.exits)
 
