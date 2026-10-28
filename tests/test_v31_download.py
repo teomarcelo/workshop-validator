@@ -129,6 +129,29 @@ class DownloadEvidenceTests(unittest.TestCase):
         self.assertIn("delete", page.download.calls)
         self.assertIn("cancel", page.download.calls)
 
+    def test_delete_is_called_even_when_cancel_raises(self):
+        class RaisingDownload:
+            def __init__(self, filename):
+                self.suggested_filename = filename
+                self.calls = []
+
+            def cancel(self):
+                self.calls.append("cancel")
+                raise RuntimeError("cancel failed")
+
+            def delete(self):
+                self.calls.append("delete")
+
+        page = files_page(["Report Alpha"], "Report Alpha.csv")
+        page.download = RaisingDownload("Report Alpha.csv")
+        page.on_click = lambda kind, name: (
+            page.roles.add(("menuitem", "Download")) if kind == "button" and name in BUTTONS else None,
+            setattr(page, "fired", page.download) if kind == "menuitem" and name == "Download" else None,
+        )
+        self.walk(page, STEP_TEXT.format(row="Report Alpha"))
+        self.assertIn("cancel", page.download.calls)
+        self.assertIn("delete", page.download.calls)
+
     def test_name_match_ignores_case_and_spacing(self):
         page = files_page(["Report Alpha"], "report   ALPHA.CSV")
         outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
@@ -154,7 +177,7 @@ class DownloadEvidenceTests(unittest.TestCase):
         self.assertIn("a file with a different name", outcome.notes["s0"])
 
     def test_extra_dotted_part_before_extension_is_not_a_match(self):
-        for filename in ("Report Alpha.v2.pdf", "Report Alpha.pdf.exe"):
+        for filename in ("Report Alpha.v2.pdf", "Report Alpha.pdf.exe", "Report Alpha.pdf copy", "Report Alpha. Draft"):
             with self.subTest(filename=filename):
                 page = files_page(["Report Alpha"], filename)
                 outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
@@ -190,6 +213,29 @@ class DownloadEvidenceTests(unittest.TestCase):
         page = files_page(["Report Alpha"], "")
         outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
         self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
+
+    def test_unreadable_filename_is_needs_review_not_pass(self):
+        class UnreadableDownload:
+            @property
+            def suggested_filename(self):
+                raise RuntimeError("cannot read filename")
+
+            def cancel(self):
+                pass
+
+            def delete(self):
+                pass
+
+        page = files_page(["Report Alpha"], "Report Alpha.csv")
+        page.download = UnreadableDownload()
+        page.on_click = lambda kind, name: (
+            page.roles.add(("menuitem", "Download")) if kind == "button" and name in BUTTONS else None,
+            setattr(page, "fired", page.download) if kind == "menuitem" and name == "Download" else None,
+        )
+        outcome = self.walk(page, STEP_TEXT.format(row="Report Alpha"))
+        self.assertEqual(outcome.statuses["s0"], "NEEDS_REVIEW")
+        self.assertNotIn("PASS", outcome.statuses["s0"])
+        self.assertIn("unnamed file", outcome.notes["s0"])
 
     def test_no_download_event_is_needs_review_and_stops(self):
         page = files_page(["Report Alpha", "Report Beta"], None)
