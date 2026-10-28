@@ -161,7 +161,8 @@ class Loc:
 
     def is_visible(self):
         self.page.reads += 1
-        return self.count() > 0
+        # page.hidden holds elements that are in the DOM but not shown.
+        return self.count() > 0 and (self.kind, self.name) not in getattr(self.page, "hidden", ())
 
     def is_enabled(self):
         return self.page.enabled.get((self.kind, self.name), True)
@@ -339,6 +340,7 @@ class Page:
         self.children = {}  # (kind, name) -> controls inside that element
         self.has_popup = set()  # (kind, name) with aria-haspopup set
         self.tab_of = {}  # (kind, name) -> its own enclosing role=tab element
+        self.hidden = set()  # (kind, name) in the DOM but not visible
         self.state_reads = 0
         self.reads = 0
         self.snapshots = []

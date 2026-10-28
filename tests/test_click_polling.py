@@ -82,8 +82,8 @@ class ClickPollingTests(unittest.TestCase):
         # Step cap is min(page_wait_s + 30, 120) = 120 s, shorter than page_wait_s and timeout_s.
         outcome = walk(page, load_step(), clock, timeout_s=300, page_wait_s=200)
         self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
-        # The poll stops half a second before the 120 s cap, so the result is kept.
-        self.assertEqual(sum(clock.sleeps), 119.5)
+        # The poll stops the 5 s read margin before the 120 s cap, so the result is kept.
+        self.assertEqual(sum(clock.sleeps), 115)
         self.assertEqual(clicks(page), [("click", "button", "Load")])
 
     def test_long_interval_poll_ends_inside_the_step_cap(self):
@@ -91,7 +91,7 @@ class ClickPollingTests(unittest.TestCase):
         clock = PollClock()
         outcome = walk(page, load_step(), clock, timeout_s=300, interval_s=7, page_wait_s=200)
         self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
-        self.assertEqual(clock.sleeps, [7] * 17 + [0.5])
+        self.assertEqual(clock.sleeps, [7] * 16 + [3])
         self.assertLess(clock.now, 120)
         self.assertEqual(clicks(page), [("click", "button", "Load")])
 
@@ -99,14 +99,14 @@ class ClickPollingTests(unittest.TestCase):
         page = Page(HOME, body="Home", roles={("button", "Load")})
 
         def on_sleep(n):
-            if clock.now > 119:
+            if clock.now > 114:
                 page.url = "https://example.lightning.force.com/lightning/n/Load"
 
         clock = PollClock(on_sleep)
         outcome = walk(page, load_step(), clock, timeout_s=300, interval_s=7, page_wait_s=200)
         self.assertEqual(outcome.statuses["t1"], "PASS")
         self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-url-changed",))
-        self.assertEqual(clock.sleeps, [7] * 17 + [0.5])
+        self.assertEqual(clock.sleeps, [7] * 16 + [3])
         self.assertEqual(clicks(page), [("click", "button", "Load")])
 
     def test_saved_text_during_the_poll_is_not_evidence_for_a_non_save_click(self):
@@ -264,6 +264,183 @@ class PollDialogTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
         self.assertEqual(clock.sleeps, [2] * 5)
         self.assertEqual(clicks(page), [("click", "button", "Load Items")])
+
+
+LOAD_ITEMS = step("t1", "Exercise 9: Widgets", "Task 1: Load items.", "1", "Click Load Items.")
+
+
+class PollDialogVisibilityTests(unittest.TestCase):
+    """A dialog is evidence only when it is visible, newly counted and has a real title."""
+
+    def test_hidden_named_dialog_next_to_a_visible_unrelated_one_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load Items")})
+
+        def on_sleep(n):
+            if n == 2:
+                add_dialog(page, "Welcome Tour")
+                add_dialog(page, "Load Items")
+                page.hidden.add(("dialog", "Load Items\nA short synthetic note for a new org"))
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, LOAD_ITEMS, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load Items")])
+
+    def test_named_dialog_that_replaces_one_already_counted_is_not_a_new_dialog(self):
+        page = Page(HOME, body="Home", roles={("button", "Load Items")})
+        add_dialog(page, "Getting Started")
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.discard(("dialog", "Getting Started\nA short synthetic note for a new org"))
+                page.roles.discard(("h2", "Getting Started"))
+                add_dialog(page, "Load Items")
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, LOAD_ITEMS, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load Items")])
+
+    def test_untitled_dialog_reading_only_a_role_word_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("tab", "Files")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", "Tab"))
+
+        clock = PollClock(on_sleep)
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Open files.", "1", "Click the Files tab.")
+        outcome = walk(page, item, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_untitled_dialog_reading_only_a_long_filler_word_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", "Click"))
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_untitled_dialog_with_a_title_under_four_letters_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Run Job")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", "Run"))
+
+        clock = PollClock(on_sleep)
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Run the job.", "1", "Click Run Job.")
+        outcome = walk(page, item, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_untitled_dialog_whose_first_words_the_step_names_passes(self):
+        page = Page(HOME, body="Home", roles={("button", "Load Items")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.roles.add(("dialog", "Load Items"))
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, LOAD_ITEMS, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "PASS")
+        self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-dialog-opened",))
+        self.assertEqual(clock.sleeps, [2, 2])
+
+
+class PollUrlTitleTests(unittest.TestCase):
+    """During the poll, URL or title evidence needs a real page change that names the target."""
+
+    def test_unchanged_title_and_query_only_url_change_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+        page.page_title = "Load | Salesforce"
+
+        def on_sleep(n):
+            if n == 2:
+                page.url = HOME + "?t=123"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
+
+    def test_path_that_already_named_the_target_before_the_click_is_not_evidence(self):
+        before = "https://example.lightning.force.com/lightning/n/Load"
+        page = Page(before, body="Home", roles={("button", "Load")})
+        page.page_title = "Home | Salesforce"
+
+        def on_sleep(n):
+            if n == 2:
+                page.url = before + "#t=123"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_target_only_in_the_query_of_a_new_path_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def on_sleep(n):
+            if n == 2:
+                page.url = "https://example.lightning.force.com/lightning/n/Other?view=load"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+
+    def test_title_that_changes_to_name_the_target_passes(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+        page.page_title = "Home | Salesforce"
+
+        def on_sleep(n):
+            if n == 2:
+                page.url = HOME + "?t=123"
+                page.page_title = "Load | Salesforce"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "PASS")
+        self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-url-changed",))
+        self.assertEqual(clock.sleeps, [2, 2])
+
+    def test_new_path_naming_the_target_passes(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+        page.page_title = "Load | Salesforce"
+
+        def on_sleep(n):
+            if n == 2:
+                page.url = "https://example.lightning.force.com/lightning/n/Load"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, load_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "PASS")
+        self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-url-changed",))
+        self.assertEqual(clock.sleeps, [2, 2])
+
+
+class PollCapMarginTests(unittest.TestCase):
+    def test_poll_ends_at_least_the_margin_before_the_step_cap(self):
+        from workshop_validator.guide_walk import _POLL_CAP_MARGIN_S
+
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+        clock = PollClock()
+        # Step cap is 120 s here; a real final read takes time, so the margin covers it.
+        outcome = walk(page, load_step(), clock, timeout_s=300, interval_s=7, page_wait_s=200)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertGreaterEqual(_POLL_CAP_MARGIN_S, 2.0)
+        self.assertLessEqual(clock.now, 120 - _POLL_CAP_MARGIN_S)
+        self.assertLessEqual(clock.now, 118)
+        self.assertEqual(clicks(page), [("click", "button", "Load")])
 
 
 class _NoTab:

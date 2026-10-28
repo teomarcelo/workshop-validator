@@ -4214,8 +4214,16 @@ def _clicked_tab_selected(loc) -> bool:
         return False
 
 
-# A step's time cap ends the click poll this many seconds early, so the result is kept.
-_POLL_CAP_MARGIN_S = 0.5
+# A step's time cap ends the click poll this many seconds early. Page reads take real
+# time (each may wait up to about 1 s), so the last wait plus one full re-read and
+# the result must fit inside the cap.
+_POLL_CAP_MARGIN_S = 5.0
+
+# Position, filler and role words that never name a click target or a dialog.
+_CLICK_FILLER_WORDS = frozenset({
+    "bottom", "top", "middle", "left", "right", "panel", "page", "list",
+    "field", "button", "link", "tab", "click", "then", "once", "scroll", "find",
+})
 
 
 def _step_named_dialogs(page, step_text: str) -> frozenset[str]:
@@ -4244,12 +4252,16 @@ def _step_named_dialogs(page, step_text: str) -> frozenset[str]:
                             title = (heading_loc.first.inner_text(timeout=500) or "").strip()
                             if title:
                                 break
-                    if not title:
+                    fallback = not title
+                    if fallback:
                         title = " ".join((item.inner_text(timeout=1000) or "").split()[:5])
                 except Exception:
                     continue
                 title = norm(title)
                 if not title:
+                    continue
+                # Untitled dialog: a lone role or filler word, or a very short text, names nothing.
+                if fallback and (len(title) < 4 or title in _CLICK_FILLER_WORDS):
                     continue
                 if re.search(rf"(?<!\w){re.escape(title)}(?!\w)", step_norm):
                     named.add(title)
@@ -4284,11 +4296,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             target_names.add(norm(bare_quoted))
 
     # Exclude position/filler/role words
-    excluded_words = {
-        "bottom", "top", "middle", "left", "right", "panel", "page", "list",
-        "field", "button", "link", "tab", "click", "then", "once", "scroll", "find"
-    }
-    target_names = {t for t in target_names if t not in excluded_words}
+    target_names = {t for t in target_names if t not in _CLICK_FILLER_WORDS}
 
     # Capture before-state for suspect detection and evidence verification
     before_names = _visible_names_snapshot(state.page)
@@ -4451,8 +4459,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
     # V22: with no immediate evidence, every click polls for a delayed after-state
     # (a still-loading page is not a failure). The control is never clicked again.
-    # The poll never reads a real clock: elapsed time is the sum of the walk's own
-    # waits. With no wait primitive (no sleeper, no page wait) it does not poll.
+    # Elapsed time is the sum of the walk's own waits; the step cap is read from the
+    # walk's clock. With no wait primitive (no sleeper, no page wait) it does not poll.
     # It ends at timeout_s, page_wait_s or the step's time cap, whichever comes first.
     if not evidence_desc and _can_poll_wait(state):
         timeout_s = min(float(state.timeout_s), float(state.page_wait_s))
@@ -4535,8 +4543,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                     ))
 
                     if not is_error:
-                        after_url_lower = after_url.lower()
-                        page_title_lower = norm(_page_title(state.page))
+                        # Only a real change counts: a new URL path (a query or fragment
+                        # change is not navigation), or a title that differs from before.
+                        path_changed = before_parsed.path != after_parsed.path
+                        poll_title = norm(_page_title(state.page))
+                        title_changed = poll_title != norm(before_title)
+                        after_url_lower = after_parsed.path.lower() if path_changed else ""
+                        page_title_lower = poll_title if title_changed else ""
                         url_tokens = set(_re_mod.findall(r'[a-z0-9]+', after_url_lower))
                         title_tokens = _re_mod.findall(r'[a-z0-9]+', page_title_lower)
                         ignored = {"salesforce", "lightning", "force", "com"}
