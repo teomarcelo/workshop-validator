@@ -202,6 +202,149 @@ class PromoCloseTests(unittest.TestCase):
         self.assertEqual((result.status, result.note), ("ENV_BLOCKED", AFTER_NOTE))
 
 
+NOTICE = "Sample Notice Heading\nClose"
+
+
+def promo_after_create(page):
+    """No promo at first; Create opens the builder with a promo on top that Close removes."""
+    page.roles.add(("button", "New Flow"))
+
+    def reveal(kind, name):
+        if name == "Close":
+            page.roles.discard(("dialog", PROMO))
+        if name == "New Flow":
+            page.body = "New Automation Screen Flow"
+        if name == "Screen Flow":
+            page.roles.add(("button", "Create"))
+        if name == "Create":
+            page.url = BUILDER_URL
+            page.body = "Sample builder"
+            as_builder(page)
+            page.roles.add(("dialog", PROMO))
+            for name in ("Close", "Go Mobile"):
+                page.roles.add(("button", name))
+            page.children[("dialog", PROMO)] = [("button", "Close"), ("button", "Go Mobile")]
+
+    page.on_click = reveal
+    return page
+
+
+class PromoScopeTests(unittest.TestCase):
+    """Only a real promotion is closed, and only the action it blocked is excused."""
+
+    def test_non_promo_dialog_over_the_flows_page_is_left_alone(self):
+        page = flows_list(promo_page(FLOWS_URL, buttons=("Close",), dialog=NOTICE))
+        page.on_click = lambda kind, name, reveal=page.on_click: (
+            None if name == "Close" else reveal(kind, name)
+        )
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertNotIn(("button", "Close"), clicks(page))
+        self.assertEqual(page.keys, [])
+        self.assertEqual(state.popup_notes, [])
+
+    def test_non_promo_dialog_over_the_builder_is_left_alone(self):
+        page = as_builder(promo_page(BUILDER_URL, buttons=("Close",), dialog=NOTICE))
+        page.on_click = lambda kind, name: (
+            page.roles.add(("button", "New Resource")) if name == "Toggle Toolbox" else
+            page.roles.add(("option", "Variable")) if name == "New Resource" else
+            page.roles.add(("textbox", "API Name")) if name == "Variable" else None
+        )
+        state = state_for(page)
+        result = guide_walk.run_record_variable(state, variable_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertNotIn(("button", "Close"), clicks(page))
+        self.assertEqual(page.keys, [])
+        self.assertEqual(state.popup_notes, [])
+
+    def test_promo_appearing_after_create_is_closed_and_the_builder_is_read(self):
+        page = promo_after_create(Page(FLOWS_URL))
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.evidence_ids, ("flow:screen-flow",))
+        self.assertEqual(state.popup_notes, [CLOSED_NOTE])
+        self.assertEqual(
+            clicks(page),
+            [("button", "New Flow"), ("text", "Screen Flow"), ("button", "Create"), ("button", "Close")],
+        )
+        self.assertNotIn(("button", "Go Mobile"), clicks(page))
+
+    def test_later_different_miss_after_a_close_stays_a_mismatch(self):
+        page = flows_list(promo_page(FLOWS_URL))
+        reveal = page.on_click
+        page.on_click = lambda kind, name: None if name == "New Flow" else reveal(kind, name)
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual((result.status, result.note), ("UI_MISMATCH", "Screen Flow was not offered."))
+        self.assertTrue(result.freeze)
+        self.assertEqual(state.popup_notes, [CLOSED_NOTE])
+        self.assertEqual(clicks(page)[0], ("button", "Close"))
+        self.assertEqual(clicks(page).count(("button", "Close")), 1)
+        self.assertNotIn(("text", "Screen Flow"), clicks(page))
+
+    def test_builder_missing_after_create_stays_a_mismatch_when_the_close_was_earlier(self):
+        page = flows_list(promo_page(FLOWS_URL))
+        reveal = page.on_click
+        page.on_click = lambda kind, name: None if name == "Create" else reveal(kind, name)
+        result = guide_walk.run_screen_flow(state_for(page), flow_step())
+        self.assertEqual((result.status, result.note), ("UI_MISMATCH", "Flow Builder did not open."))
+        self.assertTrue(result.freeze)
+
+    def test_new_flow_click_failing_after_close_is_not_a_guide_failure(self):
+        page = flows_list(promo_page(FLOWS_URL))
+        reveal = page.on_click
+
+        def click(kind, name):
+            if name == "New Flow":
+                raise RuntimeError("sample click error")
+            reveal(kind, name)
+
+        page.on_click = click
+        result = guide_walk.run_screen_flow(state_for(page), flow_step())
+        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", AFTER_NOTE))
+        self.assertEqual(clicks(page)[0], ("button", "Close"))
+
+    def test_page_still_loading_after_close_stays_not_run(self):
+        page = flows_list(promo_page(FLOWS_URL))
+        page.roles.discard(("button", "New Flow"))
+        reveal = page.on_click
+
+        def click(kind, name):
+            reveal(kind, name)
+            if name == "Close":
+                page.spinning = True
+
+        page.on_click = click
+        result = guide_walk.run_screen_flow(state_for(page), flow_step())
+        self.assertEqual((result.status, result.note), ("NOT_RUN", guide_walk.LOADING_NOTE))
+
+    def test_wait_after_a_close_is_cut_to_the_steps_time_left(self):
+        page = flows_list(promo_page(FLOWS_URL))
+        page.roles.discard(("button", "New Flow"))
+        state = state_for(page)
+        state.page_wait_s = 90
+        state.step_deadline = 5
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", AFTER_NOTE))
+        self.assertLessEqual(state.clock(), 6)
+
+    def test_close_click_that_raises_counts_as_not_closed(self):
+        page = flows_list(promo_page(FLOWS_URL))
+
+        def broken(kind, name):
+            page.roles.discard(("dialog", PROMO))
+            raise RuntimeError("sample click error")
+
+        page.on_click = broken
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(state.popup_notes, [])
+        self.assertEqual(clicks(page), [("button", "Close")])
+
+
 PROMO_HTML = """
 <button id="new-flow" onclick="window.clicked.push('New Flow')">New Flow</button>
 <div role="dialog" aria-modal="true" id="promo"

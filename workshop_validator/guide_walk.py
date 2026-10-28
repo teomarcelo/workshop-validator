@@ -3349,15 +3349,37 @@ def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
 
 
 def _wait_past_promo(state: WalkState, step: GuideStep, ready, note: str) -> CheckResult | None:
-    """Wait for READY. A promotion on top is closed once (W-080), then the wait runs again."""
+    """Wait for READY. A promotion on top is closed once (W-080), then the wait runs again.
+
+    The wait after the close is cut to the step's time left, and its miss is the
+    after-pop-up ENV_BLOCKED: the close never turns into a guide failure.
+    """
+    notes = len(state.popup_notes)
     while True:
-        missed = require(state, lambda: _promo_over(state, step) or ready(), note, limit=state.page_wait_s)
+        closed = _promo_closed_since(state, notes)
+        limit = min(state.page_wait_s, _time_left(state)) if closed else state.page_wait_s
+        missed = require(state, lambda: _promo_over(state, step) or ready(), note, limit=limit)
         if missed:
-            return missed
+            return _resumed_miss(state, notes, missed)
         closed_before = PROMO_CLOSED_NOTE in state.popup_notes
         blocked = _promo_cleared(state, step)
         if blocked or closed_before or PROMO_CLOSED_NOTE not in state.popup_notes:
             return blocked
+
+
+def _promo_closed_since(state: WalkState, notes: int) -> bool:
+    return PROMO_CLOSED_NOTE in state.popup_notes[notes:]
+
+
+def _resumed_miss(state: WalkState, notes: int, result: CheckResult) -> CheckResult:
+    """A miss of the action a promotion blocked, after its close, is not counted against the guide (W-080).
+
+    NOTES is the count of step notes before that action; a promotion closed earlier
+    in the step does not excuse a later, different miss.
+    """
+    if _promo_closed_since(state, notes) and result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL"):
+        return _after_popup_result()
+    return result
 
 
 def _popup_note(title: str) -> str:
@@ -3476,26 +3498,16 @@ def _not_open_result(state: WalkState, note: str) -> CheckResult:
 
 def _builder_gate(state: WalkState, step: GuideStep) -> CheckResult | None:
     """Every Flow Builder step starts here. No builder, no action."""
+    notes = len(state.popup_notes)
     blocked = _promo_cleared(state, step)
     if blocked:
         return blocked
     if _focus_builder(state) or _flow_builder_open(state.page):
         return None
-    return _after_promo(state, _not_open_result(state, "Flow Builder is not open."))
-
-
-def _after_promo(state: WalkState, result: CheckResult) -> CheckResult:
-    """After a promotion was closed, a missed action is not counted against the guide (W-080)."""
-    if PROMO_CLOSED_NOTE in state.popup_notes and result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL"):
-        return _after_popup_result()
-    return result
+    return _resumed_miss(state, notes, _not_open_result(state, "Flow Builder is not open."))
 
 
 def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
-    return _after_promo(state, _screen_flow(state, step))
-
-
-def _screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
     origin = _origin(state.page)
     if not origin:
         return CheckResult("UI_MISMATCH", "The org was not open.", (), freeze=True)
@@ -3507,13 +3519,14 @@ def _screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
         )
     except Exception:
         return CheckResult("UI_MISMATCH", "Flows did not open.", (), freeze=True)
+    notes = len(state.popup_notes)
     missed = _wait_past_promo(
         state, step, lambda: _named_choice(state.page, "New Flow"), "New Flow was not on the Flows page."
     )
     if missed:
         return _stop_here(missed)
     if not (_click_last(state.page, "button", "New Flow") or _click_choice(state.page, "New Flow")):
-        return CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True)
+        return _resumed_miss(state, notes, CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True))
     missed = require(
         state,
         lambda: _screen_flow_offered(state),
