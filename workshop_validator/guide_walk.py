@@ -13,6 +13,7 @@ The password is never changed here.
 
 from __future__ import annotations
 
+import itertools
 import re
 import time
 import unicodedata
@@ -91,6 +92,9 @@ class WalkState:
     aliases: dict[str, str] = field(default_factory=dict)
     parents: frozenset[str] = frozenset()
     video_origin: float | None = None
+    # Per step (W-080): notes for closed pop-ups, and the step's time cap measured from its start.
+    popup_notes: list[str] = field(default_factory=list)
+    step_deadline: float | None = None
 
 
 @dataclass(frozen=True)
@@ -539,15 +543,13 @@ def run_launch(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not (click_role(state.page, "button", "Launch") or click_role(state.page, "link", "Launch")):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult("UI_MISMATCH", "Launch was not on the OrgClaim page.", ())
+        stop = _popup_resume(
+            state, step,
+            lambda: click_role(state.page, "button", "Launch") or click_role(state.page, "link", "Launch"),
+            CheckResult("UI_MISMATCH", "Launch was not on the OrgClaim page.", ()),
+        )
+        if stop is not None:
+            return stop
     missed = require(
         state,
         lambda: bool(org_host(getattr(state.page, "url", ""))),
@@ -828,38 +830,54 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return _stop_here(missed)
     _mark_shown_before(state.page)
+
+    def menu_open() -> bool:
+        return _profile_settings(state.page)[0] != "none"
+
+    def open_menu() -> bool:
+        # W-080 resume: View profile is clicked again only when its panel is not open.
+        if menu_open():
+            return True
+        if not click_role(state.page, "button", "View profile"):
+            return False
+        return require(state, menu_open, "", limit=state.page_wait_s) is None
+
+    def click_settings() -> bool:
+        outcome, target = _profile_settings(state.page)
+        if outcome != "one":
+            return False
+        if target is None:
+            # No profile panel was found: role lookup only, no text fallback.
+            return click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings")
+        try:
+            target.click(timeout=8000)
+            return True
+        except Exception:
+            return False
+
     if not click_role(state.page, "button", "View profile"):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult("UI_MISMATCH", "The profile menu did not open.", (), freeze=True)
+        stop = _popup_resume(
+            state, step, lambda: menu_open() or click_role(state.page, "button", "View profile"),
+            CheckResult("UI_MISMATCH", "The profile menu did not open.", (), freeze=True),
+        )
+        if stop is not None:
+            return stop
 
     # The wait and the click read the same helper, so they cannot disagree.
     missed = require(
         state,
-        lambda: _profile_settings(state.page)[0] != "none",
+        menu_open,
         "Settings was not in the profile menu.",
         limit=state.page_wait_s,
     )
-    if missed:
-        if missed.status == "UI_MISMATCH":
-            # Check if an unnamed modal is blocking the page
-            modal_title = _unnamed_modal_title(state.page, step.text or "")
-            if modal_title:
-                return CheckResult(
-                    "ENV_BLOCKED",
-                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                    (),
-                    freeze=True,
-                )
-            missed = CheckResult(
+    if missed and missed.status == "UI_MISMATCH":
+        missed = _popup_resume(
+            state, step, open_menu,
+            CheckResult(
                 missed.status, f"{missed.note} {_settings_diagnostic(state.page)}", missed.evidence_ids,
-            )
+            ),
+        )
+    if missed:
         return _stop_here(missed)
 
     outcome, target = _profile_settings(state.page)
@@ -871,28 +889,15 @@ def run_personal(state: WalkState, step: GuideStep) -> CheckResult:
             (),
             freeze=True,
         )
-    clicked = False
-    if outcome == "one" and target is None:
-        # No profile panel was found: role lookup only, no text fallback.
-        clicked = click_role(state.page, "link", "Settings") or click_role(state.page, "menuitem", "Settings")
-    elif outcome == "one":
-        try:
-            target.click(timeout=8000)
-            clicked = True
-        except Exception:
-            clicked = False
-    if not clicked:
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult(
-            "UI_MISMATCH", "Settings did not open. " + _settings_diagnostic(state.page), (), freeze=True,
+    if not click_settings():
+        stop = _popup_resume(
+            state, step, lambda: open_menu() and click_settings(),
+            CheckResult(
+                "UI_MISMATCH", "Settings did not open. " + _settings_diagnostic(state.page), (), freeze=True,
+            ),
         )
+        if stop is not None:
+            return stop
 
     missed = require(
         state,
@@ -1602,15 +1607,12 @@ def run_select_user(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not click_role(page, "button", "Select User"):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult("UI_MISMATCH", "Select User was not in the builder.", ())
+        stop = _popup_resume(
+            state, step, lambda: click_role(page, "button", "Select User"),
+            CheckResult("UI_MISMATCH", "Select User was not in the builder.", ()),
+        )
+        if stop is not None:
+            return stop
     return passed(step, "select-user", "Select User opened.")
 
 
@@ -1630,15 +1632,16 @@ def run_choose_einstein(state: WalkState, step: GuideStep) -> CheckResult:
         click_role(page, "option", "EinsteinServiceAgent User")
         or click_role(page, "link", "EinsteinServiceAgent User")
     ):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult("UI_MISMATCH", "EinsteinServiceAgent User was not in the agent user list.", ())
+        stop = _popup_resume(
+            state, step,
+            lambda: (
+                click_role(page, "option", "EinsteinServiceAgent User")
+                or click_role(page, "link", "EinsteinServiceAgent User")
+            ),
+            CheckResult("UI_MISMATCH", "EinsteinServiceAgent User was not in the agent user list.", ()),
+        )
+        if stop is not None:
+            return stop
     return passed(step, "agent-user", "EinsteinServiceAgent User was selected.")
 
 
@@ -1651,15 +1654,13 @@ def run_save_user(state: WalkState, step: GuideStep) -> CheckResult:
     if missed:
         return missed
     if not _click_save(page):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult("UI_MISMATCH", "Save was not on the user dialog.", ())
+        # Save was not clicked, so the resumed action is that first click.
+        stop = _popup_resume(
+            state, step, lambda: _click_save(page),
+            CheckResult("UI_MISMATCH", "Save was not on the user dialog.", ()),
+        )
+        if stop is not None:
+            return stop
     return passed(step, "user-saved", "Save completed after the agent user was selected.")
 
 
@@ -1689,15 +1690,13 @@ def run_preview(state: WalkState, step: GuideStep) -> CheckResult:
         if missed:
             return missed
         if not (click_role(page, "tab", "Preview") or click_role(page, "button", "Preview")):
-            modal_title = _unnamed_modal_title(state.page, step.text or "")
-            if modal_title:
-                return CheckResult(
-                    "ENV_BLOCKED",
-                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                    (),
-                    freeze=True,
-                )
-            return CheckResult("UI_MISMATCH", "Preview was not in the builder.", ())
+            stop = _popup_resume(
+                state, step,
+                lambda: click_role(page, "tab", "Preview") or click_role(page, "button", "Preview"),
+                CheckResult("UI_MISMATCH", "Preview was not in the builder.", ()),
+            )
+            if stop is not None:
+                return stop
     missed = require(state, lambda: _preview_ready(page), "Preview did not open Live Test.")
     if missed:
         return missed
@@ -2072,72 +2071,86 @@ def _exact_menuitem(page, item: str):
 DOWNLOAD_NOTE = "A browser download cannot be read from the page, so this needs review."
 
 
+def _menu_open(page) -> bool:
+    """True when any menu is visible on the page."""
+    for root in _roots(page):
+        try:
+            if _visible_items(root.get_by_role("menu")):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str) -> CheckResult:
     """Open the dropdown that belongs to ROW, then click ITEM in that menu. Never click ROW itself."""
+    not_found = CheckResult(
+        "UI_MISMATCH",
+        f"The dropdown in the {row} row was not found, so {row} was not clicked.",
+        (), freeze=True,
+    )
+
+    def button_shown() -> bool:
+        return _row_menu_button(state.page, row) is not None
+
+    def click_button() -> bool:
+        button = _row_menu_button(state.page, row)
+        return button is not None and _click_locator(button)
+
+    def item_shown() -> bool:
+        return _exact_menuitem(state.page, item) is not None
+
+    def menu_ready() -> bool:
+        # W-080 resume: the row dropdown toggles, so it is clicked again only when no menu is open.
+        if item_shown():
+            return True
+        if _menu_open(state.page) or not click_button():
+            return False
+        return require(state, item_shown, "", limit=state.page_wait_s) is None
+
+    def click_item() -> bool:
+        menuitem = _exact_menuitem(state.page, item)
+        return menuitem is not None and _click_locator(menuitem)
+
     missed = require(
         state,
-        lambda: _row_menu_button(state.page, row) is not None,
+        button_shown,
         f"The dropdown in the {row} row was not found, so {row} was not clicked.",
         limit=state.page_wait_s,
     )
-    if missed:
-        if missed.status == "UI_MISMATCH":
-            modal_title = _unnamed_modal_title(state.page, step.text or "")
-            if modal_title:
-                return CheckResult(
-                    "ENV_BLOCKED",
-                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                    (),
-                    freeze=True,
-                )
-        return _stop_here(missed)
-    button = _row_menu_button(state.page, row)
-    if button is None or not _click_locator(button):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult(
-            "UI_MISMATCH",
-            f"The dropdown in the {row} row was not found, so {row} was not clicked.",
-            (), freeze=True,
+    if missed and missed.status == "UI_MISMATCH":
+        missed = _popup_resume(
+            state, step, lambda: require(state, button_shown, "", limit=state.page_wait_s) is None, missed,
         )
+    if missed:
+        return _stop_here(missed)
+    if not click_button():
+        stop = _popup_resume(
+            state, step, lambda: item_shown() or (not _menu_open(state.page) and click_button()), not_found,
+        )
+        if stop is not None:
+            return stop
     missed = require(
         state,
-        lambda: _exact_menuitem(state.page, item) is not None,
+        item_shown,
         f"Opened the dropdown in the {row} row, but {item} was not in its menu.",
         limit=state.page_wait_s,
     )
+    if missed and missed.status == "UI_MISMATCH":
+        missed = _popup_resume(state, step, menu_ready, missed)
     if missed:
-        if missed.status == "UI_MISMATCH":
-            modal_title = _unnamed_modal_title(state.page, step.text or "")
-            if modal_title:
-                return CheckResult(
-                    "ENV_BLOCKED",
-                    f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                    (),
-                    freeze=True,
-                )
         return _stop_here(missed)
-    menuitem = _exact_menuitem(state.page, item)
-    if menuitem is None or not _click_locator(menuitem):
-        modal_title = _unnamed_modal_title(state.page, step.text or "")
-        if modal_title:
-            return CheckResult(
-                "ENV_BLOCKED",
-                f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
-                (),
-                freeze=True,
-            )
-        return CheckResult(
-            "UI_MISMATCH",
-            f"Opened the dropdown in the {row} row, but {item} could not be clicked.",
-            (), freeze=True,
+    if not click_item():
+        stop = _popup_resume(
+            state, step, lambda: menu_ready() and click_item(),
+            CheckResult(
+                "UI_MISMATCH",
+                f"Opened the dropdown in the {row} row, but {item} could not be clicked.",
+                (), freeze=True,
+            ),
         )
+        if stop is not None:
+            return stop
     note = f"Opened the dropdown in the {row} row and clicked {item}."
     if re.search(r"\bdownload\b", item, re.I):
         return CheckResult("NEEDS_REVIEW", f"{note} {DOWNLOAD_NOTE}", (), freeze=True)
@@ -2894,6 +2907,12 @@ def _promo_over(state: WalkState, step: GuideStep) -> bool:
 
 def _unnamed_modal_title(page, step_text: str) -> str | None:
     """Returns the title of a visible modal dialog that the step does not name, or None."""
+    found = _unnamed_modal(page, step_text)
+    return found[1] if found else None
+
+
+def _unnamed_modal(page, step_text: str):
+    """(dialog, title) of a visible modal dialog the step does not name, or None."""
     step_norm = norm(step_text)
     for root in _roots(page):
         # Check for role=dialog or aria-modal=true
@@ -2929,10 +2948,196 @@ def _unnamed_modal_title(page, step_text: str) -> str | None:
                         title = " ".join(words[:5]) if words else dialog_text_raw[:50]
                     # Check if step mentions this dialog's title
                     if title and norm(title) not in step_norm and len(dialog_text) > 5:
-                        return title
+                        return item, title
                 except Exception:
                     continue
     return None
+
+
+# Owner rule W-080: an unrelated welcome or help pop-up is closed with its own dismiss control.
+_MODAL_BLOCKED_NOTE = "modal covered the page; the guide does not mention it; the walk did not close it."
+_POPUP_DISMISS_NAMES = ("Close", "Dismiss", "Not now", "No thanks", "Skip", "Maybe later", "Got it")
+_POPUP_CLOSE_LIMIT = 3
+_AFTER_POPUP_NOTE = (
+    "Environment: after the pop-up was closed, the step's action still did not complete. "
+    "This is not counted against the guide."
+)
+
+
+def _modal_blocked(result) -> bool:
+    return (
+        isinstance(result, CheckResult)
+        and result.status == "ENV_BLOCKED"
+        and str(result.note or "").endswith(_MODAL_BLOCKED_NOTE)
+    )
+
+
+def _modal_result(title: str) -> CheckResult:
+    return CheckResult("ENV_BLOCKED", f'"{title}" {_MODAL_BLOCKED_NOTE}', (), freeze=True)
+
+
+def _after_popup_result() -> CheckResult:
+    return CheckResult("ENV_BLOCKED", _AFTER_POPUP_NOTE, (), freeze=True)
+
+
+def _dialog_dismiss_button(dialog):
+    """The dialog's own dismiss button (exact name), searched only inside that dialog.
+
+    OK is used only when it is the dialog's only button.
+    """
+    for name in _POPUP_DISMISS_NAMES:
+        loc = _by_role(dialog, "button", name, exact=True)
+        if loc is None:
+            continue
+        target = _visible_match(loc)
+        if target is not None:
+            return target
+    try:
+        buttons = _visible_items(dialog.get_by_role("button"))
+    except Exception:
+        return None
+    if len(buttons) == 1:
+        loc = _by_role(dialog, "button", "OK", exact=True)
+        target = None if loc is None else _visible_match(loc)
+        if target is not None:
+            return target
+    return None
+
+
+_POPUP_MARKS = itertools.count(1)
+
+
+def _tracked_dialog(handle):
+    """A locator bound to this dialog element by a data mark, not to its position among dialogs."""
+    # The mark is left in place on purpose: marks never repeat, and re-marking overwrites.
+    try:
+        frame = handle.owner_frame()
+        mark = f"wv-popup-{next(_POPUP_MARKS)}"
+        handle.evaluate("(el, mark) => el.setAttribute('data-wv-popup', mark)", mark)
+        return frame.locator(f"[data-wv-popup='{mark}']")
+    except Exception:
+        return None
+
+
+def _time_left(state: WalkState) -> float:
+    """Seconds left in this step's time cap (the cap runs from the step's start)."""
+    if state.step_deadline is None:
+        return float("inf")
+    return max(0.0, state.step_deadline - state.clock())
+
+
+def _dialog_gone(state: WalkState, handle, wait_s: float = 6.0) -> bool:
+    """Poll (bounded) until this dialog element is no longer visible."""
+    wait_s = min(wait_s, _time_left(state))
+    waited = 0.0
+    while True:
+        try:
+            if not handle.is_visible():
+                return True
+        except Exception:
+            return True
+        if waited >= wait_s:
+            return False
+        _sleep(state, 0.5)
+        waited += 0.5
+
+
+def _close_unrelated_popup(state: WalkState, step: GuideStep) -> str | None:
+    """Close one unnamed pop-up with its own dismiss control. Returns its title, or None."""
+    found = _unnamed_modal(state.page, step.text or "")
+    if not found:
+        return None
+    dialog, title = found
+    # Track this element, not its position: another dialog can take the same index.
+    try:
+        handle = dialog.element_handle(timeout=2000)
+    except Exception:
+        handle = None
+    tracked = None if handle is None else _tracked_dialog(handle)
+    if tracked is None:
+        return None
+    button = _dialog_dismiss_button(tracked)
+    if button is not None:
+        try:
+            button.click(timeout=5000)
+        except Exception:
+            return None
+    else:
+        keyboard = getattr(state.page, "keyboard", None)
+        try:
+            keyboard.press("Escape")
+        except Exception:
+            return None
+    return title if _dialog_gone(state, handle) else None
+
+
+def _popup_note(title: str) -> str:
+    return f'Environment: closed "{title}" pop-up the guide does not mention (owner rule W-080).'
+
+
+class _CutWaits:
+    """During a resumed action, every wait is cut to the time left in the step."""
+
+    def __init__(self, state: WalkState):
+        self.state = state
+
+    def __enter__(self):
+        self.saved = (self.state.page_wait_s, self.state.timeout_s)
+        left = _time_left(self.state)
+        self.state.page_wait_s = min(self.state.page_wait_s, left)
+        self.state.timeout_s = min(self.state.timeout_s, left)
+        return self
+
+    def __exit__(self, *exc):
+        self.state.page_wait_s, self.state.timeout_s = self.saved
+        return False
+
+
+def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun) -> CheckResult | None:
+    """W-080: close the unrelated pop-up, then rerun ONLY the action that missed.
+
+    RERUN returns None when the action now completed, or a CheckResult. Actions
+    that already ran in this step are never repeated. A rerun that misses again
+    stays ENV_BLOCKED: a pop-up never becomes a real failure. Closing is never evidence.
+    """
+    for _ in range(_POPUP_CLOSE_LIMIT):
+        if _time_left(state) <= 0:
+            return blocked
+        closed = _close_unrelated_popup(state, step)
+        if not closed:
+            return blocked
+        state.popup_notes.append(_popup_note(closed))
+        with _CutWaits(state):
+            result = rerun()
+        if result is None:
+            return None
+        if _modal_blocked(result):
+            blocked = result
+            continue
+        renamed = result.status == "UI_MISMATCH" and not result.freeze and result.evidence_ids
+        if result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL") and not renamed:
+            return _after_popup_result()
+        return result
+    return blocked
+
+
+def _popup_resume(state: WalkState, step: GuideStep, retry, fallback: CheckResult) -> CheckResult | None:
+    """A named action missed. With no unnamed pop-up, FALLBACK (the pre-W-080 miss) is returned.
+
+    Otherwise the pop-up is closed and only RETRY (a bool action) runs again.
+    None means RETRY completed and the caller continues with its next action.
+    """
+    title = _unnamed_modal_title(state.page, step.text or "")
+    if not title:
+        return fallback
+
+    def rerun():
+        if retry():
+            return None
+        again = _unnamed_modal_title(state.page, step.text or "")
+        return _modal_result(again) if again else _after_popup_result()
+
+    return _popup_retry(state, step, _modal_result(title), rerun)
 
 
 def _builder_canvas_visible(page) -> bool:
@@ -4478,6 +4683,7 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     """Click each named control in order. The next name can appear after the previous click."""
     done: list[str] = []
     renamed: CheckResult | None = None
+    opened = {"done": False, "error": False}
     for name in names:
         if norm(name) in {"ok", "okay"} and _locator_for_name(state.page, name) is None:
             if _words_visible(state.page, "successfully saved"):
@@ -4492,7 +4698,13 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
                     f"saved message: {_snippet(banner_text)}"
                 )
                 return CheckResult("UI_MISMATCH", note, evidence_ids, freeze=False)
-        result = _finish_attempt(state, step, _Intent("click", name))
+        result = _finish_attempt(state, step, _Intent("click", name), opened)
+        if _modal_blocked(result):
+            # W-080: resume at this name only; names already clicked are not clicked again.
+            result = _popup_retry(
+                state, step, result,
+                lambda name=name: _finish_attempt(state, step, _Intent("click", name), opened),
+            )
         if result.status == "UI_MISMATCH" and not result.freeze and result.evidence_ids:
             renamed = renamed or result
             done.append(name)
@@ -4505,11 +4717,14 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     return passed(step, "clicked", "Clicked " + " then ".join(done) + ".")
 
 
-def _finish_attempt(state: WalkState, step: GuideStep, intent: _Intent) -> CheckResult:
+def _finish_attempt(
+    state: WalkState, step: GuideStep, intent: _Intent, opened: dict | None = None,
+) -> CheckResult:
     """Stay on this step until the page shows the result, or both waits have failed."""
     start = state.clock()
     memory = _ResearchMemory()
-    opened = {"done": False, "error": False}
+    if opened is None:
+        opened = {"done": False, "error": False}
     lookup = intent.target or (step.text or step.step_id)
     while True:
         loading = _loading(state.page)
@@ -4576,7 +4791,12 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
             (),
             freeze=True,
         )
-    return _finish_attempt(state, step, intent)
+    opened = {"done": False, "error": False}
+    result = _finish_attempt(state, step, intent, opened)
+    if _modal_blocked(result):
+        # W-080: the same intent runs again; a URL already opened is not opened again.
+        result = _popup_retry(state, step, result, lambda: _finish_attempt(state, step, intent, opened))
+    return result
 
 
 def _session_blocked(state: WalkState, step: GuideStep) -> bool:
@@ -4683,6 +4903,8 @@ def walk_guide(
         else:
             password_form = None
             check = find_check(step, catalog)
+        state.popup_notes = []
+        state.step_deadline = t_start + step_cap_s
         try:
             if skipped is None:
                 result = check.run(state, step) if check is not None else attempt_step(state, step)
@@ -4708,6 +4930,17 @@ def walk_guide(
                 "NEEDS_REVIEW",
                 result.note or "A pass was reported without evidence.",
                 (),
+            )
+        popup_notes = list(state.popup_notes)
+        state.step_deadline = None
+        if popup_notes:
+            # Closing is never evidence: the status comes from the resumed action only.
+            result = CheckResult(
+                result.status,
+                " ".join([*popup_notes, result.note or ""]).strip(),
+                result.evidence_ids,
+                result.freeze,
+                result.suspect,
             )
         t_end = _clock()
         statuses[step.step_id] = result.status

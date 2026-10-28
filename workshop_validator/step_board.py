@@ -965,6 +965,11 @@ def _render_step(step: StepView) -> str:
                     "<span class='chip suspect' title='Evidence is the URL only'>"
                     "Evidence is the URL only</span>"
                 )
+            elif chip == "popup-closed":
+                chip_items.append(
+                    "<span class='chip' title='The walk closed a pop-up the guide does not "
+                    "mention, then retried the step'>Environment: pop-up closed</span>"
+                )
             elif chip == "unexpected-change":
                 chip_items.append(
                     "<span class='chip suspect' title='The page changed in an unexpected way'>"
@@ -993,6 +998,10 @@ def _detect_chips(outcome: StepOutcome) -> tuple[str, ...]:
 
     if "reviewed alias" in note or "renamed in ui" in note:
         chips.append("renamed")
+
+    # W-080: an unrelated pop-up was closed; PASS rows hide notes, so the chip shows it.
+    if "(owner rule w-080)" in note:
+        chips.append("popup-closed")
 
     # Add suspect flags as chips for quick-mode step-verifier selection
     if outcome.suspect:
@@ -1305,6 +1314,8 @@ def render_run_report(
                             chips_html.append("<span class='chip suspect' title='Evidence is based only on a click action, with no visible confirmation'>Weak evidence</span>")
                         elif chip == "url-only-evidence":
                             chips_html.append("<span class='chip suspect' title='Evidence is the URL only'>Evidence is the URL only</span>")
+                        elif chip == "popup-closed":
+                            chips_html.append("<span class='chip' title='The walk closed a pop-up the guide does not mention, then retried the step'>Environment: pop-up closed</span>")
                         elif chip == "unexpected-change":
                             chips_html.append("<span class='chip suspect' title='The page changed in an unexpected way'>Unexpected page change</span>")
                     if chips_html:
