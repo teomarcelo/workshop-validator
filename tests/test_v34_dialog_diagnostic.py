@@ -184,7 +184,7 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
                 return None
             return blocked
 
-        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
         return result, page
 
     def test_svg_button_no_escape_has_diagnostic_with_img(self):
@@ -258,7 +258,7 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
         def rerun():
             return None if page.evaluate("window.actionRan") else blocked
 
-        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertTrue(result.freeze)
         self.assertIn("Diagnostic:", result.note)
@@ -312,7 +312,7 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
             add_dialog_back()
             return blocked
 
-        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertTrue(result.freeze)
         self.assertIn("Diagnostic:", result.note)
@@ -357,7 +357,7 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
         def rerun():
             return blocked
 
-        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertIn("Escape pressed no", result.note)
 
@@ -373,10 +373,147 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
         def rerun():
             return blocked
 
-        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertTrue(result.freeze)
         self.assertIn("tree: skipped, step time nearly used", result.note)
+
+    def test_production_wiring_through_popup_resume(self):
+        # Reach diagnostic through real caller (_popup_resume) without explicit flag
+        content = '<h2>Uncloseable Dialog</h2>'
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.set_content(HTML_TEMPLATE.format(content=content, script="", outside_content=""))
+        state = guide_walk.WalkState(page=page, timeout_s=10, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        state.step_deadline = state.clock() + 60
+
+        # Simulate a click action that failed
+        fallback = guide_walk.CheckResult("UI_MISMATCH", "Control not found.", (), freeze=True)
+        result = guide_walk._popup_resume(state, accounts_step(), lambda: False, fallback)
+
+        # Should get diagnostic through the production path
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Diagnostic:", result.note)
+        self.assertIn("tree:", result.note)
+
+    def test_close_click_works_script_reshows_dialog(self):
+        # Brief case (d): Close click works, dialog removed, but script re-shows it
+        # This happens on loop exhaustion: each close succeeds but rerun adds dialog back
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        content = '<button onclick="document.getElementById(\'test-dialog\').remove()">Close</button>'
+        page.set_content(HTML_TEMPLATE.format(content=content, script="", outside_content=""))
+
+        state = guide_walk.WalkState(page=page, timeout_s=10, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        state.step_deadline = state.clock() + 60
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page; the guide does not mention it; the walk did not close it.", (), freeze=True)
+
+        def add_dialog_back():
+            page.evaluate("""
+                const dialog = document.createElement('div');
+                dialog.id = 'test-dialog';
+                dialog.setAttribute('role', 'dialog');
+                dialog.setAttribute('aria-modal', 'true');
+                dialog.style = 'position:fixed;inset:0;background:rgba(0,0,0,0.8)';
+                dialog.innerHTML = '<h2>Test Dialog</h2><button onclick="document.getElementById(\\'test-dialog\\').remove()">Close</button>';
+                document.body.insertBefore(dialog, document.body.firstChild);
+            """)
+
+        def rerun():
+            # Simulate: action still blocked, and dialog reappears
+            add_dialog_back()
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("Diagnostic:", result.note)
+        self.assertIn("the dialog came back after", result.note)
+        # Last attempt had click (Close button was found and clicked)
+        self.assertIn("click attempted yes", result.note)
+        # But on the last check, dialog is gone (removed by last close)
+        self.assertIn("still visible no", result.note)
+
+    def test_still_visible_no_on_successful_final_close_in_loop(self):
+        # Test "still visible no" when the final close in the loop succeeds but action still fails
+        # Close removes dialog each time, but rerun keeps adding it back, exhausting the loop
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        content = '<button onclick="document.getElementById(\'test-dialog\').remove()">Close</button>'
+        page.set_content(HTML_TEMPLATE.format(content=content, script="", outside_content=""))
+
+        state = guide_walk.WalkState(page=page, timeout_s=10, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        state.step_deadline = state.clock() + 60
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page; the guide does not mention it; the walk did not close it.", (), freeze=True)
+
+        def add_dialog_back():
+            page.evaluate("""
+                const dialog = document.createElement('div');
+                dialog.id = 'test-dialog';
+                dialog.setAttribute('role', 'dialog');
+                dialog.setAttribute('aria-modal', 'true');
+                dialog.style = 'position:fixed;inset:0;background:rgba(0,0,0,0.8)';
+                dialog.innerHTML = '<h2>Test Dialog</h2><button onclick="document.getElementById(\\'test-dialog\\').remove()">Close</button>';
+                document.body.insertBefore(dialog, document.body.firstChild);
+            """)
+
+        close_count = [0]
+        def rerun():
+            close_count[0] += 1
+            if close_count[0] < 3:  # Add dialog back for first 2 closes
+                add_dialog_back()
+            # Always return blocked to continue loop (even after final close)
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        # On the 3rd (final) close, dialog was removed and not re-added, so still_visible should be no
+        self.assertIn("the dialog came back after 3 closes", result.note)
+        self.assertIn("still visible no", result.note)
+
+    def test_still_visible_unknown_when_no_dialog_found(self):
+        # When _unnamed_modal finds no dialog, still_visible should be unknown
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        # No dialog in the page
+        page.set_content('<button id="target" onclick="window.actionRan=true">Target</button><script>window.actionRan=false;</script>')
+
+        state = guide_walk.WalkState(page=page, timeout_s=10, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        state.step_deadline = state.clock() + 60
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        def rerun():
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertIn("still visible unknown", result.note)
+
+    def test_valueless_attributes_kept(self):
+        # Test that valueless attributes like [disabled], [checked] are kept
+        content = '<button disabled>Close</button><input type="checkbox" checked />'
+        snapshot_html = f'<div role="dialog">{content}</div>'
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.set_content(snapshot_html)
+        dialog = page.locator("[role='dialog']").first
+        snapshot = dialog.aria_snapshot()
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertIn("[disabled]", result)
+        self.assertIn("[checked]", result)
+
+    def test_600_char_cap_exact(self):
+        # Test that the 600-char cap is exact including "..."
+        # Create a long snapshot
+        content = '<div>' + ''.join(f'<button>Button{i}</button>' for i in range(100)) + '</div>'
+        snapshot_html = f'<div role="dialog">{content}</div>'
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.set_content(snapshot_html)
+        dialog = page.locator("[role='dialog']").first
+        snapshot = dialog.aria_snapshot()
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertEqual(len(result), 600)
+        self.assertTrue(result.endswith("..."))
 
 
 class FakePageDiagnosticTests(unittest.TestCase):
@@ -429,6 +566,35 @@ class FakePageDiagnosticTests(unittest.TestCase):
         attempt = guide_walk.CloseAttempt(escape_pressed=True, still_visible=True, handle=object())
         result = guide_walk._add_dialog_diagnostic(state, attempt, blocked)
         self.assertIn("tree: skipped, step time nearly used", result.note)
+
+    def test_still_visible_default_none_shows_unknown(self):
+        # When still_visible is None (default), should show "unknown"
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 60)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+        attempt = guide_walk.CloseAttempt(escape_pressed=True)  # still_visible defaults to None
+        result = guide_walk._add_dialog_diagnostic(state, attempt, blocked)
+        self.assertIn("still visible unknown", result.note)
+
+    def test_still_visible_yes_mutant(self):
+        # Kill the always-yes mutant: explicit True should show "yes"
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 60)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+        attempt = guide_walk.CloseAttempt(escape_pressed=True, still_visible=True)
+        result = guide_walk._add_dialog_diagnostic(state, attempt, blocked)
+        self.assertIn("still visible yes", result.note)
+        self.assertNotIn("still visible no", result.note)
+
+    def test_still_visible_no_mutant(self):
+        # Kill the always-yes mutant: explicit False should show "no"
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 60)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+        attempt = guide_walk.CloseAttempt(escape_pressed=True, still_visible=False, handle=None)
+        result = guide_walk._add_dialog_diagnostic(state, attempt, blocked)
+        self.assertIn("still visible no", result.note)
+        self.assertNotIn("still visible yes", result.note)
 
 
 if __name__ == "__main__":

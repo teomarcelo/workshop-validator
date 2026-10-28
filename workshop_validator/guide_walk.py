@@ -19,7 +19,6 @@ import time
 import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
-import shlex
 from urllib.parse import urlparse
 
 from .browser_worker import BrowserActionError
@@ -79,7 +78,7 @@ class CloseAttempt:
     click_raised: bool = False
     escape_pressed: bool = False
     escape_raised: bool = False
-    still_visible: bool = True
+    still_visible: bool | None = None
     handle: object = None
 
 
@@ -3330,7 +3329,7 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> tuple[str | Non
         return None, CloseAttempt()
     dialog, title = found
     attempt = _close_dialog(state, dialog)
-    success = not attempt.still_visible and not attempt.click_raised and not attempt.escape_raised
+    success = attempt.still_visible is False and not attempt.click_raised and not attempt.escape_raised
     return (title if success else None), attempt
 
 
@@ -3508,7 +3507,7 @@ def _parse_aria_line(line: str) -> tuple[str, str, str, dict, str] | None:
         except Exception:
             pass
 
-    # Parse attributes [key=val]
+    # Parse attributes [key=val] or [key]
     attrs = {}
     while remainder.startswith("["):
         end = remainder.find("]")
@@ -3518,6 +3517,9 @@ def _parse_aria_line(line: str) -> tuple[str, str, str, dict, str] | None:
         if "=" in attr_str:
             key, val = attr_str.split("=", 1)
             attrs[key.strip()] = val.strip()
+        else:
+            # Valueless attribute like [disabled]
+            attrs[attr_str.strip()] = ""
         remainder = remainder[end + 1 :].lstrip()
 
     # Extract inline value after colon
@@ -3557,7 +3559,10 @@ def _redact_aria_snapshot(snapshot: str) -> str:
         attrs_out = ""
         for key in _ALLOWED_ATTRS:
             if key in attrs:
-                attrs_out += f" [{key}={attrs[key]}]"
+                if attrs[key]:
+                    attrs_out += f" [{key}={attrs[key]}]"
+                else:
+                    attrs_out += f" [{key}]"
 
         # Value: keep only if exactly an allowed glyph
         value_out = ""
@@ -3569,14 +3574,20 @@ def _redact_aria_snapshot(snapshot: str) -> str:
 
         lines.append(f"{indent}- {role}{name_out}{attrs_out}{value_out}")
 
-    return " / ".join(lines)[:600] + ("..." if len(" / ".join(lines)) > 600 else "")
+    joined = " / ".join(lines)
+    if len(joined) > 600:
+        return joined[:597] + "..."
+    return joined
 
 
 def _add_dialog_diagnostic(state: WalkState, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0) -> CheckResult:
     """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed."""
     click_attempted = "yes" if attempt.click_attempted else "no"
     escape_pressed = "yes" if attempt.escape_pressed else "no"
-    still_visible = "yes" if attempt.still_visible else "no"
+    if attempt.still_visible is None:
+        still_visible = "unknown"
+    else:
+        still_visible = "yes" if attempt.still_visible else "no"
 
     time_left = _time_left(state)
     if time_left < 2:
@@ -3603,13 +3614,14 @@ def _add_dialog_diagnostic(state: WalkState, attempt: CloseAttempt, blocked: Che
             tree = "unavailable"
 
     if loop_count > 0:
-        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} closes; click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+        closes_word = "close" if loop_count == 1 else "closes"
+        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} {closes_word}; click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     else:
         note = f"{blocked.note} Diagnostic: click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     return replace(blocked, note=note)
 
 
-def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun, collect_diagnostic: bool = True) -> CheckResult | None:
+def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun) -> CheckResult | None:
     """W-080: close the unrelated pop-up, then rerun ONLY the action that missed.
 
     RERUN returns None when the action now completed, or a CheckResult. Actions
@@ -3624,8 +3636,7 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun,
         title, attempt = _close_unrelated_popup(state, step)
         last_attempt = attempt
         if not title:
-            if collect_diagnostic:
-                blocked = _add_dialog_diagnostic(state, attempt, blocked, loop_count)
+            blocked = _add_dialog_diagnostic(state, attempt, blocked, loop_count)
             return blocked
         loop_count += 1
         state.popup_notes.append(_popup_note(title))
@@ -3640,7 +3651,7 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun,
         if result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL") and not renamed:
             return _after_popup_result()
         return result
-    if collect_diagnostic and last_attempt:
+    if last_attempt:
         blocked = _add_dialog_diagnostic(state, last_attempt, blocked, loop_count)
     return blocked
 
