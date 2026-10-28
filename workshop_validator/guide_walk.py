@@ -344,7 +344,8 @@ def settle(
 ) -> None:
     """Poll until ready. Still loading at the limit is not a mismatch."""
     start = state.clock()
-    # A limit also ends the wait for a page that keeps loading.
+    # A limit bounds the not-loading mismatch wait; a page that keeps loading is cut at
+    # min(timeout_s, step time left) when a limit is given, or timeout_s alone when no limit.
     loading_cap = state.timeout_s if limit is None else min(state.timeout_s, _time_left(state))
     polls = 0
     while True:
@@ -383,10 +384,15 @@ def require(
         settle(state, ready, loading, limit)
     except StillLoading as e:
         cap_s = e.cap_s if e.cap_s is not None else state.timeout_s
-        note = (
-            f"The page was still loading after about {int(cap_s)} seconds, "
-            "so this step was not marked failed."
-        )
+        if cap_s < state.timeout_s:
+            note = "The page was still loading when this step ran out of time, so this step was not marked failed."
+        else:
+            rounded = round(cap_s)
+            plural = "s" if rounded != 1 else ""
+            note = (
+                f"The page was still loading after about {rounded} second{plural}, "
+                "so this step was not marked failed."
+            )
         return CheckResult("NOT_RUN", note, ())
     except BrowserActionError:
         return CheckResult("UI_MISMATCH", failure_note, ())

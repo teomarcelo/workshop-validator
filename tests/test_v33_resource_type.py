@@ -229,7 +229,7 @@ def state_for(page, page_wait_s=0, on_sleep=None):
             on_sleep(clock.now)
 
     return guide_walk.WalkState(
-        page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=sleep,
+        page=page, timeout_s=90, interval_s=1, clock=clock, sleeper=sleep,
         page_wait_s=page_wait_s, page_poll_s=1,
     )
 
@@ -419,9 +419,11 @@ class ResourceTypeTests(unittest.TestCase):
         page = ResourcePage()
         self.open_on_variable(page)
         self.on_option(page, lambda: setattr(page, "spinning", True))
-        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        state = state_for(page)
+        state.step_deadline = state.clock() + 5
+        result = guide_walk.run_record_variable(state, variable_step())
         self.assertEqual(result.status, "NOT_RUN")
-        self.assertIn("still loading after about 0 seconds", result.note)
+        self.assertIn("still loading when this step ran out of time", result.note)
         self.assertIn("not marked failed", result.note)
         self.assertFalse(result.freeze)
         self.assertEqual(page.keys, [])
@@ -431,9 +433,11 @@ class ResourceTypeTests(unittest.TestCase):
         page.box_attrs["aria-expanded"] = "true"
         page.highlight("Variable")
         page.on_enter = lambda: setattr(page, "spinning", True)
-        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        state = state_for(page)
+        state.step_deadline = state.clock() + 5
+        result = guide_walk.run_record_variable(state, variable_step())
         self.assertEqual(result.status, "NOT_RUN")
-        self.assertIn("still loading after about 0 seconds", result.note)
+        self.assertIn("still loading when this step ran out of time", result.note)
         self.assertIn("not marked failed", result.note)
         self.assertFalse(result.freeze)
         self.assertEqual(page.keys, ["Enter"])
@@ -488,9 +492,33 @@ class ResourceTypeTests(unittest.TestCase):
         state = self.timed_state(page, left=4, timeout_s=90)
         result = guide_walk.run_record_variable(state, variable_step())
         self.assertEqual(result.status, "NOT_RUN")
-        self.assertIn("still loading after about 4 seconds", result.note)
+        self.assertIn("still loading when this step ran out of time", result.note)
         self.assertFalse(result.freeze)
         self.assertLessEqual(state.clock(), 5)
+        self.assertEqual(page.keys, [])
+
+    def test_page_that_keeps_loading_past_poll_limit_raises_still_loading_with_cap(self):
+        page = ResourcePage()
+        self.on_option(page, lambda: setattr(page, "spinning", True))
+        state = state_for(page, page_wait_s=30)
+        state.interval_s = 0
+        state.step_deadline = state.clock() + 5
+        result = guide_walk.run_record_variable(state, variable_step())
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertIn("still loading when this step ran out of time", result.note)
+        self.assertFalse(result.freeze)
+
+    def test_page_that_keeps_loading_until_full_timeout_reports_seconds(self):
+        page = ResourcePage()
+        self.on_option(page, lambda: setattr(page, "spinning", True))
+        state = state_for(page, page_wait_s=30)
+        state.timeout_s = 5
+        state.step_deadline = state.clock() + 1000
+        result = guide_walk.run_record_variable(state, variable_step())
+        self.assertEqual(result.status, "NOT_RUN")
+        self.assertIn("still loading after about 5 seconds", result.note)
+        self.assertIn("not marked failed", result.note)
+        self.assertFalse(result.freeze)
 
     def test_diagnostic_says_a_present_variable_option_is_not_visible(self):
         page = ResourcePage()
