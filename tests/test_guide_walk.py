@@ -510,7 +510,7 @@ class WalkTests(unittest.TestCase):
         )
         self.assertEqual(outcome.statuses["a"], "NOT_RUN")
         self.assertIn("still loading", outcome.notes["a"])
-        self.assertEqual(outcome.notes["a"], LOADING_NOTE)
+        self.assertIn("not marked failed", outcome.notes["a"])
 
     def test_pass_without_evidence_is_not_a_pass(self):
         def run(state, step):
@@ -741,7 +741,8 @@ class WalkTests(unittest.TestCase):
         )
         outcome = self.walk(page, (item,))
         self.assertEqual(outcome.statuses["agents"], "NOT_RUN")
-        self.assertEqual(outcome.notes["agents"], LOADING_NOTE)
+        self.assertIn("still loading", outcome.notes["agents"])
+        self.assertIn("not marked failed", outcome.notes["agents"])
         self.assertNotIn("Quick Find", outcome.notes["agents"])
 
     def test_settled_page_without_agentforce_agents_is_a_mismatch(self):

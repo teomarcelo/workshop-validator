@@ -48,6 +48,10 @@ _LOADING_TEXT = re.compile(r"\bLoading\b|Loading assistant|Nothing here yet", re
 class StillLoading(Exception):
     """The expected control was still behind a loading signal at the time limit."""
 
+    def __init__(self, cap_s: float | None = None):
+        super().__init__()
+        self.cap_s = cap_s
+
 
 @dataclass(frozen=True)
 class CheckResult:
@@ -340,6 +344,8 @@ def settle(
 ) -> None:
     """Poll until ready. Still loading at the limit is not a mismatch."""
     start = state.clock()
+    # A limit also ends the wait for a page that keeps loading.
+    loading_cap = state.timeout_s if limit is None else min(state.timeout_s, _time_left(state))
     polls = 0
     while True:
         polls += 1
@@ -354,13 +360,13 @@ def settle(
             loading_now = False
         elapsed = state.clock() - start
         cap = state.timeout_s if limit is None else limit
-        if loading_now and elapsed >= state.timeout_s and polls >= 2:
-            raise StillLoading()
+        if loading_now and elapsed >= loading_cap and polls >= 2:
+            raise StillLoading(loading_cap)
         if not loading_now and elapsed >= cap and polls >= 2:
             raise BrowserActionError("The guide target did not match the observed page.")
         if polls > 2000:
             if loading_now:
-                raise StillLoading()
+                raise StillLoading(loading_cap)
             raise BrowserActionError("The guide target did not match the observed page.")
         _sleep(state, state.interval_s)
 
@@ -375,8 +381,13 @@ def require(
 ) -> CheckResult | None:
     try:
         settle(state, ready, loading, limit)
-    except StillLoading:
-        return CheckResult("NOT_RUN", LOADING_NOTE, ())
+    except StillLoading as e:
+        cap_s = e.cap_s if e.cap_s is not None else state.timeout_s
+        note = (
+            f"The page was still loading after about {int(cap_s)} seconds, "
+            "so this step was not marked failed."
+        )
+        return CheckResult("NOT_RUN", note, ())
     except BrowserActionError:
         return CheckResult("UI_MISMATCH", failure_note, ())
     return None
@@ -3630,6 +3641,7 @@ def _resource_type_diagnostic(page) -> str:
     """Safe facts only: roles, states, counts and allow-listed resource type labels."""
     root, role, box = _resource_type_box(page)
     expanded = _read_attr(box, "aria-expanded") if box is not None else ""
+    expanded = expanded if expanded in ("true", "false") else "none"
     scope = root if root is not None else page
     named = _by_role(scope, "option", "Variable", exact=True)
     has = named is not None and _count(named) > 0
@@ -3648,7 +3660,7 @@ def _resource_type_diagnostic(page) -> str:
     except Exception:
         pass
     return (
-        f"Diagnostic: control role {role or 'none'}; aria-expanded {expanded or 'none'}; "
+        f"Diagnostic: control role {role or 'none'}; aria-expanded {expanded}; "
         f"option Variable present {'yes' if has else 'no'}, visible {'yes' if shown else 'no'}; "
         f"{total} options; labels: {', '.join(labels) or 'none'}."
     )
@@ -3662,7 +3674,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     if not present(page, "option", "Variable"):
         click_role(page, "combobox", "Resource Type") or click_role(page, "button", "Resource Type")
     click_role(page, "option", "Variable")
-    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S)
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
     note = "Resource Type could not be set to Variable."
     missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
     if missed is None or missed.status != "UI_MISMATCH":
@@ -3677,6 +3689,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
             box.press("Enter", timeout=3000)
         except Exception:
             pass
+        limit = min(limit, _time_left(state))
         missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
         if missed is None or missed.status != "UI_MISMATCH":
             return missed
