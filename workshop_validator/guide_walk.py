@@ -2060,6 +2060,41 @@ def _safe_label(label: str, row: str) -> str:
     return "other"
 
 
+_ROW_CONTAINS_JS = "(el, other) => el !== other && el.contains(other)"
+
+
+def _row_holds(outer, inner) -> bool:
+    """True only when OUTER is read to contain INNER in the page; a failed read is False."""
+    try:
+        return bool(outer.evaluate(_ROW_CONTAINS_JS, inner.element_handle(timeout=1000)))
+    except Exception:
+        return False
+
+
+def _row_shape(item) -> str:
+    """Tag, role, aria-rowindex and box size of a matched row; no text, ids or URLs (W-090)."""
+    def read(fn):
+        try:
+            return str(fn() or "")
+        except Exception:
+            return ""
+
+    tag = read(lambda: item.evaluate("el => el.tagName.toLowerCase()")).lower()
+    role = read(lambda: item.get_attribute("role")).lower()
+    index = read(lambda: item.get_attribute("aria-rowindex"))
+    tag = tag if re.fullmatch(r"[a-z][a-z0-9-]{0,19}", tag) else "unknown"
+    role = role if re.fullmatch(r"[a-z]{1,20}", role) else "none"
+    index = index if re.fullmatch(r"\d{1,6}", index) else "none"
+    size = "unknown"
+    try:
+        box = item.bounding_box()
+        if box:
+            size = f"{round(float(box['width']))}x{round(float(box['height']))}"
+    except Exception:
+        pass
+    return f"tag {tag}, role {role}, rowindex {index}, size {size}"
+
+
 def _row_menu_button(page, row: str):
     """The one menu button inside the one visible row named ROW, or None."""
     return _row_menu_scan(page, row)[0]
@@ -2095,6 +2130,18 @@ def _row_menu_scan(page, row: str):
                         continue
             except Exception:
                 pass
+    if len(rows) > 1:
+        # V29: one visible row can match twice when a matched row holds another matched row.
+        # Keep only the innermost; use it only when exactly one is left.
+        holds = [any(_row_holds(outer, inner) for inner in rows) for outer in rows]
+        innermost = [item for item, held in zip(rows, holds) if not held]
+        if len(innermost) != 1:
+            details = " ".join(
+                f"Row {i}: {_row_shape(item)}, contains a match: {'yes' if held else 'no'}."
+                for i, (item, held) in enumerate(zip(rows[:3], holds), 1)
+            )
+            return None, f"Rows matched: {len(rows)}. {details}"
+        rows = innermost
     if len(rows) != 1:
         return None, f"Rows matched: {len(rows)}."
     try:
