@@ -3554,8 +3554,11 @@ def _api_name_ready(page) -> bool:
     url = str(getattr(page, "url", "") or "").lower()
     if "/setup/flows" in url:
         return False
-    if labeled(page, "API Name") is not None:
-        return True
+    # Only a visible API Name counts; Flow Builder can keep a hidden copy in the DOM.
+    for root in _roots(page):
+        loc = _labeled(root, "API Name")
+        if loc is not None and _visible(loc):
+            return True
     return present(page, "textbox", "API Name")
 
 

@@ -246,6 +246,57 @@ class ResourceTypeTests(unittest.TestCase):
                       result.note)
 
 
+    def hide_api_name(self, page, textbox=False):
+        page.values["API Name"] = ""
+        page.hidden.add(("label", "API Name"))
+        if textbox:
+            page.roles.add(("textbox", "API Name"))
+            page.hidden.add(("textbox", "API Name"))
+
+    def test_hidden_api_name_label_does_not_count_as_variable(self):
+        page = ResourcePage()
+        self.hide_api_name(page)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertTrue(result.note.startswith(UNSET + " Diagnostic:"))
+        self.assertIn(("option", "Variable"), clicks(page))
+        self.assertEqual(page.keys, [])
+
+    def test_hidden_api_name_label_and_textbox_do_not_count(self):
+        page = ResourcePage()
+        self.hide_api_name(page, textbox=True)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.note.startswith(UNSET))
+        self.assertFalse(guide_walk._api_name_ready(page))
+
+    def test_api_name_label_shown_after_selection_continues(self):
+        page = ResourcePage()
+        self.hide_api_name(page)
+
+        def reveal():
+            page.select_variable(api_name=False)
+            page.hidden.discard(("label", "API Name"))
+
+        self.on_option(page, reveal)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.evidence_ids, ("var:new-resource",))
+        self.assertEqual(page.keys, [])
+
+    def test_visible_api_name_in_a_later_frame_counts_past_a_hidden_one(self):
+        hidden_frame = ResourcePage()
+        self.hide_api_name(hidden_frame)
+        shown_frame = ResourcePage()
+        shown_frame.values["API Name"] = ""
+        page = ResourcePage()
+        page.frames = [hidden_frame, shown_frame]
+        self.assertTrue(guide_walk._api_name_ready(page))
+        shown_frame.hidden.add(("label", "API Name"))
+        self.assertFalse(guide_walk._api_name_ready(page))
+
+
 COMBOBOX_HTML = """
 <span id="lbl">Resource Type</span>
 <button id="box" role="combobox" aria-labelledby="lbl" aria-expanded="false"
@@ -254,6 +305,7 @@ COMBOBOX_HTML = """
   <div role="option" id="opt-variable">Variable</div>
   <div role="option" id="opt-constant">Constant</div>
 </div>
+<div id="stale" hidden><label for="api-stale">API Name</label><input id="api-stale"></div>
 <div id="fields"></div>
 <script>
   const box = document.getElementById("box");
