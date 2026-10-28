@@ -3812,6 +3812,93 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         self.assertEqual(self.clicks(page)[0], ("click", "button", "OK"))
         self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["open-accounts"])
 
+    # V19 fix 4: time-cap and resume guards.
+
+    def popup_state(self, page, left):
+        clock = Clock()
+        self.clock = clock
+        state = guide_walk.WalkState(page, clock=clock, sleeper=clock.sleep)
+        state.step_deadline = clock.now + left
+        return state
+
+    def test_spent_time_cap_clicks_no_dismiss_and_does_not_rerun_the_blocked_action(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+        page.on_click = lambda kind, name: page.roles.discard(dialog) if name == "Close" else None
+        state = self.popup_state(page, 0)
+        reruns = []
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", '"Welcome Tour" modal covered the page.', (), freeze=True)
+        result = guide_walk._popup_retry(
+            state, self.accounts_step(), blocked, lambda: reruns.append("Accounts"),
+        )
+        self.assertIs(result, blocked)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertEqual(self.clicks(page), [])
+        self.assertEqual(reruns, [])
+        self.assertEqual(state.popup_notes, [])
+
+    def test_open_step_blocked_by_popup_resumes_without_a_second_goto(self):
+        url = "https://example.lightning.force.com/lightning/o/Account/home"
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+
+        def react(kind, name):
+            if name == "Close":
+                page.roles.discard(dialog)
+                page.body = "Accounts Recently Viewed"
+
+        page.on_click = react
+        item = step("open-url", "Exercise 2: Data Model", "Task 1: Open a list", "1", f"Open {url} in the browser.")
+        outcome = self.walk(page, (item,))
+        self.assertEqual([event for event in page.events if event[0] == "goto"], [("goto", url)])
+        self.assertEqual(self.clicks(page), [("click", "button", "Close")])
+        self.assertEqual(outcome.statuses["open-url"], "PASS")
+        self.assertIn('closed "Welcome Tour" pop-up', outcome.notes["open-url"])
+
+    def test_dialog_gone_wait_is_cut_to_the_time_left_in_the_step(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+        state = self.popup_state(page, 1)
+        self.assertFalse(guide_walk._dialog_gone(state, Loc(page, *dialog)))
+        self.assertLessEqual(self.clock.now, 1)
+
+    def test_resumed_action_waits_are_cut_to_the_time_left_and_restored_after(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 5)
+        state.page_wait_s, state.timeout_s = 90, 90
+        with guide_walk._CutWaits(state):
+            self.assertEqual((state.page_wait_s, state.timeout_s), (5, 5))
+        self.assertEqual((state.page_wait_s, state.timeout_s), (90, 90))
+
+    def test_renamed_result_after_popup_close_is_kept_not_turned_into_env_blocked(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = self.add_popup(page, "Welcome Tour", "Close")
+        page.on_click = lambda kind, name: page.roles.discard(dialog) if name == "Close" else None
+        state = self.popup_state(page, 60)
+        renamed = guide_walk.CheckResult("UI_MISMATCH", "Reviewed alias used.", ("open-accounts:alias",), freeze=False)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", '"Welcome Tour" modal covered the page.', (), freeze=True)
+        result = guide_walk._popup_retry(state, self.accounts_step(), blocked, lambda: renamed)
+        self.assertIs(result, renamed)
+        self.assertEqual(self.clicks(page), [("click", "button", "Close")])
+
+    def test_step_over_its_time_cap_is_not_run_even_when_the_click_passed(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        page.roles.add(("link", "Accounts"))
+
+        def react(kind, name):
+            if name == "Accounts":
+                self.clock.now += 200  # The click itself ran past the step's cap.
+                page.url = "https://example.lightning.force.com/lightning/o/Account/home"
+                page.page_title = "Accounts"
+                page.body = "Accounts Recently Viewed"
+                page.roles.add(("heading", "Accounts"))
+
+        page.on_click = react
+        outcome = self.walk(page, (self.accounts_step(),))
+        self.assertEqual(self.clicks(page), [("click", "link", "Accounts")])
+        self.assertEqual(outcome.statuses["open-accounts"], "NOT_RUN")
+        self.assertIn("exceeded its time limit", outcome.notes["open-accounts"])
+
 
 if __name__ == "__main__":
     unittest.main()
