@@ -341,7 +341,8 @@ class PollDialogVisibilityTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
         self.assertEqual(clock.sleeps, [2] * 5)
 
-    def test_untitled_dialog_whose_first_words_the_step_names_passes(self):
+    def test_untitled_dialog_whose_body_names_the_target_is_not_evidence(self):
+        # W-084: only the heading is read; body text never names a dialog.
         page = Page(HOME, body="Home", roles={("button", "Load Items")})
 
         def on_sleep(n):
@@ -350,9 +351,105 @@ class PollDialogVisibilityTests(unittest.TestCase):
 
         clock = PollClock(on_sleep)
         outcome = walk(page, LOAD_ITEMS, clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "button", "Load Items")])
+
+
+def poll_walk(page, item, dialog_title=None, on_poll_two=None):
+    """Walk ITEM; on the second wait add a dialog headed DIALOG_TITLE, or run ON_POLL_TWO."""
+
+    def on_sleep(n):
+        if n == 2:
+            if dialog_title is not None:
+                add_dialog(page, dialog_title)
+            if on_poll_two is not None:
+                on_poll_two()
+
+    clock = PollClock(on_sleep)
+    return walk(page, item, clock, page_wait_s=10), clock
+
+
+class PollDialogHeadingTests(unittest.TestCase):
+    """W-084: a poll dialog is evidence only when its heading equals a step target name."""
+
+    def assert_needs_review(self, page, item, outcome, clock, kind, name):
+        self.assertEqual(outcome.statuses["t1"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", kind, name)])
+
+    def test_heading_that_is_part_of_the_target_word_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Loader")})
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Load.", "1", "Click Loader.")
+        outcome, clock = poll_walk(page, item, dialog_title="Load")
+        self.assert_needs_review(page, item, outcome, clock, "button", "Loader")
+
+    def test_heading_that_is_only_the_role_word_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("tab", "Files")})
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Open files.", "1", "Click the Files tab.")
+        outcome, clock = poll_walk(page, item, dialog_title="Tab")
+        self.assert_needs_review(page, item, outcome, clock, "tab", "Files")
+
+    def test_heading_equal_to_a_target_under_four_letters_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "New")})
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Add one.", "1", "Click New.")
+        outcome, clock = poll_walk(page, item, dialog_title="New")
+        self.assert_needs_review(page, item, outcome, clock, "button", "New")
+
+    def test_heading_equal_to_a_filler_word_target_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Panel")})
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Open it.", "1", "Click Panel.")
+        outcome, clock = poll_walk(page, item, dialog_title="Panel")
+        self.assert_needs_review(page, item, outcome, clock, "button", "Panel")
+
+    def test_punctuation_only_heading_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "----")})
+        item = step("t1", "Exercise 9: Widgets", "Task 1: Add one.", "1", 'Click "----".')
+        outcome, clock = poll_walk(page, item, dialog_title="----")
+        self.assert_needs_review(page, item, outcome, clock, "button", "----")
+
+    def test_heading_equal_to_the_target_passes(self):
+        page = Page(HOME, body="Home", roles={("button", "Load Items")})
+        outcome, clock = poll_walk(page, LOAD_ITEMS, dialog_title="Load Items")
         self.assertEqual(outcome.statuses["t1"], "PASS")
         self.assertEqual(outcome.evidence["t1"], ("t1:after-state:-dialog-opened",))
         self.assertEqual(clock.sleeps, [2, 2])
+
+    def test_native_dialog_accepted_during_the_poll_is_not_evidence(self):
+        page = Page(HOME, body="Home", roles={("button", "Load")})
+
+        def accept():
+            page._accepted_dialog = "Synthetic alert text"
+
+        outcome, clock = poll_walk(page, load_step(), on_poll_two=accept)
+        self.assert_needs_review(page, load_step(), outcome, clock, "button", "Load")
+
+
+class PollTabBeforeStateTests(unittest.TestCase):
+    """W-084: the clicked element's own tab must turn selected with the click."""
+
+    def test_own_tab_already_selected_before_the_click_is_not_evidence(self):
+        page, own, _ = tab_page()
+        page.aria_states[(*own, "aria-selected")] = "true"
+        clock = PollClock()
+        outcome = walk(page, tab_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "NEEDS_REVIEW")
+        self.assertEqual(clock.sleeps, [2] * 5)
+        self.assertEqual(clicks(page), [("click", "text", "Widgets")])
+
+    def test_own_tab_that_turns_selected_on_the_poll_passes(self):
+        page, own, _ = tab_page()
+        page.aria_states[(*own, "aria-selected")] = "false"
+
+        def on_sleep(n):
+            if n == 1:
+                page.aria_states[(*own, "aria-selected")] = "true"
+
+        clock = PollClock(on_sleep)
+        outcome = walk(page, tab_step(), clock, page_wait_s=10)
+        self.assertEqual(outcome.statuses["t2"], "PASS")
+        self.assertEqual(outcome.evidence["t2"], ("t2:after-state:-Widgets-tab-selected",))
+        self.assertEqual(clock.sleeps, [2])
 
 
 class PollUrlTitleTests(unittest.TestCase):

@@ -4226,13 +4226,13 @@ _CLICK_FILLER_WORDS = frozenset({
 })
 
 
-def _step_named_dialogs(page, step_text: str) -> frozenset[str]:
-    """Titles of visible dialogs that the step names as a whole word or phrase.
+def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
+    """Headings of visible dialogs that equal one of the step's target names (W-084).
 
-    The title is the dialog's heading, or its first words when it has none.
-    An empty or untitled dialog is never named.
+    Only a dialog's heading is read; its body text never names it. A target with
+    fewer than 4 letters is left out, so a heading with no letters never matches.
     """
-    step_norm = norm(step_text)
+    targets = frozenset(t for t in targets if sum(ch.isalnum() for ch in t) >= 4)
     named: set[str] = set()
     for root in _roots(page):
         for selector in ("[role='dialog']", "[role='alertdialog']", "[aria-modal='true']"):
@@ -4252,19 +4252,10 @@ def _step_named_dialogs(page, step_text: str) -> frozenset[str]:
                             title = (heading_loc.first.inner_text(timeout=500) or "").strip()
                             if title:
                                 break
-                    fallback = not title
-                    if fallback:
-                        title = " ".join((item.inner_text(timeout=1000) or "").split()[:5])
                 except Exception:
                     continue
-                title = norm(title)
-                if not title:
-                    continue
-                # Untitled dialog: a lone role or filler word, or a very short text, names nothing.
-                if fallback and (len(title) < 4 or title in _CLICK_FILLER_WORDS):
-                    continue
-                if re.search(rf"(?<!\w){re.escape(title)}(?!\w)", step_norm):
-                    named.add(title)
+                if norm(title) in targets:
+                    named.add(norm(title))
     return frozenset(named)
 
 
@@ -4309,10 +4300,14 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_dialogs = _count_visible_dialogs(state.page)
     before_messages = _read_status_messages(state.page)
     before_has_saved = _words_visible(state.page, "successfully saved")
-    before_named_dialogs = _step_named_dialogs(state.page, step.text or "")
+    before_named_dialogs = _target_dialogs(state.page, frozenset(target_names))
 
     loc = _locator_for_name(state.page, name)
-    if loc is None or not _click_locator(loc):
+    if loc is None:
+        return None
+    # The clicked element's own tab, already selected before the click, is not evidence.
+    before_tab = _clicked_tab_selected(loc)
+    if not _click_locator(loc):
         return None
     if norm(name) in {"files", "files tab"} and _in_setup(state.page):
         _open_files_home(state)
@@ -4373,7 +4368,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         break
         except Exception:
             pass
-    if not evidence_desc and _clicked_tab_selected(loc):
+    if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
         evidence_desc = f"after-state: {name} tab selected"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
@@ -4488,17 +4483,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
             after_dialogs = _count_visible_dialogs(state.page)
 
-            # Check for evidence again. A dialog seen only during the poll counts only
-            # when the step names its title (W-083); an empty, short or unrelated
-            # pop-up is never evidence.
+            # A dialog seen only during the poll counts only when it is visible, new
+            # since the click and its heading equals a target name (W-084). A native
+            # dialog accepted during the poll is never evidence.
             if after_dialogs > before_dialogs and (
-                _step_named_dialogs(state.page, step.text or "") - before_named_dialogs
+                _target_dialogs(state.page, frozenset(target_names)) - before_named_dialogs
             ):
                 evidence_desc = "after-state: dialog opened"
-
-            accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
-            if not evidence_desc and accepted:
-                evidence_desc = "after-state: dialog text read"
 
             if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
@@ -4527,7 +4518,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                                 break
                 except Exception:
                     pass
-            if not evidence_desc and _clicked_tab_selected(loc):
+            if not evidence_desc and not before_tab and _clicked_tab_selected(loc):
                 evidence_desc = f"after-state: {name} tab selected"
 
             if not evidence_desc and before_url != after_url:
