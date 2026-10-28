@@ -18,6 +18,12 @@ from .team_state import is_open, is_stale, load, _write_private
 RESTART_CAP_PER_HOUR = 3
 STALE_THRESHOLD_MINUTES = 15
 STALLED_NAME = "stalled.json"
+WAITING_NAME = "watchdog-waiting-at"
+WAITING_LOG_EVERY = timedelta(hours=1)
+# Phases the producer drives after triage. A stale heartbeat here means the
+# producer is fixing, testing, reviewing or publishing; a headless restart
+# would only fight it, so the watchdog waits. Run and verify stay restartable.
+PRODUCER_PHASES = ("fix", "test", "audit", "publish", "lessons", "report")
 
 
 def _now_utc() -> datetime:
@@ -28,8 +34,12 @@ def _stalled_path(root: Path) -> Path:
     return Path(root) / "team" / STALLED_NAME
 
 
-def decide(state: dict, now: datetime = None) -> str:
-    """Decide the action: idle, alive, restart, or stalled."""
+def decide(state: dict, now: datetime = None, *, producer_fresh: bool = False) -> str:
+    """Decide the action: idle, alive, waiting, restart, or stalled.
+
+    `producer_fresh` is True when the producer-live claim is held and fresh
+    (team_kit.producer_is_fresh, the same rule `team_kit status` uses).
+    """
     if now is None:
         now = _now_utc()
     if not is_open(state):
@@ -45,6 +55,10 @@ def decide(state: dict, now: datetime = None) -> str:
                 return "alive"
             except (OSError, ProcessLookupError):
                 pass
+    if producer_fresh:
+        return "alive"
+    if state.get("phase") in PRODUCER_PHASES:
+        return "waiting"
     restarts = state.get("restarts", [])
     recent = [
         r for r in restarts
@@ -78,6 +92,24 @@ def record_stalled(root: Path, reason: str, now: datetime = None) -> None:
         return
     payload = {"time": now.isoformat(), "reason": reason}
     _write_private(path, json.dumps(payload, indent=2) + "\n")
+
+
+def _note_waiting(root: Path, state: dict, now: datetime) -> None:
+    """Log a waiting job at most once per hour; never a team lesson."""
+    marker = Path(root) / "team" / WAITING_NAME
+    try:
+        last = datetime.fromisoformat(marker.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        last = None
+    if last is not None and now - last < WAITING_LOG_EVERY:
+        return
+    from .team_state import log
+    phase = str(state.get("phase"))
+    log(root, agent="watchdog", action="waiting",
+        detail=f"Stale heartbeat in phase {phase}; the producer drives it, no restart",
+        now=now.isoformat())
+    _write_private(marker, now.isoformat())
+    print(f"Job is in phase {phase}; waiting for the producer, no restart.")
 
 
 def claude_path() -> str | None:
@@ -135,8 +167,13 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) ->
     if now is None:
         now = _now_utc()
     state = load(private_root)
-    action = decide(state, now=now)
+    from .team_kit import producer_is_fresh
+    fresh = producer_is_fresh(repo_root, private_root / "team", now)
+    action = decide(state, now=now, producer_fresh=fresh)
     if action in {"idle", "alive"}:
+        return 0
+    if action == "waiting":
+        _note_waiting(private_root, state, now)
         return 0
     if action == "stalled":
         if not _stalled_path(private_root).is_file():

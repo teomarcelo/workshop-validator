@@ -279,6 +279,25 @@ def watchdog_action(state: str, live: dict | None, *, now: datetime, idle_since:
     return "NUDGE"
 
 
+def producer_active_at(repo: Path, live: dict | None) -> datetime | None:
+    """Last sign of the live producer: its transcript mtime once bound, else the claim time."""
+    if not live:
+        return None
+    sid = live.get("session_id")
+    transcript = transcripts_dir(repo) / f"{sid}.jsonl"
+    if sid != "pending" and transcript.is_file():
+        return datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc)
+    return _read_time_iso(live.get("claimed"))
+
+
+def producer_is_fresh(repo: Path, team: Path, now: datetime) -> bool:
+    """The producer-live claim is held and active within PRODUCER_ALIVE_MINUTES (the status rule)."""
+    live = load_producer(team)
+    active = producer_active_at(repo, live)
+    return bool(live) and active is not None and \
+        now - active < timedelta(minutes=PRODUCER_ALIVE_MINUTES)
+
+
 def _read_time(path: Path) -> datetime | None:
     try:
         return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
@@ -313,14 +332,7 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
         _write_private(idle_file, now.isoformat())
         takeover_count_file.unlink(missing_ok=True)
     live = load_producer(team)
-    active = None
-    if live:
-        sid = live.get("session_id")
-        transcript = transcripts_dir(repo) / f"{sid}.jsonl"
-        if sid != "pending" and transcript.is_file():
-            active = datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc)
-        else:
-            active = _read_time_iso(live.get("claimed"))
+    active = producer_active_at(repo, live)
     takeover_count = 0
     if takeover_count_file.is_file():
         try:
