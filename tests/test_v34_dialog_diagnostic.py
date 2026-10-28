@@ -225,6 +225,58 @@ class DialogDiagnosticBrowserTests(unittest.TestCase):
         self.assertIn("heading", result.note)
         self.assertIn("button", result.note)
 
+    def test_dialog_in_iframe_has_tree(self):
+        # The blocking dialog lives INSIDE a srcdoc iframe, has no dismiss control, Escape does not close it
+        iframe_html = '''<!DOCTYPE html>
+<html>
+<body>
+<div role="dialog" aria-modal="true" style="position:fixed;inset:0;background:rgba(0,0,0,0.8);color:white;padding:20px">
+  <h2>Dialog in iframe</h2>
+  <button>No dismiss</button>
+</div>
+</body>
+</html>'''
+
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        page.set_content(f'''<!DOCTYPE html>
+<html>
+<body>
+<iframe id="frame" srcdoc="{iframe_html.replace('"', '&quot;')}"></iframe>
+<button id="target" onclick="window.actionRan=true">Target Action</button>
+<script>window.actionRan = false;</script>
+</body>
+</html>''')
+
+        # Wait for iframe to load
+        page.wait_for_timeout(500)
+
+        state = guide_walk.WalkState(page=page, timeout_s=10, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        state.step_deadline = state.clock() + 60
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        def rerun():
+            return None if page.evaluate("window.actionRan") else blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun, collect_diagnostic=True)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.freeze)
+        self.assertIn("Diagnostic:", result.note)
+        self.assertIn("click attempted no", result.note)
+        self.assertIn("Escape pressed yes", result.note)
+        self.assertIn("still visible yes", result.note)
+        # Tree should come from the iframe dialog, containing its own roles
+        self.assertIn("tree:", result.note)
+        self.assertNotIn("tree: unavailable", result.note)
+        self.assertNotIn("tree: dialog gone", result.note)
+        # Should have the dialog's own content, not just "- iframe"
+        self.assertIn("dialog", result.note)
+        self.assertIn("heading", result.note)
+        self.assertIn("button", result.note)
+        # The dialog text should be redacted
+        self.assertNotIn("Dialog in iframe", result.note)
+        self.assertNotIn("No dismiss", result.note)
+
     def test_loop_exhausted_shows_came_back_message(self):
         # Test that after closing 3 times (loop limit), the message says "came back after N closes"
         # Close button removes dialog, rerun adds it back so the loop continues
