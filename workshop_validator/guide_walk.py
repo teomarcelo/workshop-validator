@@ -2010,8 +2010,55 @@ def _row_dropdown(text: str) -> tuple[str, str] | None:
     return row, item
 
 
+_ROW_ACTIONS_LABEL = re.compile(r"show(?: \d+)?(?: more)? actions", re.I)
+
+
+def _visible_items_of(loc) -> list:
+    """Visible elements of LOC, at most 8."""
+    visible = []
+    nth = getattr(loc, "nth", None)
+    for i in range(min(_count(loc), 8)):
+        item = nth(i) if callable(nth) else _first(loc)
+        try:
+            if item.is_visible():
+                visible.append(item)
+        except Exception:
+            continue
+    return visible
+
+
+def _button_labels(button) -> list[str]:
+    """The button's aria-label, title and text, each with whitespace collapsed."""
+    labels = []
+    for read in (
+        lambda: button.get_attribute("aria-label"),
+        lambda: button.get_attribute("title"),
+        lambda: button.inner_text(timeout=1000),
+    ):
+        try:
+            value = read()
+        except Exception:
+            continue
+        value = " ".join(str(value or "").split())
+        if value:
+            labels.append(value)
+    return labels
+
+
+def _safe_label(label: str, row: str) -> str:
+    """A label safe for a note: the row name, or letters, digits and spaces up to 30; else 'other'."""
+    if label == row or re.fullmatch(r"[A-Za-z0-9 ]{1,30}", label):
+        return label
+    return "other"
+
+
 def _row_menu_button(page, row: str):
     """The one menu button inside the one visible row named ROW, or None."""
+    return _row_menu_scan(page, row)[0]
+
+
+def _row_menu_scan(page, row: str):
+    """(button or None, note on what was found). Only the one row named ROW is searched."""
     rows = []
     for root in _roots(page):
         loc = _by_role(root, "row", row, exact=False)
@@ -2041,21 +2088,32 @@ def _row_menu_button(page, row: str):
             except Exception:
                 pass
     if len(rows) != 1:
-        return None
+        return None, f"Rows matched: {len(rows)}."
     try:
-        buttons = rows[0].locator(ROW_MENU_SELECTOR)
+        visible = _visible_items_of(rows[0].locator(ROW_MENU_SELECTOR))
     except Exception:
-        return None
-    visible = []
-    nth = getattr(buttons, "nth", None)
-    for i in range(min(_count(buttons), 8)):
-        button = nth(i) if callable(nth) else _first(buttons)
-        try:
-            if button.is_visible():
-                visible.append(button)
-        except Exception:
-            continue
-    return visible[0] if len(visible) == 1 else None
+        visible = []
+    if len(visible) == 1:
+        return visible[0], ""
+    # V28: a row's own actions button may carry no aria-haspopup. Accept exactly one
+    # visible button in this row whose label fully reads "Show [N] [more] actions".
+    try:
+        buttons = _visible_items_of(rows[0].get_by_role("button"))
+    except Exception:
+        buttons = []
+    labelled = [(button, _button_labels(button)) for button in buttons]
+    named = [
+        button for button, labels in labelled
+        if any(_ROW_ACTIONS_LABEL.fullmatch(label) for label in labels)
+    ]
+    if not visible and len(named) == 1:
+        return named[0], ""
+    shown = [_safe_label(labels[0], row) for _, labels in labelled if labels][:2]
+    note = (
+        f"Rows matched: 1; menu buttons in the row: {len(visible)}; "
+        f"buttons in the row: {len(buttons)}; button labels: {', '.join(shown) or 'none'}."
+    )
+    return None, note
 
 
 def _exact_menuitem(page, item: str):
@@ -2122,6 +2180,10 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
         missed = _popup_resume(
             state, step, lambda: require(state, button_shown, "", limit=state.page_wait_s) is None, missed,
         )
+    if missed and missed.status == "UI_MISMATCH":
+        detail = _row_menu_scan(state.page, row)[1]
+        if detail:
+            missed = CheckResult(missed.status, f"{missed.note} {detail}", missed.evidence_ids, freeze=True)
     if missed:
         return _stop_here(missed)
     if not click_button():
