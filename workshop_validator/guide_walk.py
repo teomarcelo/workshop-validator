@@ -80,6 +80,8 @@ class CloseAttempt:
     escape_raised: bool = False
     still_visible: bool | None = None
     handle: object = None
+    candidate_count: int = 0
+    selection_method: str = ""
 
 
 @dataclass(frozen=True)
@@ -3187,14 +3189,24 @@ def _promo_over(state: WalkState, step: GuideStep) -> bool:
 
 def _unnamed_modal_title(page, step_text: str) -> str | None:
     """Returns the title of a visible modal dialog that the step does not name, or None."""
-    found = _unnamed_modal(page, step_text)
+    found = _unnamed_modal(page, step_text, state=None)
     return found[1] if found else None
 
 
-def _unnamed_modal(page, step_text: str):
-    """(dialog, title) of a visible modal dialog the step does not name, or None."""
+def _unnamed_modal(page, step_text: str, state=None):
+    """(dialog, title, candidate_count, selection_method) of a visible modal dialog the step does not name, or None.
+
+    When multiple candidates exist and state is provided, picks the first whose dismiss control
+    can be clicked (trial click passes). Falls back to DOM order if none are clickable or time < 2s.
+    """
     step_norm = norm(step_text)
-    for root in _roots(page):
+    candidates = []
+    roots = _roots(page)
+    # Deduplication is only needed when scanning multiple frames
+    need_dedup = len(roots) > 1
+    seen_handles = []
+
+    for root in roots:
         # Check for role=dialog or aria-modal=true
         for selector in ("[role='dialog']", "[role='alertdialog']", "[aria-modal='true']"):
             try:
@@ -3206,6 +3218,29 @@ def _unnamed_modal(page, step_text: str):
                 try:
                     if hasattr(item, "is_visible") and not item.is_visible():
                         continue
+
+                    # Deduplicate only when scanning multiple frames
+                    if need_dedup:
+                        try:
+                            handle = item.element_handle(timeout=500)
+                            if handle is None:
+                                continue
+                            # Compare with previously seen handles
+                            is_duplicate = False
+                            for seen in seen_handles:
+                                try:
+                                    if handle.evaluate("(x, y) => x === y", seen):
+                                        is_duplicate = True
+                                        break
+                                except Exception:
+                                    continue
+                            if is_duplicate:
+                                continue
+                            seen_handles.append(handle)
+                        except Exception:
+                            # If deduplication fails, skip to avoid double-counting
+                            continue
+
                     # Get the dialog's full text (original, not normalized)
                     dialog_text_raw = (item.inner_text(timeout=1000) or "").strip()
                     dialog_text = norm(dialog_text_raw)
@@ -3228,13 +3263,51 @@ def _unnamed_modal(page, step_text: str):
                         title = " ".join(words[:5]) if words else dialog_text_raw[:50]
                     # Check if step mentions this dialog's title
                     if title and norm(title) not in step_norm and len(dialog_text) > 5:
-                        return item, title
+                        candidates.append((item, title))
                 except Exception:
                     continue
-    return None
 
+    if not candidates:
+        return None
 
-# Owner rule W-080: an unrelated welcome or help pop-up is closed with its own dismiss control.
+    # Single candidate: return immediately with no trial click
+    if len(candidates) == 1:
+        dialog, title = candidates[0]
+        return dialog, title, 1, ""
+
+    # Multiple candidates: try trial click selection if state provided and time permits
+    if state is not None:
+        for item, title in candidates:
+            # Check time before each trial click
+            if _time_left(state) < 2.0:
+                break
+            # Get element handle and track it for trial click
+            try:
+                handle = item.element_handle(timeout=2000)
+                if handle is None:
+                    continue
+            except Exception:
+                continue
+            tracked = _tracked_dialog(handle)
+            if tracked is None:
+                continue
+            button = _dialog_dismiss_button(tracked)
+            if button is not None:
+                try:
+                    trial_timeout = min(1000, int((_time_left(state) - 1.0) * 1000))
+                    if trial_timeout > 0:
+                        # Trial click: full actionability checks without clicking
+                        button.click(trial=True, timeout=trial_timeout)
+                        # Trial click succeeded: this dialog's button is clickable, return the tracked locator
+                        return tracked, title, len(candidates), "dismissable"
+                except Exception:
+                    # Trial click failed: button is covered or not clickable
+                    continue
+
+    # No trial click succeeded or time < 2s: pick first candidate
+    dialog, title = candidates[0]
+    return dialog, title, len(candidates), "order"
+
 _MODAL_BLOCKED_NOTE = "modal covered the page; the guide does not mention it; the walk did not close it."
 _POPUP_DISMISS_NAMES = ("Close", "Dismiss", "Not now", "No thanks", "Skip", "Maybe later", "Got it")
 _POPUP_CLOSE_LIMIT = 3
@@ -3324,11 +3397,13 @@ def _dialog_gone(state: WalkState, handle, wait_s: float = 6.0) -> bool:
 
 def _close_unrelated_popup(state: WalkState, step: GuideStep) -> tuple[str | None, CloseAttempt]:
     """Close one unnamed pop-up with its own dismiss control. Returns (title, attempt)."""
-    found = _unnamed_modal(state.page, step.text or "")
+    found = _unnamed_modal(state.page, step.text or "", state=state)
     if not found:
         return None, CloseAttempt()
-    dialog, title = found
+    dialog, title, candidate_count, selection_method = found
     attempt = _close_dialog(state, dialog)
+    # Add candidate info to attempt for diagnostic
+    attempt = replace(attempt, candidate_count=candidate_count, selection_method=selection_method)
     success = attempt.still_visible is False and not attempt.click_raised and not attempt.escape_raised
     return (title if success else None), attempt
 
@@ -3601,9 +3676,9 @@ def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAtte
             tracked = None
             # On came-back path (loop_count > 0), re-find the visible dialog for tree
             if loop_count > 0:
-                found = _unnamed_modal(state.page, step.text or "")
+                found = _unnamed_modal(state.page, step.text or "", state=state)
                 if found:
-                    dialog, _title = found
+                    dialog, _title, _count, _method = found
                     try:
                         handle = dialog.element_handle(timeout=2000)
                     except Exception:
@@ -3631,11 +3706,16 @@ def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAtte
         except Exception:
             tree = "unavailable"
 
+    # Add candidate info when count > 1
+    candidate_info = ""
+    if attempt.candidate_count >= 2:
+        candidate_info = f" {attempt.candidate_count} candidate dialogs; picked by {attempt.selection_method};"
+
     if loop_count > 0:
         closes_word = "close" if loop_count == 1 else "closes"
-        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} {closes_word}; click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} {closes_word};{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     else:
-        note = f"{blocked.note} Diagnostic: click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+        note = f"{blocked.note} Diagnostic:{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     return replace(blocked, note=note)
 
 
