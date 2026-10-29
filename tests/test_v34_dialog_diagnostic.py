@@ -11,6 +11,7 @@ except ImportError:
 
 from workshop_validator import guide_walk
 from tests.test_guide_walk import Clock, Page, inventory_of, step, walk_guide
+from tests.test_v32_promo_close import promo_page, flows_list, FLOWS_URL, flow_step, state_for
 
 
 def accounts_step():
@@ -621,6 +622,129 @@ class FakePageDiagnosticTests(unittest.TestCase):
         page.roles.add(dialog)
         return dialog
 
+    def test_click_raised_not_treated_as_closed(self):
+        # M1: guide_walk.py:3332 `not attempt.click_raised` removed
+        # A click that raises does NOT mean the dialog closed (even if it disappears)
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        close_button = ("button", "Close")
+        dialog = ("dialog", "Sample Modal")
+        page.roles.add(close_button)
+        page.roles.add(dialog)
+        page.children[dialog] = [close_button]
+
+        def broken_click(kind, name):
+            # Click raises AND dialog disappears (broken handler still removed it)
+            page.roles.discard(dialog)
+            raise RuntimeError("click error")
+
+        page.on_click = broken_click
+        state = self.popup_state(page)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        def rerun():
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertNotIn("Environment: closed a promotional pop-up", result.note)
+        self.assertEqual(state.popup_notes, [])
+
+    def test_escape_raised_at_3332_not_treated_as_closed(self):
+        # M2: guide_walk.py:3332 escape_raised check for W-080
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = ("dialog", "Sample Modal")
+        page.roles.add(dialog)
+
+        def broken_press(self_kbd, key):
+            # Escape raises AND dialog disappears (script removed it despite error)
+            page.roles.discard(dialog)
+            raise RuntimeError("keyboard error")
+
+        page.keyboard = type('Keyboard', (), {'press': broken_press})()
+        state = self.popup_state(page)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        def rerun():
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertNotIn("Environment: closed", result.note)
+        self.assertEqual(state.popup_notes, [])
+
+    def test_escape_raised_at_3395_promo_not_treated_as_closed(self):
+        # M5: guide_walk.py:3395 escape_raised check for promo path
+        from tests.test_v32_promo_close import PROMO
+        page = flows_list(promo_page(FLOWS_URL, buttons=("Go Mobile",)))
+        dialog = ("dialog", PROMO)
+
+        def broken_press(self_kbd, key):
+            # Escape raises AND promo disappears
+            page.roles.discard(dialog)
+            raise RuntimeError("keyboard error")
+
+        page.keyboard = type('Keyboard', (), {'press': broken_press})()
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertNotIn("Environment: closed", result.note)
+        self.assertEqual(state.popup_notes, [])
+
+    def test_escape_raised_flag_set_at_3364(self):
+        # M26: guide_walk.py:3364 escape_raised is set when keyboard.press raises
+        # This affects the success check, so a raise should not be treated as closed
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        dialog = ("dialog", "Sample Modal")
+        page.roles.add(dialog)
+
+        def broken_press(self_kbd, key):
+            # Escape raises AND dialog disappears
+            page.roles.discard(dialog)
+            raise RuntimeError("keyboard error")
+
+        page.keyboard = type('Keyboard', (), {'press': broken_press})()
+        state = self.popup_state(page)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        def rerun():
+            return blocked
+
+        result = guide_walk._popup_retry(state, accounts_step(), blocked, rerun)
+        # With escape_raised set correctly, the close is not treated as successful
+        self.assertEqual(state.popup_notes, [])
+        self.assertIn("Escape pressed no", result.note)
+
+    def test_is_visible_false_shows_dialog_gone(self):
+        # M11: guide_walk.py:3615 is_visible() False branch
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 60)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        # Create a handle that says not visible
+        class FakeHandle:
+            def is_visible(self):
+                return False
+
+        attempt = guide_walk.CloseAttempt(escape_pressed=True, still_visible=True, handle=FakeHandle())
+        result = guide_walk._add_dialog_diagnostic(state, accounts_step(), attempt, blocked)
+        self.assertIn("tree: dialog gone", result.note)
+
+    def test_is_visible_raises_shows_unavailable(self):
+        # M11: guide_walk.py:3615 is_visible() raises
+        page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
+        state = self.popup_state(page, 60)
+        blocked = guide_walk.CheckResult("ENV_BLOCKED", "modal covered the page.", (), freeze=True)
+
+        # Create a handle whose is_visible raises
+        class FakeHandle:
+            def is_visible(self):
+                raise RuntimeError("element detached")
+
+        attempt = guide_walk.CloseAttempt(escape_pressed=True, still_visible=True, handle=FakeHandle())
+        result = guide_walk._add_dialog_diagnostic(state, accounts_step(), attempt, blocked)
+        self.assertIn("tree: unavailable", result.note)
+        self.assertNotIn("tree: dialog gone", result.note)
+
     def test_freeze_preserved_in_diagnostic_result(self):
         page = Page("https://example.lightning.force.com/lightning/page/home", body="Home")
         dialog = self.add_uncloseable_popup(page, "Sample Modal")
@@ -688,6 +812,118 @@ class FakePageDiagnosticTests(unittest.TestCase):
         result = guide_walk._add_dialog_diagnostic(state, accounts_step(), attempt, blocked)
         self.assertIn("still visible no", result.note)
         self.assertNotIn("still visible yes", result.note)
+
+
+class SnapshotRedactionUnitTests(unittest.TestCase):
+    """Hand-written snapshot redaction tests without browser (M16/M20 + leak coverage)."""
+
+    def test_allowed_attributes_kept(self):
+        # M16: guide_walk.py:3560 _ALLOWED_ATTRS filter
+        snapshot = '- button "Close" [level=2] [checked] [expanded=true] [disabled]'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertIn('[level=2]', result)
+        self.assertIn('[checked]', result)
+        self.assertIn('[expanded=true]', result)
+        self.assertIn('[disabled]', result)
+
+    def test_disallowed_attributes_dropped(self):
+        # M16: attributes not in _ALLOWED_ATTRS are dropped, allowed ones kept
+        snapshot = '- button "Close" [checked] [ref=e5] [cursor=pointer]'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        # Allowed attribute must be kept
+        self.assertIn('[checked]', result)
+        # Disallowed attributes must be dropped
+        self.assertNotIn('[ref=', result)
+        self.assertNotIn('[cursor=', result)
+        self.assertIn('button', result)
+        self.assertIn('"Close"', result)
+
+    def test_unknown_role_becomes_generic(self):
+        # M20: guide_walk.py:3546 roles not in _ARIA_ROLES become "<role>"
+        snapshot = '- customrole "Jane Roe"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('customrole', result)
+        self.assertNotIn('Jane', result)
+        self.assertNotIn('Roe', result)
+        self.assertIn('<role>', result)
+
+    def test_value_with_colon_redacted(self):
+        # M20: values that don't match glyphs become "<text>"
+        snapshot = '- paragraph "Sample": Jane Roe'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('Jane', result)
+        self.assertNotIn('Roe', result)
+        self.assertIn(': <text>', result)
+
+    def test_escaped_quote_in_name_redacted(self):
+        # Leak case: escaped quotes should not survive
+        snapshot = '- button "He said \\"hello\\""'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('hello', result)
+        self.assertIn('"<text>"', result)
+
+    def test_glyph_prefix_value_redacted(self):
+        # Leak case: glyph-prefixed values (x followed by text is not a glyph)
+        snapshot = '- button "Test": x Delta words'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('Delta', result)
+        self.assertNotIn('words', result)
+        self.assertIn(': <text>', result)
+
+    def test_url_line_dropped(self):
+        # Leak case: /url: lines are dropped entirely
+        snapshot = '- link "Home"\n  /url: https://example.com?foo=bar'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('/url:', result)
+        self.assertNotIn('https:', result)
+        self.assertNotIn('example.com', result)
+        self.assertNotIn('foo=bar', result)
+
+    def test_bullet_prefixed_name_redacted(self):
+        # Leak case: bullet-prefixed names
+        snapshot = '- button "• Jane Roe"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('Jane', result)
+        self.assertNotIn('Roe', result)
+
+    def test_at_sign_email_redacted(self):
+        # Leak case: @ email patterns
+        snapshot = '- paragraph "@ jane@example.test"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('jane', result)
+        self.assertNotIn('example', result)
+
+    def test_cjk_character_redacted(self):
+        # Leak case: CJK characters
+        snapshot = '- button "李"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('李', result)
+        self.assertIn('"<text>"', result)
+
+    def test_non_english_text_redacted(self):
+        # Leak case: non-English text
+        snapshot = '- heading "Добро пожаловать"\n- paragraph "Bienvenido"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertNotIn('Добро', result)
+        self.assertNotIn('пожаловать', result)
+        self.assertNotIn('Bienvenido', result)
+
+    def test_dismiss_names_kept_case_insensitive_unit(self):
+        # Allowed dismiss names are kept (case-insensitive)
+        snapshot = '- button "Close"\n- button "DISMISS"\n- button "got it"'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertIn('"Close"', result)
+        self.assertIn('"DISMISS"', result)
+        self.assertIn('"got it"', result)
+
+    def test_allowed_glyphs_kept_unit(self):
+        # Allowed glyphs are kept as exact values
+        snapshot = '- button "Close": ×\n- button "Test": ✕\n- button "Sample": x'
+        result = guide_walk._redact_aria_snapshot(snapshot)
+        self.assertIn(': ×', result)
+        self.assertIn(': ✕', result)
+        # Single "x" is an allowed glyph
+        self.assertIn(': x', result)
 
 
 if __name__ == "__main__":
