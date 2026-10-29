@@ -3392,7 +3392,7 @@ def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
     if item is None:
         return blocked
     attempt = _close_dialog(state, item)
-    if attempt.still_visible or attempt.click_raised or attempt.escape_raised:
+    if attempt.still_visible is not False or attempt.click_raised or attempt.escape_raised:
         return blocked
     state.popup_notes.append(PROMO_CLOSED_NOTE)
     return blocked if _promo_over(state, step) else None
@@ -3580,7 +3580,7 @@ def _redact_aria_snapshot(snapshot: str) -> str:
     return joined
 
 
-def _add_dialog_diagnostic(state: WalkState, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0) -> CheckResult:
+def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0) -> CheckResult:
     """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed."""
     click_attempted = "yes" if attempt.click_attempted else "no"
     escape_pressed = "yes" if attempt.escape_pressed else "no"
@@ -3593,14 +3593,32 @@ def _add_dialog_diagnostic(state: WalkState, attempt: CloseAttempt, blocked: Che
     if time_left < 2:
         tree = "skipped, step time nearly used"
     elif attempt.handle is None:
-        tree = "dialog gone"
+        # No handle: element_handle or marking failed
+        tree = "unavailable"
     else:
         try:
-            # Check if dialog is actually gone at snapshot time
-            if not attempt.handle.is_visible():
-                tree = "dialog gone"
+            tree = None
+            tracked = None
+            # On came-back path (loop_count > 0), re-find the visible dialog for tree
+            if loop_count > 0:
+                found = _unnamed_modal(state.page, step.text or "")
+                if found:
+                    dialog, _title = found
+                    try:
+                        handle = dialog.element_handle(timeout=2000)
+                    except Exception:
+                        handle = None
+                    if handle:
+                        tracked = _tracked_dialog(handle)
             else:
-                tracked = _tracked_dialog(attempt.handle)
+                # First attempt: check if dialog is actually gone via the same handle
+                if not attempt.handle.is_visible():
+                    # Observed not visible via the same handle
+                    tree = "dialog gone"
+                else:
+                    tracked = _tracked_dialog(attempt.handle)
+
+            if tree is None:
                 if tracked is None:
                     tree = "unavailable"
                 else:
@@ -3636,7 +3654,9 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
         title, attempt = _close_unrelated_popup(state, step)
         last_attempt = attempt
         if not title:
-            blocked = _add_dialog_diagnostic(state, attempt, blocked, loop_count)
+            # Only add diagnostic if a dialog was found (handle exists or was attempted)
+            if attempt.handle is not None or attempt.click_attempted or attempt.escape_pressed:
+                blocked = _add_dialog_diagnostic(state, step, attempt, blocked, loop_count)
             return blocked
         loop_count += 1
         state.popup_notes.append(_popup_note(title))
@@ -3651,8 +3671,8 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
         if result.status in ("UI_MISMATCH", "FUNCTIONAL_FAIL") and not renamed:
             return _after_popup_result()
         return result
-    if last_attempt:
-        blocked = _add_dialog_diagnostic(state, last_attempt, blocked, loop_count)
+    if last_attempt and (last_attempt.handle is not None or last_attempt.click_attempted or last_attempt.escape_pressed):
+        blocked = _add_dialog_diagnostic(state, step, last_attempt, blocked, loop_count)
     return blocked
 
 

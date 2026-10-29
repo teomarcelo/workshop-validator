@@ -346,6 +346,48 @@ class PromoScopeTests(unittest.TestCase):
         self.assertEqual(state.popup_notes, [])
         self.assertEqual(clicks(page), [("button", "Close")])
 
+    def test_promo_element_handle_raises_stays_blocked_no_note(self):
+        # REGRESSION: still_visible=None must not be treated as closed
+        page = promo_page(FLOWS_URL, body="Flows")
+        page.roles.add(("button", "New Flow"))
+
+        # Make element_handle raise for the promo dialog
+        original_locator = page.locator
+        def broken_locator(selector):
+            loc = original_locator(selector)
+            if "[role='dialog']" in selector or "[role='alertdialog']" in selector:
+                # Wrap the locator to make element_handle raise for nth() results too
+                class BrokenLoc:
+                    def __init__(self, inner):
+                        self.inner = inner
+                    def nth(self, n):
+                        return BrokenElement()
+                    def count(self):
+                        return self.inner.count()
+                    def __getattr__(self, name):
+                        return getattr(self.inner, name)
+
+                class BrokenElement:
+                    def element_handle(self, timeout=None):
+                        raise RuntimeError("element detached")
+                    def is_visible(self):
+                        return True
+                    def inner_text(self, timeout=None):
+                        return PROMO
+                    def __getattr__(self, name):
+                        # Default for other methods
+                        raise RuntimeError("element detached")
+
+                return BrokenLoc(loc)
+            return loc
+
+        page.locator = broken_locator
+        state = state_for(page)
+        result = guide_walk.run_screen_flow(state, flow_step())
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertEqual(result.note, PROMO_NOTE)
+        self.assertEqual(state.popup_notes, [])
+
 
 PROMO_HTML = """
 <button id="new-flow" onclick="window.clicked.push('New Flow')">New Flow</button>
