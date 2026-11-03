@@ -2733,10 +2733,10 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
         result = guide_walk.run_screen_flow(self.state(page), item)
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertTrue(result.freeze)
-        self.assertEqual(
-            result.note,
-            "A promotional dialog covered the page; the guide names no control to close it.",
-        )
+        self.assertTrue(result.note.startswith(
+            "A promotional dialog covered the page; the guide names no control to close it."
+        ))
+        self.assertIn("Diagnostic:", result.note)
         self.assertEqual([event for event in page.events if event[0] == "click"], [])
 
     def test_promo_over_the_builder_blocks_a_builder_step(self):

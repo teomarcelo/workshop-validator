@@ -107,15 +107,19 @@ class PromoCloseTests(unittest.TestCase):
         result = guide_walk.run_screen_flow(state, flow_step())
         self.assertEqual(result.status, "ENV_BLOCKED")
         self.assertTrue(result.freeze)
-        self.assertEqual(result.note, PROMO_NOTE)
+        self.assertTrue(result.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic:", result.note)
         self.assertEqual(page.keys, ["Escape"])
         self.assertEqual(clicks(page), [])
         self.assertEqual(state.popup_notes, [])
+        self.assertNotIn("came back", result.note)
 
     def test_close_that_does_not_remove_the_promo_stays_blocked(self):
         page = flows_list(promo_page(FLOWS_URL), close_works=False)
         result = guide_walk.run_screen_flow(state_for(page), flow_step())
-        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic:", result.note)
         self.assertEqual(clicks(page), [("button", "Close")])
 
     def test_promo_with_escape_closing_it_is_resumed(self):
@@ -131,7 +135,8 @@ class PromoCloseTests(unittest.TestCase):
     def test_promo_coming_back_after_close_stays_blocked(self):
         page = flows_list(promo_page(FLOWS_URL), promo_returns=True)
         result = guide_walk.run_screen_flow(state_for(page), flow_step())
-        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertEqual(result.note, PROMO_NOTE)
         self.assertTrue(result.freeze)
         self.assertEqual(clicks(page).count(("button", "Close")), 1)
         self.assertNotIn(("button", "Go Mobile"), clicks(page))
@@ -192,7 +197,10 @@ class PromoCloseTests(unittest.TestCase):
 
         page.on_click = swap
         result = guide_walk.run_record_variable(state_for(page), variable_step())
-        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic: the dialog came back after 1 close", result.note)
+        self.assertIn("tree:", result.note)
         self.assertEqual(clicks(page), [("button", "Close")])
 
     def test_builder_not_open_after_close_is_not_a_guide_failure(self):
@@ -342,9 +350,12 @@ class PromoScopeTests(unittest.TestCase):
         page.on_click = broken
         state = state_for(page)
         result = guide_walk.run_screen_flow(state, flow_step())
-        self.assertEqual((result.status, result.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(result.status, "ENV_BLOCKED")
+        self.assertTrue(result.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic:", result.note)
         self.assertEqual(state.popup_notes, [])
         self.assertEqual(clicks(page), [("button", "Close")])
+        self.assertNotIn("came back", result.note)
 
     def test_promo_element_handle_raises_stays_blocked_no_note(self):
         # REGRESSION: still_visible=None must not be treated as closed
@@ -385,7 +396,8 @@ class PromoScopeTests(unittest.TestCase):
         state = state_for(page)
         result = guide_walk.run_screen_flow(state, flow_step())
         self.assertEqual(result.status, "ENV_BLOCKED")
-        self.assertEqual(result.note, PROMO_NOTE)
+        self.assertTrue(result.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic:", result.note)
         self.assertEqual(state.popup_notes, [])
 
 
@@ -448,7 +460,9 @@ class PromoCloseBrowserTests(unittest.TestCase):
 
     def test_no_dismiss_and_escape_failing_stays_blocked(self):
         blocked, resumed, clicked, notes = self.run_page("")
-        self.assertEqual((blocked.status, blocked.note), ("ENV_BLOCKED", PROMO_NOTE))
+        self.assertEqual(blocked.status, "ENV_BLOCKED")
+        self.assertTrue(blocked.note.startswith(PROMO_NOTE))
+        self.assertIn("Diagnostic:", blocked.note)
         self.assertFalse(resumed)
         self.assertEqual(clicked, [])
         self.assertEqual(notes, [])
