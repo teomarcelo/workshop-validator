@@ -3468,9 +3468,12 @@ def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
         return blocked
     attempt = _close_dialog(state, item)
     if attempt.still_visible is not False or attempt.click_raised or attempt.escape_raised:
+        blocked = _add_dialog_diagnostic(state, step, attempt, blocked)
         return blocked
     state.popup_notes.append(PROMO_CLOSED_NOTE)
-    return blocked if _promo_over(state, step) else None
+    if _promo_over(state, step):
+        return _add_dialog_diagnostic(state, step, attempt, blocked, 1)
+    return None
 
 
 def _wait_past_promo(state: WalkState, step: GuideStep, ready, note: str) -> CheckResult | None:
