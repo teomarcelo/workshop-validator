@@ -2262,8 +2262,13 @@ def _row_menu_scan(page, row: str):
     if not visible and len(named) == 1:
         return named[0], ""
     shown = [_safe_label(labels[0], row) for _, labels in labelled if labels][:2]
+    # V37b: count hidden menu buttons for diagnostic (moved here to run once, not every poll)
+    try:
+        hidden_menu = _count(rows[0].locator(ROW_MENU_SELECTOR)) - len(visible)
+    except Exception:
+        hidden_menu = 0
     note = (
-        f"Rows matched: 1; menu buttons in the row: {len(visible)}; "
+        f"Rows matched: 1; menu buttons in the row: {len(visible)}; hidden menu buttons in the row: {hidden_menu}; "
         f"buttons in the row: {len(buttons)}; button labels: {', '.join(shown) or 'none'}."
     )
     return None, note
@@ -2349,6 +2354,61 @@ def _menu_open(page) -> bool:
     return False
 
 
+def _add_row_action_diagnostic(state: WalkState, page, row: str, missed: CheckResult) -> CheckResult:
+    """Add diagnostic flags and side landmark tree to the 'row not found' note (V37b round 4)."""
+    # Find visible side landmarks
+    landmarks_count = "unknown"
+    landmarks = []
+    try:
+        for loc in page.locator("[role='complementary'], aside").all():
+            if loc.is_visible():
+                landmarks.append(loc)
+        landmarks_count = str(len(landmarks))
+    except Exception:
+        # Landmark scan failed (e.g., Execution context destroyed); flag as unknown
+        pass
+
+    dismiss_like, landmark_tree = "unknown" if landmarks_count == "unknown" else "no", ""
+
+    if landmarks:
+        # Check for dismiss-like control (whole-word match, case-insensitive)
+        # Word-boundary regex: "Skip to content" matches "Skip", "Close panel" matches "Close"
+        try:
+            for btn in landmarks[0].get_by_role("button").all():
+                for label in _button_labels(btn):
+                    for name in _POPUP_DISMISS_NAMES:
+                        if re.search(r'\b' + re.escape(name) + r'\b', label, re.I):
+                            dismiss_like = "yes"
+                            break
+                    if dismiss_like == "yes":
+                        break
+                if dismiss_like == "yes":
+                    break
+        except Exception:
+            # Dismiss check failed; set unknown
+            dismiss_like = "unknown"
+
+        # Get aria_snapshot with time guard
+        time_left = _time_left(state)
+        if time_left == float('inf') or time_left >= 2:
+            try:
+                timeout_ms = 1500 if time_left == float('inf') else min(1500, int((time_left - 1.0) * 1000))
+                if timeout_ms > 0:
+                    landmark_tree = _redact_aria_snapshot(landmarks[0].aria_snapshot(timeout=timeout_ms))
+            except Exception:
+                landmark_tree = "unavailable"
+        else:
+            landmark_tree = "skipped, step time nearly used"
+
+    # Build diagnostic
+    diagnostic = (f"side landmarks visible {landmarks_count}; "
+                  f"dismiss-like control in landmark {dismiss_like}.")
+    if landmark_tree:
+        diagnostic += f" tree: {landmark_tree}"
+
+    return replace(missed, note=f"{missed.note} {diagnostic}")
+
+
 def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str) -> CheckResult:
     """Open the dropdown that belongs to ROW, then click ITEM in that menu. Never click ROW itself."""
     not_found = CheckResult(
@@ -2399,6 +2459,8 @@ def _finish_row_dropdown(state: WalkState, step: GuideStep, row: str, item: str)
         detail = _row_menu_scan(state.page, row)[1]
         if detail:
             missed = CheckResult(missed.status, f"{missed.note} {detail}", missed.evidence_ids, freeze=True)
+        # V37b: Add diagnostic for row action not found
+        missed = _add_row_action_diagnostic(state, state.page, row, missed)
     if missed:
         return _stop_here(missed)
     if not click_button():
