@@ -3470,8 +3470,11 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> tuple[str | Non
     return (title if success else None), attempt
 
 
-def _close_dialog(state: WalkState, dialog) -> CloseAttempt:
-    """Close this dialog with its own dismiss control (exact name), else Escape. Returns what happened."""
+def _close_dialog(state: WalkState, dialog, promo_page=None) -> CloseAttempt:
+    """Close this dialog with its own dismiss control (exact name), else Escape. Returns what happened.
+
+    promo_page: when given, Escape is pressed on this page instead of state.page (for promos on other tabs).
+    """
     # Track this element, not its position: another dialog can take the same index.
     try:
         handle = dialog.element_handle(timeout=2000)
@@ -3493,7 +3496,8 @@ def _close_dialog(state: WalkState, dialog) -> CloseAttempt:
         except Exception:
             click_raised = True
     else:
-        keyboard = getattr(state.page, "keyboard", None)
+        page_for_escape = promo_page if promo_page is not None else state.page
+        keyboard = getattr(page_for_escape, "keyboard", None)
         try:
             keyboard.press("Escape")
             escape_pressed = True
@@ -3525,16 +3529,35 @@ def _promo_cleared(state: WalkState, step: GuideStep) -> CheckResult | None:
     blocked = CheckResult("ENV_BLOCKED", PROMO_NOTE, (), freeze=True)
     if PROMO_CLOSED_NOTE in state.popup_notes:
         return blocked
-    item = _promo_item(state.page, step.text or "")
+
+    # Find the promo item on the same pages _promo_over scans
+    item = None
+    promo_page = None
+    pages = _browser_pages(state.page)
+    for candidate in pages:
+        item = _promo_item(candidate, step.text or "")
+        if item is not None:
+            promo_page = candidate
+            break
+
     if item is None:
-        return blocked
-    attempt = _close_dialog(state, item)
+        # No promo item found on any tab
+        tabs_count = len(pages)
+        note = f"{PROMO_NOTE} Diagnostic: promo item found on no tab (tabs {tabs_count})."
+        return replace(blocked, note=note)
+
+    on_active_tab = "yes" if promo_page is state.page else "no"
+    attempt = _close_dialog(state, item, promo_page=promo_page)
     if attempt.still_visible is not False or attempt.click_raised or attempt.escape_raised:
-        blocked = _add_dialog_diagnostic(state, step, attempt, blocked)
+        blocked = _add_dialog_diagnostic(state, step, attempt, blocked, on_active_tab=on_active_tab, promo_page=promo_page)
         return blocked
+
+    # Successfully closed
     state.popup_notes.append(PROMO_CLOSED_NOTE)
+    if promo_page is not state.page:
+        state.popup_notes.append("Environment: the promotional pop-up was on another tab.")
     if _promo_over(state, step):
-        return _add_dialog_diagnostic(state, step, attempt, blocked, 1)
+        return _add_dialog_diagnostic(state, step, attempt, blocked, loop_count=1, on_active_tab=on_active_tab, promo_page=promo_page)
     return None
 
 
@@ -3720,8 +3743,12 @@ def _redact_aria_snapshot(snapshot: str) -> str:
     return joined
 
 
-def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0) -> CheckResult:
-    """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed."""
+def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAttempt, blocked: CheckResult, loop_count: int = 0, on_active_tab: str | None = None, promo_page=None) -> CheckResult:
+    """Add diagnostic info to ENV_BLOCKED note when dialog cannot be closed.
+
+    on_active_tab: "yes"/"no" for promo dialogs (whether the promo was on state.page).
+    promo_page: for promos, the page where the promo is (for re-finding the dialog in came-back case).
+    """
     click_attempted = "yes" if attempt.click_attempted else "no"
     escape_pressed = "yes" if attempt.escape_pressed else "no"
     if attempt.still_visible is None:
@@ -3741,7 +3768,8 @@ def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAtte
             tracked = None
             # On came-back path (loop_count > 0), re-find the visible dialog for tree
             if loop_count > 0:
-                found = _unnamed_modal(state.page, step.text or "", state=state)
+                page_for_refind = promo_page or state.page
+                found = _unnamed_modal(page_for_refind, step.text or "", state=state)
                 if found:
                     dialog, _title, _count, _method = found
                     try:
@@ -3776,11 +3804,16 @@ def _add_dialog_diagnostic(state: WalkState, step: GuideStep, attempt: CloseAtte
     if attempt.candidate_count >= 2:
         candidate_info = f" {attempt.candidate_count} candidate dialogs; picked by {attempt.selection_method};"
 
+    # Add active tab info for promo dialogs
+    active_tab_info = ""
+    if on_active_tab is not None:
+        active_tab_info = f" promo on the active tab {on_active_tab};"
+
     if loop_count > 0:
         closes_word = "close" if loop_count == 1 else "closes"
-        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} {closes_word};{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+        note = f"{blocked.note} Diagnostic: the dialog came back after {loop_count} {closes_word};{active_tab_info}{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     else:
-        note = f"{blocked.note} Diagnostic:{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
+        note = f"{blocked.note} Diagnostic:{active_tab_info}{candidate_info} click attempted {click_attempted}; Escape pressed {escape_pressed}; still visible {still_visible}; tree: {tree}."
     return replace(blocked, note=note)
 
 

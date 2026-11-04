@@ -83,7 +83,7 @@ class PromoDiagnosticBrowserTests(unittest.TestCase):
         self.assertTrue(result.freeze)
         self.assertIn("A promotional dialog covered the page", result.note)
         # Assert the exact diagnostic prefix from real browser
-        self.assertIn("Diagnostic: click attempted no; Escape pressed yes; still visible yes; tree: - dialog", result.note)
+        self.assertIn("Diagnostic: promo on the active tab yes; click attempted no; Escape pressed yes; still visible yes; tree: - dialog", result.note)
         # This is not the came-back case
         self.assertNotIn("came back", result.note)
         # Sentinel body text must not appear in note (redaction works)
@@ -124,8 +124,10 @@ class PromoDiagnosticBrowserTests(unittest.TestCase):
         # Promo close note should be recorded
         self.assertEqual(len(state.popup_notes), 1)
         self.assertIn("Environment: closed a promotional pop-up", state.popup_notes[0])
-        # No diagnostic should appear in the popup note
+        # No diagnostic should appear in the first popup note
         self.assertNotIn("Diagnostic:", state.popup_notes[0])
+
+
 
     def test_promo_closes_then_comes_back_has_diagnostic(self):
         """Test (c): promo closes successfully but then comes back.
