@@ -5,7 +5,9 @@ triage never needs a diagnostic-only iteration. Only redacted page structure
 is kept: the URL path (no host, no query), the title, the redacted
 accessibility tree, visible button, link, tab and dialog names, open dialogs
 and side panels with their headings, and the step note. Input contents are
-never read, and inputs are masked in the screenshot.
+never read, and inputs are masked in the screenshot. One snapshot is capped
+at BUDGET_S seconds; when hit, what was collected is written with
+TRUNCATED_NOTE.
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlparse
@@ -27,6 +30,8 @@ CANDIDATES_PER_ROLE = 80
 ROOT_LIMIT = 4
 PANEL_LIMIT = 8
 HEADINGS_PER_PANEL = 8
+BUDGET_S = 8.0
+TRUNCATED_NOTE = "snapshot truncated (time)"
 CONTROL_ROLES = ("button", "link", "tab", "dialog")
 PANEL_ROLES = ("dialog", "alertdialog", "complementary")
 _INPUT_MASK = "input, textarea, select, [contenteditable=''], [contenteditable='true']"
@@ -35,6 +40,26 @@ _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
 _EMAIL = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
 _HOST = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b")
 _TOKEN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
+
+
+class _Budget:
+    """One snapshot's overall time cap. Every read checks it; no read waits past it."""
+
+    def __init__(self, clock: Callable[[], float], seconds: float):
+        self.clock = clock
+        self.deadline = clock() + seconds
+        self.hit = False
+
+    def left(self) -> float:
+        return self.deadline - self.clock()
+
+    def over(self) -> bool:
+        if not self.hit and self.left() <= 0:
+            self.hit = True
+        return self.hit
+
+    def timeout_ms(self, cap_ms: int) -> int:
+        return max(1, min(cap_ms, int(self.left() * 1000)))
 
 
 def redact_text(value: object, limit: int = NAME_LIMIT) -> str:
@@ -62,42 +87,53 @@ def _url_path(page) -> str:
     return redact_text(path, 300)
 
 
-def _title(page) -> str:
+def _title(page, budget: _Budget) -> str:
+    if budget.over():
+        return "skipped (time)"
     try:
         return redact_text(page.title())
     except Exception:
         return "unavailable"
 
 
-def _tree(page, redact_tree: Callable[..., str]) -> str:
+def _tree(page, redact_tree: Callable[..., str], budget: _Budget) -> str:
+    if budget.over():
+        return "skipped (time)"
     try:
-        return redact_tree(page.locator("body").aria_snapshot(timeout=1500), limit=TREE_LIMIT)
+        tree = page.locator("body").aria_snapshot(timeout=budget.timeout_ms(1500))
+        return redact_tree(tree, limit=TREE_LIMIT)
     except Exception:
         return "unavailable"
 
 
-def _visible(loc, cap: int) -> list:
+def _visible(loc, cap: int, budget: _Budget):
+    """Yield visible items one at a time, so each is named before the next is read."""
+    if budget.over():
+        return
     try:
         count = min(int(loc.count()), cap)
     except Exception:
-        return []
-    items = []
+        return
     for i in range(count):
+        if budget.over():
+            return
         item = loc.nth(i)
         try:
-            if item.is_visible():
-                items.append(item)
+            visible = item.is_visible()
         except Exception:
             continue
-    return items
+        if visible:
+            yield item
 
 
-def _name(item, *, read_text: bool) -> str:
+def _name(item, *, read_text: bool, budget: _Budget) -> str:
     """aria-label, then title, then short inner text. Never an input's value."""
     reads = [lambda: item.get_attribute("aria-label"), lambda: item.get_attribute("title")]
     if read_text:
-        reads.append(lambda: item.inner_text(timeout=500))
+        reads.append(lambda: item.inner_text(timeout=budget.timeout_ms(500)))
     for read in reads:
+        if budget.over():
+            return ""
         try:
             value = " ".join(str(read() or "").split())
         except Exception:
@@ -107,14 +143,14 @@ def _name(item, *, read_text: bool) -> str:
     return ""
 
 
-def _headings(panel) -> list[str]:
+def _headings(panel, budget: _Budget) -> list[str]:
     names = []
     try:
         loc = panel.get_by_role("heading")
     except Exception:
         return names
-    for item in _visible(loc, HEADINGS_PER_PANEL * 2):
-        name = _name(item, read_text=True)
+    for item in _visible(loc, HEADINGS_PER_PANEL * 2, budget):
+        name = _name(item, read_text=True, budget=budget)
         if name and name not in names:
             names.append(name)
         if len(names) >= HEADINGS_PER_PANEL:
@@ -122,7 +158,7 @@ def _headings(panel) -> list[str]:
     return names
 
 
-def _controls_and_panels(roots: list) -> tuple[dict[str, list[str]], list[dict]]:
+def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict]]:
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
     for root in roots[:ROOT_LIMIT]:
@@ -132,12 +168,12 @@ def _controls_and_panels(roots: list) -> tuple[dict[str, list[str]], list[dict]]
             except Exception:
                 continue
             # A dialog's inner text is its whole body; name it by label or heading only.
-            for item in _visible(loc, CANDIDATES_PER_ROLE):
-                if len(controls[role]) >= NAMES_PER_ROLE:
+            for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
+                if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
-                name = _name(item, read_text=role != "dialog")
+                name = _name(item, read_text=role != "dialog", budget=budget)
                 if not name and role == "dialog":
-                    heads = _headings(item)
+                    heads = _headings(item, budget)
                     name = heads[0] if heads else ""
                 if name and name not in controls[role]:
                     controls[role].append(name)
@@ -146,25 +182,25 @@ def _controls_and_panels(roots: list) -> tuple[dict[str, list[str]], list[dict]]
                 loc = root.get_by_role(role)
             except Exception:
                 continue
-            for item in _visible(loc, PANEL_LIMIT):
-                if len(panels) >= PANEL_LIMIT:
+            for item in _visible(loc, PANEL_LIMIT, budget):
+                if len(panels) >= PANEL_LIMIT or budget.over():
                     break
                 panels.append({
                     "role": role,
-                    "name": _name(item, read_text=False),
-                    "headings": _headings(item),
+                    "name": _name(item, read_text=False, budget=budget),
+                    "headings": _headings(item, budget),
                 })
     return controls, panels
 
 
-def _screenshot(page, roots: list) -> bytes:
+def _screenshot(page, roots: list, budget: _Budget) -> bytes:
     masks = []
     for root in roots[:ROOT_LIMIT]:
         try:
             masks.append(root.locator(_INPUT_MASK))
         except Exception:
             continue
-    return page.screenshot(type="png", full_page=False, timeout=5000, mask=masks)
+    return page.screenshot(type="png", full_page=False, timeout=budget.timeout_ms(4000), mask=masks)
 
 
 def _guarded(value, leaks: Callable[[str], bool] | None):
@@ -210,31 +246,40 @@ def save_failure_snapshot(
     roots: list,
     redact_tree: Callable[..., str],
     leaks: Callable[[str], bool] | None = None,
+    clock: Callable[[], float] | None = None,
+    budget_s: float = BUDGET_S,
 ) -> str:
     """Write the snapshot; return its path relative to RUN_DIR. Raises on a write error."""
+    budget = _Budget(clock or time.monotonic, budget_s)
     folder = _private_dir(Path(run_dir) / SNAPSHOT_FOLDER)
     stem = snapshot_stem(index, step_id)
     png_href = ""
     png_error = ""
+    title = _title(page, budget)
+    tree = _tree(page, redact_tree, budget)
+    controls, panels = _controls_and_panels(roots, budget)
     try:
-        image = _screenshot(page, roots)
+        if budget.over():
+            raise TimeoutError("snapshot time used")
+        image = _screenshot(page, roots, budget)
         if isinstance(image, (bytes, bytearray)) and image:
             _write_private(folder / f"{stem}.png", bytes(image))
             png_href = f"{SNAPSHOT_FOLDER}/{stem}.png"
     except Exception as exc:
         png_error = type(exc).__name__
-    controls, panels = _controls_and_panels(roots)
     payload = _guarded({
         "step_id": str(step_id),
         "index": int(index),
         "status": str(status),
         "note": redact_text(note, 2000),
         "url_path": _url_path(page),
-        "title": _title(page),
-        "tree": _tree(page, redact_tree),
+        "title": title,
+        "tree": tree,
         "controls": controls,
         "panels": panels,
         "screenshot": png_href or f"unavailable ({png_error or 'empty'})",
+        # Set only when a read was skipped because the cap was reached.
+        "truncated": TRUNCATED_NOTE if budget.hit else "",
     }, leaks)
     text = json.dumps(payload, indent=2)
     if leaks is not None and leaks(text):

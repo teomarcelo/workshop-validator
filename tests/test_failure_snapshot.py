@@ -6,6 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from workshop_validator.failure_snapshot import save_failure_snapshot
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
 from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.private_runner import _inventory_report, run_uploaded_guide
@@ -221,6 +222,76 @@ class SnapshotErrorTests(unittest.TestCase):
             self.assertEqual([p.name for p in folder.iterdir()], ["001-S1.json"])
             data = json.loads((folder / "001-S1.json").read_text())
             self.assertEqual(data["screenshot"], "unavailable (RuntimeError)")
+
+
+class SlowItem(Item):
+    """Every visibility read costs one second on the shared fake clock."""
+
+    def __init__(self, clock, text):
+        super().__init__(text=text)
+        self.clock = clock
+
+    def is_visible(self):
+        self.clock.now += 1.0
+        return True
+
+
+class SlowPage(Page):
+    def __init__(self, clock):
+        super().__init__()
+        self.clock = clock
+        self.shots = 0
+        self.roles["button"] = [SlowItem(clock, f"Button {i}") for i in range(30)]
+
+    def screenshot(self, **kwargs):
+        self.shots += 1
+        return super().screenshot(**kwargs)
+
+
+class SnapshotTimeCapTests(unittest.TestCase):
+    def snapshot(self, page, clock, tmp):
+        from workshop_validator.guide_walk import _redact_aria_snapshot
+        return save_failure_snapshot(
+            page, Path(tmp), 1, "S1", "UI_MISMATCH", "missed",
+            roots=[page], redact_tree=_redact_aria_snapshot, clock=clock,
+        )
+
+    def test_slow_page_is_cut_at_the_cap_and_collected_part_is_written(self):
+        clock = Clock()
+        page = SlowPage(clock)
+        with tempfile.TemporaryDirectory() as tmp:
+            href = self.snapshot(page, clock, tmp)
+            data = json.loads((Path(tmp) / href).read_text())
+        self.assertEqual(data["truncated"], "snapshot truncated (time)")
+        self.assertEqual(data["status"], "UI_MISMATCH")
+        # Reads stop once 8 s are used: some buttons are kept, not all 30.
+        self.assertIn("Button 0", data["controls"]["button"])
+        self.assertLess(len(data["controls"]["button"]), 30)
+        self.assertLessEqual(clock.now, 9.0)
+        self.assertEqual(page.shots, 0)
+        self.assertEqual(data["screenshot"], "unavailable (TimeoutError)")
+
+    def test_fast_page_is_not_marked_truncated(self):
+        clock = Clock()
+        page = Page()
+        with tempfile.TemporaryDirectory() as tmp:
+            href = self.snapshot(page, clock, tmp)
+            data = json.loads((Path(tmp) / href).read_text())
+        self.assertEqual(data["truncated"], "")
+        self.assertEqual(data["screenshot"], "snapshots/001-S1.png")
+
+    def test_walk_uses_the_walk_clock_for_the_cap(self):
+        clock = Clock()
+        page = SlowPage(clock)
+        with tempfile.TemporaryDirectory() as tmp:
+            outcome = walk_guide(
+                page, GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
+                checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
+                sleeper=clock.sleep, snapshot_dir=Path(tmp),
+            )
+            data = json.loads((Path(tmp) / outcome.snapshots["S1"]).read_text())
+        self.assertEqual(outcome.statuses, {"S1": "UI_MISMATCH"})
+        self.assertEqual(data["truncated"], "snapshot truncated (time)")
 
 
 class RunnerWiringTests(unittest.TestCase):

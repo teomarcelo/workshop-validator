@@ -5989,6 +5989,7 @@ def walk_guide(
                     state.page, snapshot_dir, index, step.step_id, result.status,
                     result.note or "", roots=_roots(state.page),
                     redact_tree=_redact_aria_snapshot, leaks=snapshot_leaks,
+                    clock=state.clock,
                 )
             except Exception as exc:
                 result = replace(
