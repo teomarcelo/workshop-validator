@@ -229,8 +229,12 @@ class Loc:
         if script is guide_walk._FOCUS_INSIDE_JS:
             return getattr(self.page, "focus_inside", True)
         if script is guide_walk._BOX_STATE_JS:
-            # One read of the box: is ARG (the box's current handle) this element, its value, aria-expanded.
-            return {"same": arg is self, "value": self.input_value() or self.inner_text() or "",
+            # One read of the box: ARG is [current handle, first held handle or None]; is it this
+            # element, is it the first one (the fake is keyed by (kind, name)), its value, aria-expanded.
+            now, first = arg
+            kept = first is None or (first.kind, first.name) == (self.kind, self.name)
+            return {"same": now is self, "kept": kept,
+                    "value": self.input_value() or self.inner_text() or "",
                     "expanded": self.get_attribute("aria-expanded")}
         if "tagName" in script:
             return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
@@ -1555,7 +1559,8 @@ class WalkTests(unittest.TestCase):
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["type"], "PASS")
-        self.assertEqual(clock.now, 0)
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn("Data Type is Record", outcome.notes["type"])
         self.assertIn(("click", "combobox", "Data Type"), page.events)
         self.assertIn(("click", "option", "Record"), page.events)
@@ -1621,7 +1626,8 @@ class WalkTests(unittest.TestCase):
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["variable"], "PASS")
-        self.assertEqual(clock.now, 0)
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn(("click", "tab", "Fields"), page.events)
         self.assertIn(("click", "option", "varWidgetRec"), page.events)
 
@@ -1689,7 +1695,8 @@ class WalkTests(unittest.TestCase):
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["object"], "PASS")
-        self.assertEqual(clock.now, 0)
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn(("click", "option", "Opportunity"), page.events)
 
     def test_auto_layout_plus_adds_the_screen(self):

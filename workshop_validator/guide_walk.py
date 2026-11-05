@@ -4144,6 +4144,9 @@ _RESOURCE_TYPES = frozenset({
     "Collection Filter Criteria",
 })
 _RESOURCE_PICK_WAIT_S = 10.0
+# A lookup pick passes only when its closed, value-showing read holds this long (at least two
+# polls), so a pill that replaces the typed text a moment after the click is seen first.
+_PICK_STEADY_S = 1.0
 
 
 def _plain(value) -> str:
@@ -4567,20 +4570,6 @@ def _matching_options(root, box, value: str, dialog_name: str = "", empty_falls_
     ]
 
 
-# One read of one element, at one moment: is it the element the box locator resolves to now (a
-# locator only resolves elements in the page, so a detached box is never the same), the value it
-# shows (a form field's value, else its own text, as input_value then inner_text read it) and its
-# aria-expanded (null when the attribute is missing).
-_BOX_STATE_JS = """(el, now) => {
-  const field = el.matches('input, textarea, select');
-  return {
-    same: el === now,
-    value: String((field ? el.value : '') || el.innerText || ''),
-    expanded: el.getAttribute('aria-expanded'),
-  };
-}"""
-
-
 def _dispose(*handles) -> None:
     for handle in handles:
         try:
@@ -4590,37 +4579,54 @@ def _dispose(*handles) -> None:
             pass
 
 
-def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
-    """The box shows WANT, is not expanded, and its own list shows no option. Fails closed.
+def _closed_read(root, box, want: str, dialog_name: str = "", first=None):
+    """The held box element when the box shows WANT, is not expanded, and its own list shows no
+    option; else None. Fails closed. The caller disposes the handle it gets.
 
     The box element is held first. After the options check on the box's own list, one evaluate
-    on that element reads that the box locator still resolves to it, its shown value and its
-    aria-expanded. A vanished or replaced box, or an unreadable value or aria-expanded, is never
-    closed. A missing aria-expanded is read as not expanded, as before.
+    on that element reads that the box locator still resolves to it, that it is FIRST (when an
+    earlier read held one), its shown value and its aria-expanded. A vanished or replaced box,
+    or an unreadable value or aria-expanded, is never closed. A missing aria-expanded is read as
+    not expanded, as before.
     """
     want = _plain(want)
     if box is None or not want:
-        return False
+        return None
     held = now = None
+    keep = False
     try:
         held = box.element_handle(timeout=1000)
-        if held is None:
-            return False
+        if held is None:  # Defensive: no known Playwright path returns None here.
+            return None
         if any(shown for _option, _label, shown in _scoped_options(_owned_listbox(root, box, dialog_name))):
-            return False
+            return None
         now = box.element_handle(timeout=1000)
-        read = held.evaluate(_BOX_STATE_JS, now)
+        # Gap: the box can be removed after NOW resolves and before this evaluate; it then still
+        # reads as same. The next poll resolves NOW again, so PASS (two reads) cannot rest on it.
+        read = held.evaluate(_BOX_STATE_JS, [now, first])
+        if not isinstance(read, dict) or read.get("same") is not True or read.get("kept") is not True:
+            return None
+        # A missing aria-expanded (null) was read: closed, as before, when the list shows no option.
+        expanded = read.get("expanded", False)
+        if not (expanded is None or isinstance(expanded, str)) or _plain(expanded) == "true":
+            return None
+        if _plain(read.get("value")) != want:
+            return None
+        keep = True
+        return held
     except Exception:
-        return False
+        return None
     finally:
-        _dispose(held, now)
-    if not isinstance(read, dict) or read.get("same") is not True:
-        return False
-    # A missing aria-expanded (null) was read: closed, as before, when the list shows no option.
-    expanded = read.get("expanded", False)
-    if not (expanded is None or isinstance(expanded, str)) or _plain(expanded) == "true":
-        return False
-    return _plain(read.get("value")) == want
+        _dispose(now)
+        if not keep:
+            _dispose(held)
+
+
+def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
+    """The box shows WANT, is not expanded, and its own list shows no option (one read)."""
+    held = _closed_read(root, box, want, dialog_name)
+    _dispose(held)
+    return held is not None
 
 
 def _variable_options(page) -> list:
@@ -4670,6 +4676,25 @@ _FIELD_HELPERS_JS = r"""
   // Labels, legends and form-element labels under ROOT, open shadow roots included.
   const marksIn = (root) => deep(root).filter((el) => el.matches("label, legend, .slds-form-element__label"));
 """
+# One read of one element, at one moment. ARG is [now, first]: NOW the element the box locator
+# resolves to now (a locator only resolves elements in the page, so a detached box is never the
+# same), FIRST the element an earlier read of this pick held (null on the first read). It reads
+# whether it is NOW, whether it is FIRST (kept), the value it shows (a form field's value, else
+# its own text, as input_value then inner_text read it) and its aria-expanded (null when the
+# attribute is missing). An element that is not a form field and is, or holds, a pill (pillish,
+# open shadow roots included, as pillsIn reads it) shows no value: its text is the pill's label,
+# and a pill never proves a pick (W-110).
+_BOX_STATE_JS = "(el, arg) => {" + _FIELD_HELPERS_JS + r"""
+  const [now, first] = arg;
+  const field = el.matches('input, textarea, select');
+  const pilled = !field && (pillish(el) || deep(el).some(pillish));
+  return {
+    same: el === now,
+    kept: first === null || el === first,
+    value: pilled ? '' : String((field ? el.value : '') || el.innerText || ''),
+    expanded: el.getAttribute('aria-expanded'),
+  };
+}"""
 # The lookup's field containers, nearest first: every ancestor of the box, up to but never
 # including a dialog, section, tab panel or modal body, and stopping BEFORE the first ancestor
 # that holds any other field: another input, textarea or select (hidden ones too), an element
@@ -5016,20 +5041,41 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
 
     def chosen() -> bool:
         now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
-        if now_box is not None and _list_closed(now_root, now_box, want):
+        # A new pill near the field is read first, on every poll: it outranks the box value.
+        if _pill_shows(container, want, _plain(label), before):
+            _forget(steady)
+            if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
+                return False
+            if any(shown for _option, _label, shown in _scoped_options(scope)):
+                return False
+            by_pill.append(want)
             return True
-        if not _pill_shows(container, want, _plain(label), before):
+        # The walk typed WANT before the click, so one read of the box value cannot tell the
+        # typed text from the pick. PASS needs the clicked option's list (open before the click)
+        # read closed with the box showing WANT on reads at least _PICK_STEADY_S apart, on the
+        # same held element, with no new pill on any poll in between.
+        held = _closed_read(now_root, now_box, want, first=steady[0] if steady else None)
+        if held is None:
+            _forget(steady)
             return False
-        if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
+        if not steady:
+            steady.extend((held, state.clock()))
             return False
-        if any(shown for _option, _label, shown in _scoped_options(scope)):
-            return False
-        by_pill.append(want)
-        return True
+        _dispose(held)
+        return state.clock() - steady[1] >= _PICK_STEADY_S
+
+    def _forget(kept: list) -> None:
+        if kept:
+            _dispose(kept[0])
+        kept.clear()
 
     by_pill: list = []
+    steady: list = []
     limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
-    missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
+    try:
+        missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
+    finally:
+        _forget(steady)
     if missed is None and by_pill:
         # Never PASS: the pill may belong to another field. The walk goes on (not frozen).
         return CheckResult("NEEDS_REVIEW", _pill_review_note(label, by_pill[-1]), ())

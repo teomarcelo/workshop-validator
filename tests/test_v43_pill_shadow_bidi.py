@@ -701,8 +701,9 @@ class _ReadBox:
 
     def evaluate(self, script, arg=None):
         assert script is guide_walk._BOX_STATE_JS
+        now, first = arg
         if isinstance(self.read, dict) and "same" not in self.read:
-            return dict(self.read, same=arg is self)
+            return dict({"kept": first is None or first is self}, **self.read, same=now is self)
         return self.read
 
     def dispose(self):
