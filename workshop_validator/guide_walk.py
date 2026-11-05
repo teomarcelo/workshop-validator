@@ -120,6 +120,8 @@ class WalkState:
     # W-105: "successfully saved" read at the last click, with the control found and
     # visible. None means unread (no click, or a click path that does not read it).
     saved_before_click: bool | None = None
+    # Titles (normalized) of open dialogs a passing guide step opened: never closed as pop-ups.
+    guide_dialogs: set = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -3266,14 +3268,52 @@ def _unnamed_modal_title(page, step_text: str) -> str | None:
     return found[1] if found else None
 
 
+def _recorded_dialogs(page, state=None) -> set:
+    """Titles (normalized) of dialogs a guide step opened that are still open."""
+    titles = set(getattr(page, "_guide_dialogs", None) or ())
+    if state is not None:
+        titles |= set(state.guide_dialogs)
+    return titles
+
+
+def _open_dialog_titles(page) -> set:
+    """Titles (normalized) of every visible dialog, each read as _unnamed_modal reads it."""
+    return {norm(title) for _item, title, _text in _visible_dialogs(page) if title}
+
+
+def _track_guide_dialogs(state: WalkState, before: set | None, result) -> set:
+    """Forget closed dialogs; record those that appeared while a step passed. Returns the open titles."""
+    now = _open_dialog_titles(state.page)
+    kept = {title for title in state.guide_dialogs if title in now}
+    if before is not None and isinstance(result, CheckResult) and result.status == "PASS":
+        kept |= {title for title in now - before if not any(p in title for p in _PROMO_PHRASES)}
+    state.guide_dialogs = kept
+    try:
+        state.page._guide_dialogs = frozenset(kept)
+    except Exception:
+        pass
+    return now
+
+
 def _unnamed_modal(page, step_text: str, state=None):
     """(dialog, title, candidate_count, selection_method) of a visible modal dialog the step does not name, or None.
 
+    A dialog a guide step opened (recorded in the walk state) is the guide's own, never a candidate.
     When multiple candidates exist and state is provided, picks the first whose dismiss control
     can be clicked (trial click passes). Falls back to DOM order if none are clickable or time < 2s.
     """
     step_norm = norm(step_text)
-    candidates = []
+    recorded = _recorded_dialogs(page, state)
+    candidates = [
+        (item, title) for item, title, dialog_text in _visible_dialogs(page)
+        if title and norm(title) not in step_norm and norm(title) not in recorded and len(dialog_text) > 5
+    ]
+    return _pick_unnamed(candidates, state)
+
+
+def _visible_dialogs(page) -> list:
+    """(dialog, title, normalized text) for each visible dialog with text, one entry per element."""
+    found = []
     roots = _roots(page)
     # Deduplication is only needed when scanning multiple frames
     need_dedup = len(roots) > 1
@@ -3287,8 +3327,8 @@ def _unnamed_modal(page, step_text: str, state=None):
             except Exception:
                 continue
             for index in range(min(_count(loc), 20)):
-                item = loc.nth(index)
                 try:
+                    item = loc.nth(index)
                     if hasattr(item, "is_visible") and not item.is_visible():
                         continue
 
@@ -3334,12 +3374,13 @@ def _unnamed_modal(page, step_text: str, state=None):
                     if not title:
                         words = dialog_text_raw.split()
                         title = " ".join(words[:5]) if words else dialog_text_raw[:50]
-                    # Check if step mentions this dialog's title
-                    if title and norm(title) not in step_norm and len(dialog_text) > 5:
-                        candidates.append((item, title))
+                    found.append((item, title, dialog_text))
                 except Exception:
                     continue
+    return found
 
+
+def _pick_unnamed(candidates: list, state=None):
     if not candidates:
         return None
 
@@ -4007,15 +4048,20 @@ def _plain(value) -> str:
     return " ".join(str(value or "").split())
 
 
-def _resource_type_box(page):
-    """The visible Resource Type control: (frame, role, element), or (None, "", None)."""
+def _labeled_box(page, label: str, roles=("combobox", "searchbox")):
+    """The visible control with exactly this name: (frame, role, element), or (None, "", None)."""
     for root in _roots(page):
-        for role in ("combobox", "button"):
-            loc = _by_role(root, role, "Resource Type", exact=True)
+        for role in roles:
+            loc = _by_role(root, role, label, exact=True)
             target = None if loc is None else _visible_match(loc)
             if target is not None:
                 return root, role, target
     return None, "", None
+
+
+def _resource_type_box(page):
+    """The visible Resource Type control: (frame, role, element), or (None, "", None)."""
+    return _labeled_box(page, "Resource Type", ("combobox", "button"))
 
 
 def _read_attr(target, name: str) -> str:
@@ -4066,8 +4112,21 @@ def _by_id(root, ident: str):
         return None
 
 
-def _resource_listbox(root, box):
-    """The listbox the Resource Type control owns (aria-controls), else the New Resource dialog."""
+def _enclosing_dialog(box):
+    """The nearest dialog that holds this control, or None."""
+    try:
+        loc = box.locator("xpath=ancestor::*[@role='dialog' or @role='alertdialog'][1]")
+    except Exception:
+        return None
+    return _first(loc) if _count(loc) == 1 else None
+
+
+def _owned_listbox(root, box, dialog_name: str = ""):
+    """The list a combobox or lookup owns (aria-controls), else the dialog that holds it.
+
+    DIALOG_NAME is a last fallback for a control whose own dialog cannot be read.
+    Nothing outside that scope is ever searched.
+    """
     if root is None or box is None:
         return None
     controls = _read_attr(box, "aria-controls")
@@ -4075,8 +4134,18 @@ def _resource_listbox(root, box):
         loc = _by_id(root, controls)
         if loc is not None and _count(loc) == 1:
             return _first(loc)
-    dialog = _by_role(root, "dialog", "New Resource", exact=True)
-    return None if dialog is None else _visible_match(dialog)
+    dialog = _enclosing_dialog(box)
+    if dialog is not None:
+        return dialog
+    if not dialog_name:
+        return None
+    loc = _by_role(root, "dialog", dialog_name, exact=True)
+    return None if loc is None else _visible_match(loc)
+
+
+def _resource_listbox(root, box):
+    """The listbox the Resource Type control owns (aria-controls), else the New Resource dialog."""
+    return _owned_listbox(root, box, "New Resource")
 
 
 def _scoped_options(scope) -> list:
@@ -4099,13 +4168,79 @@ def _scoped_options(scope) -> list:
     return found
 
 
+def _matching_options(root, box, value: str, dialog_name: str = "") -> list:
+    """Visible options whose first line is exactly VALUE, inside the list this box owns only."""
+    want = _plain(value)
+    if not want:
+        return []
+    return [
+        option for option, label, shown in _scoped_options(_owned_listbox(root, box, dialog_name))
+        if shown and label == want
+    ]
+
+
+def _list_closed(root, box, dialog_name: str = "") -> bool:
+    """The box is not expanded and its own list shows no option."""
+    if box is None or _read_attr(box, "aria-expanded") == "true":
+        return False
+    return not any(shown for _option, _label, shown in _scoped_options(_owned_listbox(root, box, dialog_name)))
+
+
 def _variable_options(page) -> list:
     """Visible options labelled exactly Variable, inside the Resource Type listbox only."""
     root, _role, box = _resource_type_box(page)
-    return [
-        option for option, label, shown in _scoped_options(_resource_listbox(root, box))
-        if shown and label == "Variable"
-    ]
+    return _matching_options(root, box, "Variable", "New Resource")
+
+
+_LOOKUP_ROLES = ("combobox", "searchbox")
+
+
+def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: str) -> CheckResult | None:
+    """Fill a lookup and click the one option whose first line is VALUE, inside the lookup's own list.
+
+    None means no such option is shown yet (the caller keeps waiting). Two or more matches
+    are never clicked. PASS only when the box then shows VALUE and its list closed.
+    """
+    want = _plain(value)
+    root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
+    if box is None or not want:
+        return None
+    picks = _matching_options(root, box, want)
+    if not picks:
+        if _shown_value(box) != want:
+            _fill_labeled(state, label, value)
+            root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
+            if box is None:
+                return None
+        if _read_attr(box, "aria-expanded") != "true":
+            try:
+                box.click(timeout=8000)
+            except Exception:
+                pass
+        picks = _matching_options(root, box, want)
+    if not picks:
+        return None
+    if len(picks) > 1:
+        return CheckResult(
+            "UI_MISMATCH",
+            f"{len(picks)} options in the {label} list are labelled {want}, so none was clicked.",
+            (),
+            freeze=True,
+        )
+    try:
+        picks[0].click(timeout=8000)
+    except Exception:
+        pass
+
+    def chosen() -> bool:
+        now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
+        return now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box)
+
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
+    missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
+    if missed is None:
+        return passed(step, "filled", f"{label} is {want}. The box shows it and its list closed.")
+    return _stop_here(missed)
 
 
 def _highlighted_option(root, box) -> str:
@@ -5681,7 +5816,21 @@ def _select_labeled(page, label: str, value: str) -> bool:
             opened = _click_locator(loc)
     if not opened and not present(page, "option", value):
         return False
-    return click_role(page, "option", value)
+    # Only an option in the list this control owns, matched by its first line, is clicked.
+    root, role, box = _labeled_box(page, label, ("combobox", "button", "listbox"))
+    if box is None:
+        return False
+    if role == "listbox":
+        picks = [option for option, text, shown in _scoped_options(box) if shown and text == _plain(value)]
+    else:
+        picks = _matching_options(root, box, value)
+    if len(picks) != 1:
+        return False
+    try:
+        picks[0].click(timeout=8000)
+    except Exception:
+        return False
+    return True
 
 
 def _is_lookup(page, label: str) -> bool:
@@ -5695,14 +5844,7 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         _click_exact_role(state.page, "tab", "Fields")
     # A lookup can show the typed word and still be invalid until the choice is clicked.
     if _is_lookup(state.page, label):
-        if click_role(state.page, "option", value):
-            return passed(step, "filled", f"{label} is {value}.")
-        if _field_value(state, label) != value:
-            _fill_labeled(state, label, value)
-        click_role(state.page, "combobox", label) or click_role(state.page, "searchbox", label)
-        if click_role(state.page, "option", value):
-            return passed(step, "filled", f"{label} is {value}.")
-        return None
+        return _pick_lookup_option(state, step, label, value)
     if _field_value(state, label) == value:
         return passed(step, "filled", f"{label} is {value}.")
     if _select_labeled(state.page, label, value):
@@ -5925,6 +6067,17 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
     return result
 
 
+OVERRUN_NOTE = "The step exceeded its time limit."
+_RAN_PAST_NOTE = "The step ran past its time limit."
+
+
+def _overrun_result(result) -> CheckResult:
+    """A step past its time limit keeps a failing or frozen result; only a non-result becomes NOT_RUN."""
+    if isinstance(result, CheckResult) and (result.freeze or result.status not in ("PASS", "NOT_RUN")):
+        return replace(result, note=f"{result.note or ''} {_RAN_PAST_NOTE}".strip())
+    return CheckResult("NOT_RUN", OVERRUN_NOTE, ())
+
+
 def _session_blocked(state: WalkState, step: GuideStep) -> bool:
     if not _page_open(state):
         return True
@@ -6034,13 +6187,14 @@ def walk_guide(
             password_form = None
             check = find_check(step, catalog)
         state.popup_notes = []
+        dialogs_before = _track_guide_dialogs(state, None, None)
         state.step_deadline = t_start + step_cap_s
         try:
             if skipped is None:
                 result = check.run(state, step) if check is not None else attempt_step(state, step)
                 t_elapsed = _clock() - t_start
                 if t_elapsed > step_cap_s:
-                    result = CheckResult("NOT_RUN", "The step exceeded its time limit.", ())
+                    result = _overrun_result(result)
         except StillLoading:
             result = CheckResult("NOT_RUN", LOADING_NOTE, ())
         except Exception as exc:
@@ -6068,6 +6222,8 @@ def walk_guide(
             result = replace(
                 result, note=" ".join([*popup_notes, result.note or ""]).strip(),
             )
+        if skipped is None:
+            _track_guide_dialogs(state, dialogs_before, result)
         t_end = _clock()
         if snapshot_dir is not None and result.status in SNAPSHOT_STATUSES:
             # A snapshot never changes the status and never stops the walk.
