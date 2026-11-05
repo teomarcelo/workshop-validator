@@ -4584,12 +4584,12 @@ _LOOKUP_ROLES = ("combobox", "searchbox")
 # Shared page helpers for the field container and pill scripts below.
 # Shadow roots: deep() walks an element and every OPEN shadow root under it. The other-field
 # checks (inputs, field roles, field custom elements, labels / legends / form-element labels),
-# the one-field label check after the click and the page-wide pill set recorded before the click
-# all use it. A pill never proves a pick (W-110); it only flags the step for review. The pills
-# read for that flag are found in light DOM only, so a pill inside a shadow root is not seen
-# (fails closed). A CLOSED shadow root is invisible to every check: a field hidden in one is not
-# seen. A lookup named only by aria-label has no label element, so it gets no field container and
-# a pill never flags its pick for review (fails closed to UI_MISMATCH).
+# the one-field label check after the click, the page-wide pill set recorded before the click,
+# and the after-click pill search (pillsIn) all use it. A pill never proves a pick (W-110); it
+# only flags the step for review. A CLOSED shadow root is invisible to every check: a field or
+# pill hidden in one is not seen (fails closed). A lookup named only by aria-label has no label
+# element, so it gets no field container and a pill never flags its pick for review (fails closed
+# to UI_MISMATCH).
 _FIELD_HELPERS_JS = r"""
   const up = (el) => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null);
   const within = (node, root) => { for (let n = node; n; n = up(n)) if (n === root) return true; return false; };
@@ -4602,7 +4602,7 @@ _FIELD_HELPERS_JS = r"""
   const pillish = (el) => el.matches(named) || String(el.getAttribute("class") || "").split(/\s+/)
     .some((t) => t.includes("pill") && !t.includes("__") && !t.endsWith("container"));
   const pillsIn = (root) => {
-    const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
+    const found = deep(root).filter(pillish);
     return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
   };
   // Every element under EL, including inside the open shadow roots of EL and its descendants.
@@ -4765,6 +4765,12 @@ def _live_container(containers):
     return None
 
 
+def _trim_bidi(text: str) -> str:
+    """Remove bidi control marks (U+200E, U+200F, U+2066-U+2069) from start and end only."""
+    bidi_marks = "‎‏⁦⁧⁨⁩"
+    return text.strip(bidi_marks)
+
+
 def _pill_label(pill) -> str:
     """A pill's visible label, read fail-closed; a title that differs from it gives no label."""
     try:
@@ -4778,12 +4784,13 @@ def _pill_label(pill) -> str:
     if len(lines) != 1:
         return ""
     try:
-        titles = [_plain(title) for title in pill.evaluate(_PILL_TITLES_JS)]
+        titles = [_trim_bidi(_plain(title)) for title in pill.evaluate(_PILL_TITLES_JS)]
     except Exception:
         return ""
-    if any(title != lines[0] for title in titles):
+    read_label = _trim_bidi(lines[0])
+    if any(title != read_label for title in titles):
         return ""
-    return lines[0]
+    return read_label
 
 
 def _one_field(container, name: str) -> bool:
