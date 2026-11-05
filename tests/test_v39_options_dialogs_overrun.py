@@ -408,6 +408,35 @@ class OwnedOptionBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate("window.chosen"), [])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
 
+    def test_named_list_that_renders_late_is_waited_for_and_picked(self):
+        html = page_lookup_html(OBJECTS, pill=False).replace(
+            'box.addEventListener("input", openList);',
+            'box.addEventListener("input", () => setTimeout(() => { attach(); openList(); }, 700));',
+        ).replace(
+            '<div id="pl-list" role="listbox" hidden></div>', '<div id="pl-home"></div>',
+        ).replace(
+            'const list = document.getElementById("pl-list");',
+            'const list = document.createElement("div");\n'
+            '  list.id = "pl-list"; list.setAttribute("role", "listbox"); list.hidden = true;\n'
+            '  function attach() { if (!list.isConnected) document.getElementById("pl-home").appendChild(list); }',
+        ).replace('box.addEventListener("click", openList);', "")
+        result = self.fill(html, "Object: Opportunity")
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
+        self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
+
+    def test_named_list_that_never_appears_says_so_and_clicks_nothing(self):
+        html = page_lookup_html(OBJECTS).replace(
+            '<div id="pl-list" role="listbox" hidden></div>', "",
+        ).replace(
+            'const list = document.getElementById("pl-list");', 'const list = document.createElement("div");',
+        )
+        result = self.fill(html, "Object: Opportunity")
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertTrue(result.freeze)
+        self.assertIn("names its list (pl-list) but that list never appeared", result.note)
+        self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
+
     def test_dropdown_found_by_visible_text_only_picks_no_option_and_says_so(self):
         page = self.open(TEXT_ONLY_DROPDOWN_HTML)
         steps = (make_step("s1", "Data Type: Record"),)
@@ -456,6 +485,52 @@ class GuideDialogBrowserTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["s2"], "UI_MISMATCH")
         self.assertEqual(outcome.statuses["s3"], "NOT_RUN")
         self.assertNotIn("pop-up", outcome.notes["s2"])
+        self.assertTrue(self.page.locator("#ns").is_visible())
+
+    def screen_walk(self, html):
+        return self.walk(
+            html, ("Add a Screen Element with Label Sample Screen", "Sample Field: Sample", "Sample Field: Sample"),
+            url=BUILDER_URL,
+        )
+
+    def test_new_screen_heading_with_a_colon_suffix_stays_the_guides_dialog(self):
+        html = SCREEN_BUILDER_HTML.replace(
+            '<h2 id="ns-title">New Screen</h2>', '<h2 id="ns-title">New Screen: Sample</h2>')
+        outcome = self.screen_walk(html)
+        self.assertEqual(outcome.statuses["s1"], "PASS", outcome.notes.get("s1"))
+        self.assertEqual(outcome.statuses["s2"], "UI_MISMATCH")
+        self.assertNotIn("pop-up", outcome.notes["s2"])
+        self.assertTrue(self.page.locator("#ns").is_visible())
+
+    def test_dialog_name_from_aria_labelledby_is_read_before_its_heading(self):
+        html = SCREEN_BUILDER_HTML.replace(
+            '<h2 id="ns-title">New Screen</h2>',
+            '<span id="ns-title">New Screen</span><h2>Sample Section</h2>')
+        outcome = self.screen_walk(html)
+        self.assertEqual(outcome.statuses["s1"], "PASS", outcome.notes.get("s1"))
+        self.assertEqual(outcome.statuses["s2"], "UI_MISMATCH")
+        self.assertNotIn("pop-up", outcome.notes["s2"])
+        self.assertTrue(self.page.locator("#ns").is_visible())
+
+    def test_recorded_name_inside_another_title_is_not_the_guides_dialog(self):
+        html = SCREEN_BUILDER_HTML.replace(
+            '<div role="listbox" aria-label="Sample Elements">',
+            '<div id="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" hidden>'
+            '<h2 id="tour-title">Sample New Screen Tour</h2><p>Take a short sample tour.</p>'
+            '<button id="tour-close">Close</button></div>'
+            '<div role="listbox" aria-label="Sample Elements">',
+        ).replace(
+            'document.getElementById("ns").hidden = false;',
+            'document.getElementById("ns").hidden = false; document.getElementById("tour").hidden = false;',
+        ).replace(
+            "</script>",
+            'document.getElementById("tour-close").addEventListener("click", () => {'
+            ' document.getElementById("tour").hidden = true; });\n</script>',
+        )
+        outcome = self.screen_walk(html)
+        self.assertEqual(outcome.statuses["s1"], "PASS", outcome.notes.get("s1"))
+        self.assertIn('closed "Sample New Screen Tour" pop-up', outcome.notes["s2"])
+        self.assertFalse(self.page.locator("#tour").is_visible())
         self.assertTrue(self.page.locator("#ns").is_visible())
 
     def test_miss_inside_the_new_resource_the_variable_check_opened_is_a_frozen_mismatch(self):
@@ -607,6 +682,17 @@ class TimedMissTests(unittest.TestCase):
         self.assertIn("ran past its time limit", outcome.notes["s1"])
         self.assertNotIn("ran out of time", outcome.notes["s1"])
         self.assertEqual(outcome.statuses["s2"], "NOT_RUN")
+
+    def test_other_failure_after_a_timed_out_miss_is_kept(self):
+        def run(state, step, clock):
+            clock.now += STEP_CAP_S + 5
+            self.miss(state)  # a timed-out miss the check moves past
+            return CheckResult("UI_MISMATCH", "Sample value was wrong.", (), freeze=True)
+
+        outcome = self.walk(run)
+        self.assertEqual(outcome.statuses["s1"], "UI_MISMATCH")
+        self.assertIn("Sample value was wrong.", outcome.notes["s1"])
+        self.assertNotIn("ran out of time", outcome.notes["s1"])
 
     def test_timed_out_miss_does_not_carry_into_the_next_step(self):
         clock = FakeClock()

@@ -123,9 +123,10 @@ class WalkState:
     # Titles (normalized) of open dialogs a check opened by name (New Resource, New Screen):
     # never closed as pop-ups. Forgotten when they close.
     guide_dialogs: set = field(default_factory=set)
-    # Per step: whether the last require() miss was decided with step time still left.
-    # False means the step's time was spent, so the miss is not a result. None means no miss.
-    miss_full_wait: bool | None = None
+    # Per step: for each require() miss, by its failure note, whether it was decided with step
+    # time still left. False means the time was spent, so that miss is not a result. Only the
+    # miss whose note the step's result carries is judged by this.
+    miss_full_wait: dict[str, bool] = field(default_factory=dict)
     # Per step: triage notes added to the step result (never PASS evidence).
     step_notes: list[str] = field(default_factory=list)
 
@@ -428,7 +429,8 @@ def require(
             )
         return CheckResult("NOT_RUN", note, ())
     except BrowserActionError:
-        state.miss_full_wait = _time_left(state) > 0
+        if failure_note:
+            state.miss_full_wait[failure_note] = _time_left(state) > 0
         return CheckResult("UI_MISMATCH", failure_note, ())
     return None
 
@@ -3288,6 +3290,32 @@ def _open_dialog_titles(page) -> set:
     return {norm(title) for _item, title, _text in _visible_dialogs(page) if title}
 
 
+def _dialog_own_name(root, item) -> str:
+    """The dialog's name from aria-labelledby (the named elements' text), else aria-label, else ""."""
+    ids = _read_attr(item, "aria-labelledby").split()
+    parts = []
+    for ident in ids[:4]:
+        loc = _by_id(root, ident)
+        if loc is None or _count(loc) != 1:
+            continue
+        try:
+            text = _plain(_first(loc).inner_text(timeout=500))
+        except Exception:
+            text = ""
+        if text:
+            parts.append(text)
+    return " ".join(parts) or _read_attr(item, "aria-label")
+
+
+def _is_recorded(title: str, recorded) -> bool:
+    """TITLE is a recorded guide dialog: its exact name, or the name followed by ":" or " - "."""
+    have = norm(title)
+    return bool(have) and any(
+        have == name or have.startswith(name + ":") or have.startswith(name + " - ")
+        for name in recorded if name
+    )
+
+
 def _mirror_guide_dialogs(state: WalkState) -> None:
     try:
         state.page._guide_dialogs = frozenset(state.guide_dialogs)
@@ -3310,7 +3338,7 @@ def _forget_closed_dialogs(state: WalkState) -> None:
         return
     try:
         now = _open_dialog_titles(state.page)
-        state.guide_dialogs = {title for title in state.guide_dialogs if title in now}
+        state.guide_dialogs = {name for name in state.guide_dialogs if any(_is_recorded(t, {name}) for t in now)}
     except Exception:
         return
     _mirror_guide_dialogs(state)
@@ -3327,7 +3355,7 @@ def _unnamed_modal(page, step_text: str, state=None):
     recorded = _recorded_dialogs(page, state)
     candidates = [
         (item, title) for item, title, dialog_text in _visible_dialogs(page)
-        if title and norm(title) not in step_norm and norm(title) not in recorded and len(dialog_text) > 5
+        if title and norm(title) not in step_norm and not _is_recorded(title, recorded) and len(dialog_text) > 5
     ]
     return _pick_unnamed(candidates, state)
 
@@ -3380,9 +3408,9 @@ def _visible_dialogs(page) -> list:
                     dialog_text = norm(dialog_text_raw)
                     if not dialog_text:
                         continue
-                    # Try to find a title: look for h1, h2, h3, or role=heading
-                    title = ""
-                    for heading_sel in ("h1", "h2", "h3", "[role='heading']"):
+                    # The dialog's own name first (aria-labelledby, aria-label), then its heading.
+                    title = _dialog_own_name(root, item)
+                    for heading_sel in () if title else ("h1", "h2", "h3", "[role='heading']"):
                         try:
                             heading_loc = item.locator(heading_sel)
                             if _count(heading_loc) > 0:
@@ -4277,14 +4305,49 @@ def _pill_shows(container, want: str) -> bool:
     return False
 
 
-def _no_lookup_scope(label: str) -> CheckResult:
-    return CheckResult(
-        "NEEDS_REVIEW",
-        f"The {label} lookup names no list of its own (no aria-controls or aria-owns, not in a dialog), "
-        "so no option was clicked and the page was not searched.",
-        (),
-        freeze=True,
-    )
+def _named_lists(box) -> list:
+    """The aria-controls / aria-owns values on the box and its combobox ancestor (non-empty only)."""
+    holders = [box]
+    ancestor = _combobox_ancestor(box)
+    if ancestor is not None:
+        holders.append(ancestor)
+    return [value for holder in holders for attr in ("aria-controls", "aria-owns")
+            if (value := _read_attr(holder, attr))]
+
+
+def _no_lookup_scope(label: str, named: list) -> CheckResult:
+    if named:
+        reason = (f"The {label} lookup names its list ({named[0]}) but that list never appeared, "
+                  "so no option was clicked and the page was not searched.")
+    else:
+        reason = (f"The {label} lookup names no list of its own (no aria-controls or aria-owns, "
+                  "not in a dialog), so no option was clicked and the page was not searched.")
+    return CheckResult("NEEDS_REVIEW", reason, (), freeze=True)
+
+
+def _await_lookup_scope(state: WalkState, label: str, root, box) -> CheckResult | None:
+    """None once the lookup's own list (or its dialog) can be read.
+
+    A list named by id that has not rendered yet is waited for, bounded by the normal wait.
+    With no list named and no dialog, nothing is waited for: NEEDS_REVIEW at once.
+    """
+    if _owned_listbox(root, box) is not None:
+        return None
+    named = _named_lists(box)
+    if not named:
+        return _no_lookup_scope(label, named)
+
+    def scoped() -> bool:
+        now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
+        return now_box is not None and _owned_listbox(now_root, now_box) is not None
+
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
+    missed = require(state, scoped, "", limit=limit)
+    if missed is None:
+        return None
+    if missed.status != "UI_MISMATCH":
+        return missed  # still loading: not a result
+    return _no_lookup_scope(label, named)
 
 
 def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: str) -> CheckResult | None:
@@ -4312,8 +4375,12 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
                 box.click(timeout=8000)
             except Exception:
                 pass
-        if _owned_listbox(root, box) is None:
-            return _no_lookup_scope(label)
+        unscoped = _await_lookup_scope(state, label, root, box)
+        if unscoped is not None:
+            return unscoped
+        root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
+        if box is None:
+            return None
         picks = _matching_options(root, box, want)
     if not picks:
         return None
@@ -6191,12 +6258,15 @@ _FAILING = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
 
 
 def _miss_without_time(result, state: WalkState) -> bool:
-    """A failure whose last miss was decided after the step's time was spent."""
-    return (
-        isinstance(result, CheckResult)
-        and result.status in _FAILING
-        and state.miss_full_wait is False
-    )
+    """A failure decided by a require() miss that came after the step's time was spent.
+
+    The deciding miss is the one whose failure note starts the result's note. A different
+    failure in the same step (its own note) is kept, even after an earlier timed-out miss.
+    """
+    if not isinstance(result, CheckResult) or result.status not in _FAILING:
+        return False
+    note = result.note or ""
+    return any(not full and note.startswith(miss) for miss, full in state.miss_full_wait.items())
 
 
 def _overrun_result(result, state: WalkState) -> CheckResult:
@@ -6322,7 +6392,7 @@ def walk_guide(
             password_form = None
             check = find_check(step, catalog)
         state.popup_notes = []
-        state.miss_full_wait = None
+        state.miss_full_wait = {}
         state.step_notes = []
         if skipped is None:
             _forget_closed_dialogs(state)
