@@ -180,6 +180,7 @@ class BoardRenderTests(unittest.TestCase):
             inventory, outcomes={"S1": StepOutcome("PASS", evidence_ids=("S1:read",))},
             notice="n", run_id="r1",
         )
+        self.assertEqual(board.guide_noted, 0)
         html = render_run_report(board, summary={})
         self.assertNotIn("with a guide note", html)
         self.assertNotIn("Guide differs", html)
@@ -217,12 +218,13 @@ BASE = f"https://{HOST}/lightning/setup/personalInformation"
 SAVED = "Your settings have been successfully saved."
 
 
-def save_html(before: str, after: str) -> str:
+def save_html(before: str, after: str, hash_after: str = "") -> str:
+    move = f"location.hash='{hash_after}';" if hash_after else ""
     return (
         "<!doctype html><html><head><title>Personal Information</title></head><body>"
         f"<h1>Personal Information</h1><div id='msg'>{before}</div>"
         "<button onclick=\"window.saves=(window.saves||0)+1;"
-        f"document.getElementById('msg').textContent='{after}'\">Save</button>"
+        f"{move}document.getElementById('msg').textContent='{after}'\">Save</button>"
         "</body></html>"
     )
 
@@ -270,6 +272,13 @@ class InlineSavedBrowserTests(unittest.TestCase):
 
     def test_saved_text_already_there_before_save_is_not_pass(self):
         outcome, saves = self.walk(save_html(SAVED, SAVED))
+        self.assertEqual(saves, 1)
+        self.assertNotEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.guide_notes, {})
+
+    def test_old_saved_text_is_not_pass_even_when_save_changed_the_url(self):
+        # Save itself passes on the URL change; the saved text was there before it.
+        outcome, saves = self.walk(save_html(SAVED, SAVED, hash_after="save"))
         self.assertEqual(saves, 1)
         self.assertNotEqual(outcome.statuses["save"], "PASS")
         self.assertEqual(outcome.guide_notes, {})
