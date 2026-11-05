@@ -799,6 +799,12 @@ def run_uploaded_guide(
         instance = org_instance.from_session(opened)
         if instance is not None:
             tell("instance", f"Org instance: {instance['instance']}.")
+        # Failure snapshots go only into a private run dir outside the repo.
+        snapshot_dir = None
+        if output_dir is not None and not (
+            repo_root is not None and _path_inside(Path(output_dir), Path(repo_root))
+        ):
+            snapshot_dir = Path(output_dir)
         outcome = walk_guide(
             opened, inventory, checks=checks, progress=progress,
             timeout_s=walk_timeout,
@@ -806,6 +812,8 @@ def run_uploaded_guide(
             aliases=aliases,
             video_origin=video_origin,
             heartbeat=heartbeat_callback,
+            snapshot_dir=snapshot_dir,
+            snapshot_leaks=lambda text: _contains_secret(text, username, password),
         )
         notes = {
             step_id: _scrub(note, username, password)
@@ -819,7 +827,10 @@ def run_uploaded_guide(
             )
             if safe:
                 evidence[step_id] = safe
-        produced = _inventory_report(inventory, outcome.statuses, notes, evidence, outcome.timestamps, outcome.suspects)
+        produced = _inventory_report(
+            inventory, outcome.statuses, notes, evidence, outcome.timestamps, outcome.suspects,
+            getattr(outcome, "snapshots", None),
+        )
         # Company Information is read in its own tab only after the walk, so
         # the guide order is never disturbed.
         if instance is None:
@@ -985,12 +996,14 @@ def _inventory_report(
     evidence: dict[str, tuple[str, ...]] | None = None,
     timestamps: dict[str, tuple[float, float]] | None = None,
     suspects: dict[str, tuple[str, ...]] | None = None,
+    snapshots: dict[str, str] | None = None,
 ) -> tuple[ReportStep, ...]:
     statuses = statuses or {}
     notes = notes or {}
     evidence = evidence or {}
     timestamps = timestamps or {}
     suspects = suspects or {}
+    snapshots = snapshots or {}
     items = []
     for step in inventory.steps:
         status = statuses.get(step.step_id, "NOT_RUN")
@@ -1019,6 +1032,7 @@ def _inventory_report(
             t_start=t_start,
             t_end=t_end,
             suspect=suspects.get(step.step_id, ()),
+            snapshot=snapshots.get(step.step_id, "") if status != "PASS" else "",
         ))
     return tuple(items)
 

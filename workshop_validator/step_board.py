@@ -13,6 +13,7 @@ import re
 from typing import Mapping, Sequence
 
 from .guide_inventory import GuideInventory, GuideStep
+from .failure_snapshot import SNAPSHOT_HREF
 from .report import ReportStep
 from . import theme
 from .org_instance import UNKNOWN, label as instance_label
@@ -346,6 +347,7 @@ class StepOutcome:
     reason: str = ""
     evidence_ids: tuple[str, ...] = ()
     suspect: tuple[str, ...] = ()
+    snapshot: str = ""
 
 
 @dataclass(frozen=True)
@@ -358,6 +360,7 @@ class StepView:
     step_id: str = ""
     status: str = ""
     chips: tuple[str, ...] = ()
+    snapshot: str = ""
 
 
 @dataclass(frozen=True)
@@ -401,6 +404,7 @@ def outcomes_from_report_steps(steps: Sequence[ReportStep]) -> dict[str, StepOut
             reason=step.note,
             evidence_ids=tuple(step.evidence_ids),
             suspect=step.suspect,
+            snapshot=getattr(step, "snapshot", "") or "",
         )
     return outcomes
 
@@ -809,7 +813,16 @@ def _view_step(step: GuideStep, outcome: StepOutcome | None) -> StepView:
         step_id=step.step_id,
         status=outcome.status if isinstance(outcome.status, str) else "",
         chips=chips,
+        snapshot=_snapshot_href(outcome),
     )
+
+
+def _snapshot_href(outcome: StepOutcome) -> str:
+    """Only a run-dir relative snapshots/ path, and never on a PASS."""
+    href = outcome.snapshot if isinstance(outcome.snapshot, str) else ""
+    if outcome.status == "PASS" or not SNAPSHOT_HREF.fullmatch(href):
+        return ""
+    return href
 
 
 def _display(outcome: StepOutcome) -> tuple[str, str, str]:
@@ -1297,6 +1310,11 @@ def render_run_report(
                 if step.reason:
                     sections_html.append(
                         f"<div class='step-reason'>{escape(step.reason)}</div>"
+                    )
+
+                if step.snapshot and SNAPSHOT_HREF.fullmatch(step.snapshot):
+                    sections_html.append(
+                        f"<div class='step-reason'><a href='{escape(step.snapshot)}'>Failure snapshot</a></div>"
                     )
 
                 if step.chips:

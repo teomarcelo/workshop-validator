@@ -22,6 +22,7 @@ from dataclasses import dataclass, field, replace
 from urllib.parse import urlparse
 
 from .browser_worker import BrowserActionError
+from .failure_snapshot import SNAPSHOT_STATUSES, save_failure_snapshot
 from .guide_inventory import GuideStep
 from .live_test import click_preview_send, preview_composer, wait_for_live_test
 
@@ -123,6 +124,8 @@ class WalkOutcome:
     executed: tuple[str, ...] = field(default_factory=tuple)
     suspects: dict[str, tuple[str, ...]] = field(default_factory=dict)
     timestamps: dict[str, tuple[float, float]] = field(default_factory=dict)
+    # Non-PASS steps: snapshot JSON path relative to the run dir.
+    snapshots: dict[str, str] = field(default_factory=dict)
 
 
 def norm(value: str | None) -> str:
@@ -3693,7 +3696,7 @@ def _parse_aria_line(line: str) -> tuple[str, str, str, dict, str] | None:
     return indent, role, name, attrs, value
 
 
-def _redact_aria_snapshot(snapshot: str) -> str:
+def _redact_aria_snapshot(snapshot: str, limit: int = 600) -> str:
     """Redact accessibility tree: keep structure, allow-listed roles/names/glyphs only."""
     dismiss_lower = set(name.lower() for name in _POPUP_DISMISS_NAMES)
     lines = []
@@ -3738,8 +3741,8 @@ def _redact_aria_snapshot(snapshot: str) -> str:
         lines.append(f"{indent}- {role}{name_out}{attrs_out}{value_out}")
 
     joined = " / ".join(lines)
-    if len(joined) > 600:
-        return joined[:597] + "..."
+    if len(joined) > limit:
+        return joined[: limit - 3] + "..."
     return joined
 
 
@@ -5873,6 +5876,8 @@ def walk_guide(
     aliases: dict[str, str] | None = None,
     video_origin: float | None = None,
     heartbeat: Callable[[str, int, int, str, str, float], None] | None = None,
+    snapshot_dir=None,
+    snapshot_leaks: Callable[[str], bool] | None = None,
 ) -> WalkOutcome:
     """Run steps in printed order.
 
@@ -5902,6 +5907,7 @@ def walk_guide(
     evidence: dict[str, tuple[str, ...]] = {}
     suspects: dict[str, tuple[str, ...]] = {}
     timestamps: dict[str, tuple[float, float]] = {}
+    snapshots: dict[str, str] = {}
     executed: list[str] = []
     total = len(steps)
     if progress is not None:
@@ -5976,6 +5982,20 @@ def walk_guide(
                 result.suspect,
             )
         t_end = _clock()
+        if snapshot_dir is not None and result.status in SNAPSHOT_STATUSES:
+            # A snapshot never changes the status and never stops the walk.
+            try:
+                snapshots[step.step_id] = save_failure_snapshot(
+                    state.page, snapshot_dir, index, step.step_id, result.status,
+                    result.note or "", roots=_roots(state.page),
+                    redact_tree=_redact_aria_snapshot, leaks=snapshot_leaks,
+                    clock=state.clock,
+                )
+            except Exception as exc:
+                result = replace(
+                    result,
+                    note=f"{result.note or ''} Failure snapshot not saved ({type(exc).__name__}).".strip(),
+                )
         statuses[step.step_id] = result.status
         if result.note:
             notes[step.step_id] = result.note
@@ -5993,4 +6013,4 @@ def walk_guide(
                 blocked = result.note or "The following steps were not run."
             else:
                 blocked = "The org session was blocked, so the following steps were not run."
-    return WalkOutcome(statuses, notes, evidence, tuple(executed), suspects, timestamps)
+    return WalkOutcome(statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots)
