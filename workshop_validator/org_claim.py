@@ -1,4 +1,4 @@
-"""Claim a new verification org from the event portal (W-042, W-043).
+"""Claim a new verification org from the event portal (W-042, W-097).
 
 The owner gives only the event code. The portal address and the code live in
 a private file, ``~/.workshop-validator/org-claim.json``, readable only by
@@ -12,9 +12,17 @@ Modes:
   submitted.
 * ``--claim``: submit the event code, open the claimed org's details, read
   the username and password by label, and append one org to
-  ``verification-orgs.json``. Refused unless the last run's org decision
-  said move on and no unused org is left. ``--force`` (owner only) skips that
-  check.
+  ``verification-orgs.json``. W-097: allowed whenever the owner's code is set
+  in org-claim.json. Only one claim runs at a time (a non-blocking lock held
+  for the whole claim). Each event code (kept as its SHA-256) is CLAIMED at
+  most once and submitted at most 3 times; a try counts only at the submit
+  click. Only a username that was not on the page before submit and is not in
+  the org file is saved. W-098, W-099: the org gate then points at the new org
+  and its floor, so the retired orgs below it are never used again (a freeze
+  stays).
+* ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
+  point the gate (and floor) at the last org in the org file. Refused unless
+  the marker says CLAIMED and the gate floor is lower.
 * ``--guides``: download the exercise-guide PDFs linked on the portal into
   ``team/guide-inbox/``.
 
@@ -33,6 +41,7 @@ from urllib.parse import urljoin, urlparse
 import argparse
 import contextlib
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -40,14 +49,18 @@ import sys
 import tempfile
 import time
 
-from .automate import FAILED, ORGS_NAME, SUCCESS, load_gate, load_orgs
+from .automate import ORGS_NAME, gate_floor, load_gate, load_orgs, update_gate
 
 CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
 ATTEMPT = Path("team") / "claim-attempt"
+RUN_LOCK = Path("team") / ".claim-run.lock"
+MAX_ATTEMPTS = 3
 LEFT_PORTAL = "left the https portal"
-FORCE_REFUSED = "--force needs the owner at a terminal"
-ATTEMPT_REFUSED = "a claim was already tried for this run"
+MARKER_REFUSED = "the claim marker could not be read"
+CLAIMED_REFUSED = "this event code was already claimed"
+RUNNING_REFUSED = "another claim is running"
+CAP_REFUSED = f"this event code was already tried {MAX_ATTEMPTS} times"
 
 OK, NEEDS_REVIEW_EXIT, REFUSED, INCONCLUSIVE = 0, 1, 2, 3
 
@@ -55,11 +68,21 @@ _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "me
          "source", "track", "wbr"}
 _SKIP = {"script", "style", "template", "noscript"}
 _EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-_LABELS = {"username": ("username", "user name"), "password": ("password",)}
+_EMAIL_IN = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+_LABELS = {"username": ("username", "user name", "salesforce org username"),
+           "password": ("password", "salesforce org password")}
 
 
 class ClaimError(Exception):
     """A refusal or failure with a message that is safe to print."""
+
+
+class ClaimRefused(ClaimError):
+    """The claim was refused before anything was submitted (exit 2)."""
+
+
+class GateNotUpdated(Exception):
+    """The org was claimed and saved, but the gate step failed (exit 3). The message is safe."""
 
 
 # ---------------------------------------------------------------- HTML model
@@ -258,13 +281,46 @@ def _label_values(tokens: list[str], label: str) -> set[str]:
     return values
 
 
-def extract_credentials(html: str) -> tuple[str, str] | None:
-    """Username and password read by label, or None when anything is unsure."""
+def usernames_on_page(html: str) -> set[str]:
+    """Every username-like value on a page, lowercased: labelled values and any email shape."""
     tokens = _tokens(parse(html))
+    seen = {value.strip().lower() for value in _label_values(tokens, "username")}
+    for token in tokens:
+        seen.update(match.lower() for match in _EMAIL_IN.findall(token))
+    return seen
+
+
+def _block_password(root: Node, username: str) -> str | None:
+    """The one password inside the blocks that hold this username and no other."""
+    found: set[str] = set()
+    for node in (root, *root.walk()):
+        tokens = _tokens(node)
+        if _label_values(tokens, "username") == {username}:
+            passwords = _label_values(tokens, "password")
+            if len(passwords) == 1:
+                found |= passwords
+    return found.pop() if len(found) == 1 else None
+
+
+def extract_credentials(html: str, exclude=frozenset()) -> tuple[str, str] | None:
+    """Username and password read by label, or None when anything is unsure.
+
+    exclude holds usernames seen before submit or already in the org file. Exactly
+    one username on the page may be new; its password is read from the same block
+    (the containers that hold that username and no other), never page-wide.
+    """
+    root = parse(html)
+    tokens = _tokens(root)
     users, passwords = _label_values(tokens, "username"), _label_values(tokens, "password")
-    if len(users) != 1 or len(passwords) != 1:
+    skip = {str(name).strip().lower() for name in exclude}
+    new = {user for user in users if user.strip().lower() not in skip}
+    # One username that is new, and never more password values than username blocks.
+    if len(new) != 1 or not passwords or len(passwords) > len(users):
         return None
-    username, password = users.pop(), passwords.pop()
+    username = new.pop()
+    password = _block_password(root, username)
+    if password is None:
+        return None
     if not _EMAIL.match(username):
         return None
     if not (8 <= len(password) <= 128) or any(c.isspace() for c in password):
@@ -335,14 +391,13 @@ def count_orgs(root: Path) -> int:
 
 
 def claim_allowed(root: Path) -> tuple[bool, str]:
-    """W-043: claim only when the org rule says move on and no unused org is left."""
-    gate = load_gate(Path(root))
-    last = gate.get("last_outcome")
-    if last not in {SUCCESS, FAILED}:
-        return False, "the last run did not end in a success or a real failure"
-    total = count_orgs(root)
-    if int(gate.get("org") or 0) < total:
-        return False, "an unused org remains"
+    """W-097: claim only when the owner's code is set in org-claim.json."""
+    try:
+        config = load_config(root)
+        if not config.get("event_code"):
+            return False, "no event_code in org-claim.json"
+    except ClaimError as exc:
+        return False, str(exc)
     return True, ""
 
 
@@ -354,44 +409,87 @@ def last_run_id(root: Path):
     return load_gate(Path(root)).get("last_run")
 
 
-def attempt_allowed(root: Path) -> bool:
-    """One claim per gate run: a second is refused unless the earlier one ended CLAIMED."""
+def code_digest(code: str) -> str:
+    """SHA-256 of the event code. The marker keeps this, never the code."""
+    return hashlib.sha256(str(code).encode("utf-8")).hexdigest()
+
+
+@contextlib.contextmanager
+def claim_run_lock(root: Path):
+    """A non-blocking exclusive flock held for a whole claim. Refuses when another claim holds it."""
+    path = Path(root) / RUN_LOCK
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ClaimRefused(RUNNING_REFUSED) from None
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+def _read_marker(root: Path) -> dict | None:
+    """The claim marker, {} when there is none, None when it cannot be read."""
     path = _attempt_path(root)
     if not path.exists():
-        return True
+        return {}
     try:
         marker = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return False  # unreadable marker: assume a claim was tried
-    if not isinstance(marker, dict):
-        return False
-    return marker.get("last_run") != last_run_id(root) or marker.get("result") == "CLAIMED"
+        return None
+    return marker if isinstance(marker, dict) else None
 
 
-def reserve_attempt(root: Path) -> bool:
-    """Create the attempt marker with O_EXCL before the browser opens.
+def _claimed_digests(marker: dict) -> set[str]:
+    claimed = marker.get("claimed")
+    digests = {d for d in claimed if isinstance(d, str)} if isinstance(claimed, list) else set()
+    if marker.get("result") == "CLAIMED" and isinstance(marker.get("code_sha256"), str):
+        digests.add(marker["code_sha256"])
+    return digests
 
-    Under a flock, an earlier marker that ended CLAIMED (or belongs to another
-    run) is removed first. Of two concurrent claims only one can create it.
+
+def reserve_attempt(root: Path, code: str) -> dict:
+    """Check and record a new attempt before the browser opens. The caller holds claim_run_lock.
+
+    Refused (ClaimRefused) when the marker is unreadable, when this event code was
+    already CLAIMED, or when it was submitted MAX_ATTEMPTS times. A different code
+    can be claimed right away (W-099). No try is counted here: mark_attempt
+    ("started") counts it just before the submit click. Returns the marker written.
     """
-    path = _attempt_path(root)
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with _org_lock(path):
-        if path.exists():
-            if not attempt_allowed(root):
-                return False
-            path.unlink()
-        try:
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            return False
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(json.dumps({"last_run": last_run_id(root), "result": "started"}) + "\n")
-    return True
+    run, digest = last_run_id(root), code_digest(code)
+    marker = _read_marker(root)
+    if marker is None:
+        raise ClaimRefused(MARKER_REFUSED)  # unreadable marker: assume a claim was tried
+    claimed = _claimed_digests(marker)
+    if digest in claimed:
+        raise ClaimRefused(CLAIMED_REFUSED)
+    counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
+    tried = counts.get(digest, 0)
+    if not isinstance(tried, int) or isinstance(tried, bool) or tried >= MAX_ATTEMPTS:
+        raise ClaimRefused(CAP_REFUSED)
+    marker = {"last_run": run, "result": "reserved", "code_sha256": digest,
+              "code_attempts": dict(counts), "claimed": sorted(claimed)}
+    _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
+    return marker
 
 
-def mark_attempt(root: Path, last_run, result: str) -> None:
-    _atomic_write(_attempt_path(root), json.dumps({"last_run": last_run, "result": result}) + "\n")
+def mark_attempt(root: Path, marker: dict, result: str) -> None:
+    """Record a result. "started" counts one try for this code; "CLAIMED" spends the code.
+    The marker dict is updated in place, so later results keep the counts."""
+    digest = marker.get("code_sha256")
+    if result == "started" and isinstance(digest, str):
+        counts = dict(marker.get("code_attempts") or {})
+        counts[digest] = int(counts.get(digest, 0)) + 1
+        marker["code_attempts"] = counts
+    elif result == "CLAIMED" and isinstance(digest, str):
+        marker["claimed"] = sorted(set(marker.get("claimed") or ()) | {digest})
+    marker["result"] = result
+    _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -413,10 +511,53 @@ def _atomic_write(path: Path, text: str) -> None:
 
 
 def append_org(root: Path, username: str, password: str) -> int:
-    """Append one org in the loader's format, atomically, mode 0600. Returns its number."""
+    """Append one org in the loader's format, atomically, mode 0600. Returns its 1-based number."""
     path = Path(root) / ORGS_NAME
     with _org_lock(path):
         return _append_locked(path, username, password)
+
+
+def point_gate_at(root: Path, number: int) -> None:
+    """W-098, W-099: the next automate run uses org `number` (1-based). automate's gate["org"]
+    is a 0-based index; gate["floor"] gets the same index, so no run goes back to a retired
+    org. Written atomically under automate's gate lock; a freeze and other keys are kept."""
+    def change(gate: dict) -> None:
+        gate["org"] = gate["floor"] = max(number - 1, gate_floor(gate))
+    update_gate(Path(root), change)
+
+
+def repoint(root: Path) -> str:
+    """Point the gate (and floor) at the last org in the org file after a CLAIMED claim whose
+    gate step failed. Under the claim, org-file and gate locks. Refused unless the marker
+    says CLAIMED and the gate floor is lower than the last org."""
+    root = Path(root)
+    with claim_run_lock(root):
+        marker = _read_marker(root)
+        if not marker or marker.get("result") != "CLAIMED":
+            raise ClaimRefused("the last claim did not end CLAIMED")
+        with _org_lock(root / ORGS_NAME):
+            total = count_orgs(root)
+            if total < 1:
+                raise ClaimRefused("the org file has no org")
+
+            def change(gate: dict) -> None:
+                floor = gate.get("floor")
+                if isinstance(floor, int) and not isinstance(floor, bool) and floor >= total - 1:
+                    raise ClaimRefused("the gate floor is already at the last org")
+                gate["org"] = gate["floor"] = total - 1
+            update_gate(root, change)
+    return f"org-claim: REPOINTED gate at org {total}"
+
+
+def known_usernames(root: Path) -> set[str]:
+    """Usernames already in the org file, lowercased. Never printed."""
+    try:
+        orgs = load_orgs(Path(root))
+    except SystemExit:
+        return set()
+    except ValueError:
+        raise ClaimError("the org file has an unknown format") from None
+    return {str(org.get("username") or "").strip().lower() for org in orgs if isinstance(org, dict)} - {""}
 
 
 @contextlib.contextmanager
@@ -616,28 +757,43 @@ def claim(root: Path, config: dict) -> str:
     code = str(config.get("event_code") or "")
     if not code:
         raise ClaimError(f"{CONFIG_NAME} has no event_code")
+    with claim_run_lock(root):  # held for the whole claim: two claims never overlap
+        marker = reserve_attempt(root, code)
+        return _claim_locked(root, config, code, marker)
 
+
+def _claim_locked(root: Path, config: dict, code: str, marker: dict) -> str:
     portal_url = config["portal_url"]
-    last_run = last_run_id(root)
+    known = known_usernames(root)
 
     def run(_context, page):
         form = _open_form(page, portal_url)
         _require_portal(page, portal_url)
         page.locator(form["field"]).first.fill(code)
         _require_portal(page, portal_url)
-        mark_attempt(root, last_run, "started")  # before submitting: a crash still counts
+        seen = known | usernames_on_page(_flat(page))  # earlier events on the page are never new
+        _require_portal(page, portal_url)
+        mark_attempt(root, marker, "started")  # the try counts here, right before submit
         page.get_by_role("button", name=form["button"], exact=True).first.click()
         _settle(page)
-        creds, html = _poll(page, lambda h: extract_credentials(h) or find_detail_link(h))
+
+        def read(html):
+            return extract_credentials(html, seen)
+        creds, html = _poll(page, lambda h: read(h) or find_detail_link(h))
         _require_portal(page, portal_url)
         if isinstance(creds, dict):
             _follow(page, creds, portal_url)
-            creds, _ = _poll(page, extract_credentials)
+            creds, _ = _poll(page, read)
         if not isinstance(creds, tuple):
             return "org-claim: NEEDS_REVIEW could not read credentials"
         _require_portal(page, portal_url)
         number = append_org(root, *creds)
-        mark_attempt(root, last_run, "CLAIMED")
+        # CLAIMED before the gate step: a gate failure must never redeem the code again.
+        mark_attempt(root, marker, "CLAIMED")
+        try:
+            point_gate_at(root, number)
+        except Exception:  # never echo it; --repoint fixes the gate later
+            raise GateNotUpdated(f"org-claim: CLAIMED org {number}, gate not updated") from None
         return f"org-claim: CLAIMED org {number}"
     return _browser(run)
 
@@ -671,29 +827,26 @@ def guides(root: Path, config: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Claim a verification org from the event portal.")
+    parser = argparse.ArgumentParser(description="Claim a verification org from the event portal (W-097).")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Default. Stop at the Add Event form.")
-    mode.add_argument("--claim", action="store_true", help="Submit the event code and save the new org.")
+    mode.add_argument("--claim", action="store_true", help="W-097: Submit the event code and save the new org.")
     mode.add_argument("--guides", action="store_true", help="Download linked exercise-guide PDFs.")
+    mode.add_argument("--repoint", action="store_true",
+                      help="After 'CLAIMED org N, gate not updated': point the gate at the last org.")
     parser.add_argument("--force", action="store_true",
-                        help="Owner only, at a terminal: claim even when the org rule does not say move on.")
+                        help="Accepted as a no-op alias for --claim.")
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     args = parser.parse_args(argv)
     root = Path(args.private_root).expanduser()
     try:
+        if args.repoint:
+            print(repoint(root))
+            return OK
         if args.claim:
-            if args.force:
-                if not sys.stdin.isatty():
-                    print(f"org-claim: REFUSED {FORCE_REFUSED}")
-                    return REFUSED
-            else:
-                allowed, reason = claim_allowed(root)
-                if not allowed:
-                    print(f"org-claim: REFUSED {reason}")
-                    return REFUSED
-            if not reserve_attempt(root):
-                print(f"org-claim: REFUSED {ATTEMPT_REFUSED}")
+            allowed, reason = claim_allowed(root)
+            if not allowed:
+                print(f"org-claim: REFUSED {reason}")
                 return REFUSED
         config = load_config(root)
         if args.claim:
@@ -702,6 +855,12 @@ def main(argv: list[str] | None = None) -> int:
             line = guides(root, config)
         else:
             line = dry_run(config)
+    except GateNotUpdated as exc:
+        print(str(exc))
+        return INCONCLUSIVE
+    except ClaimRefused as exc:
+        print(f"org-claim: REFUSED {exc}")
+        return REFUSED
     except ClaimError as exc:
         reason = str(exc)
         print(f"org-claim: {'SIGN_IN' if reason == 'sign-in required' else 'STOPPED'} {reason}")

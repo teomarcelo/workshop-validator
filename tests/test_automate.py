@@ -171,7 +171,9 @@ class KeepOrgTests(unittest.TestCase):
             self.assertEqual(gate["kept_org_reason"], {
                 "step_id": "s2", "verdict": "FALSE_FAILURE", "run_id": run_dir.name})
             self.assertEqual(next_org_index(gate), 1)
-            self.assertEqual(sorted(p.name for p in root.iterdir()), ["gate.json", "runs"])
+            # Only gate.json changes; .gate.json.lock is the shared gate lock file.
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.name != ".gate.json.lock"),
+                             ["gate.json", "runs"])
 
     def test_old_summary_reads_the_stop_from_board_order_and_verifier_list_format(self):
         with tempfile.TemporaryDirectory() as folder:

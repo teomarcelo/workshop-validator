@@ -2,7 +2,9 @@
 
 import contextlib
 import fcntl
+import hashlib
 import io
+import itertools
 import json
 import os
 import stat
@@ -10,10 +12,12 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from workshop_validator import org_claim
-from workshop_validator.automate import FAILED, INCONCLUSIVE, SUCCESS, load_orgs, save_gate
+from workshop_validator import automate
+from workshop_validator.automate import FAILED, INCONCLUSIVE, SUCCESS, load_gate, load_orgs, save_gate
 
 PORTAL = """
 <html><body><header>Synthetic portal</header>
@@ -45,6 +49,31 @@ DETAILS_INPUTS = """
 AMBIGUOUS = """
 <dl><dt>Username</dt><dd>first@example.test</dd><dt>Password</dt><dd>FirstSynth1!</dd></dl>
 <dl><dt>Username</dt><dd>second@example.test</dd><dt>Password</dt><dd>SecondSynth2!</dd></dl>
+"""
+
+OLD_BLOCK = """
+<section class="event"><h3>Earlier event</h3><p>OrgClaim Code: SYNTH-OLD</p>
+  <div><span class="icon"></span>Salesforce Org Username:</div><div>old.learner@example.test</div>
+  <div><span class="icon"></span>Salesforce Org Password:</div><div>OldSynth1!pass</div>
+</section>
+"""
+
+NEW_BLOCK = """
+<section class="event"><h3>Just redeemed</h3><p>OrgClaim Code: SYNTH-NEW</p>
+  <div><span class="icon"></span>Salesforce Org Username:</div><div>new.learner@example.test</div>
+  <div><span class="icon"></span>Salesforce Org Password:</div><div>NewSynth2!pass</div>
+</section>
+"""
+
+OTHER_NEW_BLOCK = NEW_BLOCK.replace("new.learner", "other.learner").replace("NewSynth2", "OtherSynth3")
+
+SALESFORCE_ORG_LABELS = """
+<div class="credentials">
+  <div><span class="icon"></span>Salesforce Org Username:</div>
+  <div>salesforce.user@example.test</div>
+  <div><span class="icon"></span>Salesforce Org Password:</div>
+  <div>Salesforce1!Pass</div>
+</div>
 """
 
 
@@ -87,11 +116,39 @@ class PageLogicTests(unittest.TestCase):
         self.assertEqual(org_claim.extract_credentials(DETAILS_INPUTS),
                          ("learner.two@example.test", "An0ther$Synthetic"))
 
+    def test_extractor_reads_salesforce_org_username_and_password_labels(self):
+        """W-097: accept 'Salesforce Org Username:' and 'Salesforce Org Password:' labels."""
+        self.assertEqual(org_claim.extract_credentials(SALESFORCE_ORG_LABELS),
+                         ("salesforce.user@example.test", "Salesforce1!Pass"))
+
     def test_extractor_refuses_ambiguous_or_badly_shaped_values(self):
         self.assertIsNone(org_claim.extract_credentials(AMBIGUOUS))
         self.assertIsNone(org_claim.extract_credentials(DETAILS.replace("learner.synthetic@example.test", "not-an-email")))
         self.assertIsNone(org_claim.extract_credentials(DETAILS.replace("Synth3tic!Pass", "********")))
         self.assertIsNone(org_claim.extract_credentials("<p>Username</p><p>Password</p>"))
+
+    def test_two_event_blocks_pick_the_one_new_username_and_its_own_password(self):
+        """Brief point 2: the old block is excluded; the password comes from the new block."""
+        page = OLD_BLOCK + NEW_BLOCK
+        self.assertEqual(org_claim.extract_credentials(page, {"old.learner@example.test"}),
+                         ("new.learner@example.test", "NewSynth2!pass"))
+        self.assertEqual(org_claim.extract_credentials(NEW_BLOCK + OLD_BLOCK, {"OLD.learner@example.test"}),
+                         ("new.learner@example.test", "NewSynth2!pass"))
+
+    def test_two_new_usernames_or_only_old_ones_are_not_read(self):
+        page = OLD_BLOCK + NEW_BLOCK + OTHER_NEW_BLOCK
+        self.assertIsNone(org_claim.extract_credentials(page, {"old.learner@example.test"}))
+        self.assertIsNone(org_claim.extract_credentials(OLD_BLOCK, {"old.learner@example.test"}))
+
+    def test_a_new_username_without_a_password_in_its_own_block_is_not_read(self):
+        """The password is never borrowed from another block."""
+        new_without = NEW_BLOCK.replace("NewSynth2!pass", "")
+        new_without = new_without.replace('<div><span class="icon"></span>Salesforce Org Password:</div><div></div>', "")
+        self.assertIsNone(org_claim.extract_credentials(OLD_BLOCK + new_without, {"old.learner@example.test"}))
+
+    def test_usernames_on_page_collects_labelled_and_email_values(self):
+        seen = org_claim.usernames_on_page(OLD_BLOCK + "<p>Signed in as Owner.Synthetic@example.test</p>")
+        self.assertEqual(seen, {"old.learner@example.test", "owner.synthetic@example.test"})
 
     def test_guide_links_are_absolute_and_unique(self):
         links = org_claim.find_guide_links(PORTAL, "https://portal.example.test/home")
@@ -114,8 +171,9 @@ class WriterTests(unittest.TestCase):
             orgs = load_orgs(root)
             self.assertEqual([o["username"] for o in orgs], ["a@example.test", "b@example.test"])
             self.assertEqual(orgs[0]["password"], "Shared1!x")
-            self.assertEqual([p.name for p in root.iterdir() if not p.name.endswith(".lock")],
-                             ["verification-orgs.json"])
+            # The gate is pointed at the new org by claim(), after CLAIMED is marked.
+            files = sorted([p.name for p in root.iterdir() if not p.name.endswith(".lock")])
+            self.assertEqual(files, ["verification-orgs.json"])
 
     def test_a_failed_write_leaves_the_old_file_untouched(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -167,54 +225,66 @@ class ClaimGateTests(unittest.TestCase):
         save_gate(root, {"org": gate_org, "frozen": last != SUCCESS, "reason": "", "last_outcome": last})
         return root
 
-    def _claim(self, folder, *extra):
+    def _claim(self, folder, *extra, event_code="SYNTH"):
+        """main --claim with the real claim() and its locks; only the browser is replaced."""
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(org_claim, "claim") as claim, \
-                mock.patch.object(org_claim, "load_config", return_value={"portal_url": "https://x.test"}):
-            claim.return_value = "org-claim: CLAIMED org 3"
+        config = {"portal_url": "https://x.test", "event_code": event_code}
+        with contextlib.redirect_stdout(out), mock.patch.object(org_claim, "_browser") as browser, \
+                mock.patch.object(org_claim, "load_config", return_value=config):
+            browser.return_value = "org-claim: CLAIMED org 3"
             code = org_claim.main(["--claim", "--private-root", folder, *extra])
-        return code, out.getvalue(), claim
+        return code, out.getvalue(), browser
 
-    def test_refused_while_an_unused_org_remains(self):
+    def test_w097_allowed_with_inconclusive_gate_and_unused_org(self):
+        """W-097: claim allowed with inconclusive gate and unused org left."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._root(folder, orgs=2, gate_org=1, last=INCONCLUSIVE)
+            code, out, claim = self._claim(folder)
+            self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+            claim.assert_called_once()
+
+    def test_w043_refused_while_an_unused_org_remains_changed_to_w097_allowed(self):
+        """W-043 test changed for W-097: claim now allowed regardless of unused orgs."""
         with tempfile.TemporaryDirectory() as folder:
             self._root(folder, orgs=2, gate_org=1, last=SUCCESS)
             code, out, claim = self._claim(folder)
-            self.assertEqual(code, org_claim.REFUSED)
-            self.assertIn("unused org remains", out)
-            claim.assert_not_called()
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
 
-    def test_refused_after_an_inconclusive_run(self):
+    def test_w043_refused_after_an_inconclusive_run_changed_to_w097_allowed(self):
+        """W-043 test changed for W-097: claim now allowed regardless of last outcome."""
         with tempfile.TemporaryDirectory() as folder:
             self._root(folder, orgs=2, gate_org=2, last=INCONCLUSIVE)
             code, out, claim = self._claim(folder)
-            self.assertEqual(code, org_claim.REFUSED)
-            claim.assert_not_called()
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
 
-    def test_allowed_when_every_org_is_used_and_the_rule_says_move_on(self):
+    def test_w043_allowed_when_every_org_is_used_changed_to_w097_still_allowed(self):
+        """W-043 test changed for W-097: still allowed with event_code set."""
         with tempfile.TemporaryDirectory() as folder:
             self._root(folder, orgs=2, gate_org=2, last=FAILED)
             code, out, claim = self._claim(folder)
             self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
             claim.assert_called_once()
 
-    def test_force_skips_the_rule(self):
+    def test_w097_force_is_accepted_as_noop_alias(self):
+        """W-097: --force accepted as no-op alias, no tty check."""
         with tempfile.TemporaryDirectory() as folder:
             self._root(folder, orgs=2, gate_org=0, last=INCONCLUSIVE)
-            with mock.patch.object(org_claim.sys, "stdin") as stdin:
-                stdin.isatty.return_value = True
-                code, _, claim = self._claim(folder, "--force")
+            code, _, claim = self._claim(folder, "--force")
             self.assertEqual(code, 0)
             claim.assert_called_once()
 
-    def test_force_is_refused_without_an_owner_at_a_terminal(self):
+    def test_w097_refused_without_event_code(self):
+        """W-097: claim refused when event_code not set in org-claim.json."""
         with tempfile.TemporaryDirectory() as folder:
             self._root(folder, orgs=2, gate_org=0, last=INCONCLUSIVE)
-            with mock.patch.object(org_claim.sys, "stdin") as stdin:
-                stdin.isatty.return_value = False
-                code, out, claim = self._claim(folder, "--force")
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out), \
+                    mock.patch.object(org_claim, "load_config", return_value={"portal_url": "https://x.test"}):
+                code = org_claim.main(["--claim", "--private-root", folder])
             self.assertEqual(code, org_claim.REFUSED)
-            self.assertIn("REFUSED --force needs the owner at a terminal", out)
-            claim.assert_not_called()
+            self.assertIn("no event_code", out.getvalue())
 
     def _marker(self, folder, last_run, result):
         path = Path(folder) / "team" / "claim-attempt"
@@ -226,51 +296,191 @@ class ClaimGateTests(unittest.TestCase):
         gate = json.loads((root / "gate.json").read_text())
         save_gate(root, {**gate, "last_run": run_id})
 
-    def test_second_claim_for_the_same_run_is_refused(self):
-        with tempfile.TemporaryDirectory() as folder:
-            self._with_run(folder, "run-1")
-            self._marker(folder, "run-1", "started")
-            code, out, claim = self._claim(folder)
-            self.assertEqual(code, org_claim.REFUSED)
-            self.assertIn("REFUSED a claim was already tried for this run", out)
-            claim.assert_not_called()
-
-    def test_the_marker_is_reserved_before_the_browser_opens(self):
-        with tempfile.TemporaryDirectory() as folder:
-            self._with_run(folder, "run-1")
-            first, _, claim = self._claim(folder)  # claim() mocked: no browser, no marker from it
-            second, out, again = self._claim(folder)
-            self.assertEqual((first, second), (0, org_claim.REFUSED))
-            self.assertIn("REFUSED a claim was already tried for this run", out)
-            again.assert_not_called()
-            marker = Path(folder) / "team" / "claim-attempt"
-            self.assertEqual(json.loads(marker.read_text()), {"last_run": "run-1", "result": "started"})
-            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
-
-    def test_only_one_of_many_concurrent_claims_reserves_the_attempt(self):
-        with tempfile.TemporaryDirectory() as folder:
-            self._with_run(folder, "run-1")
-            self._marker(folder, "run-0", "CLAIMED")
-            start, results = threading.Barrier(8), []
-
-            def go():
-                start.wait()
-                results.append(org_claim.reserve_attempt(Path(folder)))
-            workers = [threading.Thread(target=go) for _ in range(8)]
-            for worker in workers:
-                worker.start()
-            for worker in workers:
-                worker.join(5)
-            self.assertEqual(sorted(results), [False] * 7 + [True])
-
     def test_claim_is_allowed_after_a_claimed_attempt_or_for_a_new_run(self):
+        """main's test, restored (W-099): a CLAIMED or older marker never blocks a new code."""
         for marker_run, result in (("run-1", "CLAIMED"), ("run-0", "started")):
-            with tempfile.TemporaryDirectory() as folder:
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as folder:
                 self._with_run(folder, "run-1")
                 self._marker(folder, marker_run, result)
                 code, _, claim = self._claim(folder)
                 self.assertEqual(code, 0)
                 claim.assert_called_once()
+
+    def _claimed_marker(self, folder, code):
+        digest = hashlib.sha256(code.encode()).hexdigest()
+        path = Path(folder) / "team" / "claim-attempt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"last_run": "run-1", "result": "CLAIMED", "code_sha256": digest,
+                                    "code_attempts": {digest: 1}, "claimed": [digest]}))
+
+    def test_w099_a_second_owner_code_is_claimed_right_after_the_first(self):
+        """Same run, first code CLAIMED: a different code is claimed at once (W-097, W-099)."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._claimed_marker(folder, "SYNTH")
+            code, out, claim = self._claim(folder, event_code="SYNTH-TWO")
+            self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+            claim.assert_called_once()
+
+    def test_w099_each_owner_code_is_claimed_only_once(self):
+        """A CLAIMED code is refused for every later run, not only the same run."""
+        for run in ("run-1", "run-2"):
+            with self.subTest(run=run), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, run)
+                self._claimed_marker(folder, "SYNTH")
+                code, out, claim = self._claim(folder)
+                self.assertEqual((code, out.strip()),
+                                 (org_claim.REFUSED, "org-claim: REFUSED this event code was already claimed"))
+                claim.assert_not_called()
+
+    def test_the_marker_is_reserved_before_the_browser_opens(self):
+        """The first claim reserves the marker; a reserved claim does not block the next."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            first, _, claim = self._claim(folder)  # claim() mocked: no browser, marker stays "started"
+            self.assertEqual(first, 0)
+            marker = Path(folder) / "team" / "claim-attempt"
+            self.assertTrue(marker.exists())
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            # W-099: reserving counts no try; only the submit click does.
+            self.assertEqual(json.loads(marker.read_text()),
+                             {"last_run": "run-1", "result": "reserved", "code_sha256": digest,
+                              "code_attempts": {}, "claimed": []})
+            self.assertNotIn("SYNTH", marker.read_text().replace(digest, ""))
+            self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+            second, out, again = self._claim(folder)
+            self.assertEqual(second, 0)  # W-097: allowed despite a "reserved" marker
+            again.assert_called_once()
+
+    def test_only_one_of_many_concurrent_claims_runs(self):
+        """The claim-run flock is held for the whole claim: of 8 concurrent claims one runs."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            start, release, entered, results = threading.Barrier(8), threading.Event(), [], []
+            config = {"portal_url": "https://x.test", "event_code": "SYNTH"}
+
+            def browser(_run):
+                entered.append(1)
+                release.wait(5)
+                return "org-claim: CLAIMED org 3"
+
+            def go():
+                start.wait()
+                try:
+                    results.append(org_claim.claim(Path(folder), config))
+                except org_claim.ClaimRefused as exc:
+                    results.append(str(exc))
+            with mock.patch.object(org_claim, "_browser", side_effect=browser):
+                workers = [threading.Thread(target=go) for _ in range(8)]
+                for worker in workers:
+                    worker.start()
+                for _ in range(100):  # the seven refusals return while the first claim runs
+                    if len(results) == 7:
+                        break
+                    threading.Event().wait(0.05)
+                running = list(results)
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+            self.assertEqual(running, [org_claim.RUNNING_REFUSED] * 7)
+            self.assertEqual(len(entered), 1)
+            self.assertEqual(sorted(results), sorted(["org-claim: CLAIMED org 3"] + [org_claim.RUNNING_REFUSED] * 7))
+
+    def test_a_claim_is_refused_while_the_run_lock_is_held_by_another_fd(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            lock_path = Path(folder) / "team" / ".claim-run.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                code, out, browser = self._claim(folder)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual((code, out.strip()), (org_claim.REFUSED, "org-claim: REFUSED another claim is running"))
+            browser.assert_not_called()
+            self.assertFalse((Path(folder) / "team" / "claim-attempt").exists())
+            code, _, browser = self._claim(folder)  # the lock is free again
+            self.assertEqual(code, 0)
+            browser.assert_called_once()
+
+    def _submit(self, folder, page, event_code="SYNTH"):
+        """main --claim through the real claim flow on a synthetic page."""
+        out = io.StringIO()
+        config = {"portal_url": PORTAL_URL, "event_code": event_code}
+        with contextlib.redirect_stdout(out), \
+                mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(None, page)), \
+                mock.patch.object(org_claim, "load_config", return_value=config):
+            code = org_claim.main(["--claim", "--private-root", folder])
+        return code, out.getvalue()
+
+    def _stop_after_submit(self):
+        return FakePage(_routes(), on_click=_to_details("https://elsewhere.example.test/done"))
+
+    def test_one_event_code_is_tried_at_most_three_times(self):
+        """Changed for W-099: a try is a submit click, so each try here submits and then stops."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            codes = []
+            for _ in range(3):
+                page = self._stop_after_submit()
+                codes.append(self._submit(folder, page)[0])
+                self.assertEqual(page.clicked, ["Submit"])
+            page = self._stop_after_submit()
+            code, out = self._submit(folder, page)
+            self.assertEqual(codes, [org_claim.INCONCLUSIVE] * 3)
+            self.assertEqual((code, out.strip()),
+                             (org_claim.REFUSED, "org-claim: REFUSED this event code was already tried 3 times"))
+            self.assertEqual((page.filled, page.clicked), ([], []))
+            marker = (Path(folder) / "team" / "claim-attempt").read_text()
+            self.assertNotIn("SYNTH", marker.replace(hashlib.sha256(b"SYNTH").hexdigest(), ""))
+            page = self._stop_after_submit()  # another code has its own count
+            self.assertEqual(self._submit(folder, page, event_code="SYNTH-TWO")[0], org_claim.INCONCLUSIVE)
+            self.assertEqual(page.clicked, ["Submit"])
+
+    def test_w099_a_stop_before_submit_uses_no_try(self):
+        """D: sign-in or form stops never reach the submit click, so they never use a try."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            marker = Path(folder) / "team" / "claim-attempt"
+            for _ in range(org_claim.MAX_ATTEMPTS + 1):
+                page = FakePage(_routes("http://portal.example.test/events/new"))  # stops before the form
+                code, out = self._submit(folder, page)
+                self.assertEqual((code, out.strip()), (org_claim.INCONCLUSIVE, "org-claim: STOPPED left the https portal"))
+                self.assertEqual(page.clicked, [])
+                self.assertEqual(json.loads(marker.read_text())["code_attempts"].get(digest, 0), 0)
+            page = self._stop_after_submit()  # the code still has all its tries
+            self.assertEqual(self._submit(folder, page)[0], org_claim.INCONCLUSIVE)
+            self.assertEqual(page.clicked, ["Submit"])
+            self.assertEqual(json.loads(marker.read_text())["code_attempts"], {digest: 1})
+
+    def test_claim_is_allowed_after_a_new_run_or_non_claimed_marker(self):
+        """W-097: allowed for a different run or a non-CLAIMED marker; a CLAIMED code is not."""
+        # Case 1: Different run with any status - allowed
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._marker(folder, "run-0", "started")
+            code, _, claim = self._claim(folder)
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
+        # Case 2 (changed for W-099): this same code was CLAIMED - blocked
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._claimed_marker(folder, "SYNTH")
+            code, _, claim = self._claim(folder)
+            self.assertEqual(code, org_claim.REFUSED)
+            claim.assert_not_called()
+
+    def test_w097_started_marker_does_not_block_next_claim(self):
+        """W-097: a 'started' marker for the same run no longer blocks the next claim."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._marker(folder, "run-1", "started")
+            code, _, claim = self._claim(folder)
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
 
     def test_errors_never_echo_their_message(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -435,8 +645,19 @@ class PortalBoundaryTests(unittest.TestCase):
             page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
             self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 1")
             marker = root / "team" / "claim-attempt"
-            self.assertEqual(json.loads(marker.read_text()), {"last_run": "run-7", "result": "CLAIMED"})
+            marker_data = json.loads(marker.read_text())
+            self.assertEqual((marker_data["last_run"], marker_data["result"]), ("run-7", "CLAIMED"))
             self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
+
+    def test_w098_gate_points_at_new_org_after_successful_claim(self):
+        """W-098: after successful claim, the org gate points at the new org."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-9"})
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 1")
+            gate = json.loads((root / "gate.json").read_text())
+            self.assertEqual(gate["org"], 0)  # automate's 0-based index of org 1
 
     def test_the_attempt_is_marked_before_the_submit_click(self):
         seen = []
@@ -450,8 +671,106 @@ class PortalBoundaryTests(unittest.TestCase):
                 page.url, page.html = "https://elsewhere.example.test/x", DETAILS
             with self.assertRaises(org_claim.ClaimError):
                 self._claim(root, FakePage(_routes(), on_click=on_click))
-            self.assertEqual(seen, [{"last_run": "run-8", "result": "started"}])
+            self.assertEqual([(m["last_run"], m["result"]) for m in seen], [("run-8", "started")])
             self.assertEqual(json.loads(marker.read_text())["result"], "started")
+
+    def _five_orgs(self, root, *, frozen=False):
+        (root / "verification-orgs.json").write_text(json.dumps(
+            {"orgs": [{"username": f"u{i}@example.test", "password": "Synth1!xx"} for i in range(5)]}))
+        save_gate(root, {"org": 5, "frozen": frozen, "reason": "", "last_outcome": SUCCESS, "last_run": "run-5"})
+
+    def test_w098_automate_selects_the_claimed_org_after_five_used_orgs(self):
+        """The gate holds automate's 0-based index: the next run picks the new username."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._five_orgs(root)
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 6")
+            index = automate.next_org_index(load_gate(root))
+            orgs = automate.load_orgs(root)
+            self.assertIsNotNone(index)
+            self.assertLess(index, len(orgs))
+            self.assertEqual(orgs[index]["username"], "learner.synthetic@example.test")
+
+    def test_w098_a_frozen_gate_stays_frozen_after_a_claim(self):
+        """Producer decision: the claim never clears a freeze; --reset-gate does."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._five_orgs(root, frozen=True)
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 6")
+            gate = load_gate(root)
+            self.assertTrue(gate["frozen"])
+            self.assertEqual(gate["org"], 5)
+
+    def test_a_gate_failure_after_the_org_is_saved_never_redeems_the_code_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-4"})
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            with mock.patch.object(org_claim, "update_gate", side_effect=OSError("disk")):
+                with self.assertRaises(org_claim.GateNotUpdated):
+                    self._claim(root, page)
+            self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
+            marker = json.loads((root / "team" / "claim-attempt").read_text())
+            self.assertEqual(marker["result"], "CLAIMED")
+            retry = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            with self.assertRaises(org_claim.ClaimRefused):
+                self._claim(root, retry)
+            self.assertEqual((retry.filled, retry.clicked), ([], []))
+
+    def _form_with_old_block(self):
+        return {PORTAL_URL: (PORTAL_URL, PORTAL),
+                "https://portal.example.test/events/new": ("https://portal.example.test/events/new",
+                                                           OLD_BLOCK + FORM)}
+
+    def test_a_claim_saves_the_new_block_not_the_earlier_event(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK + NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            self.assertEqual(self._claim(root, FakePage(self._form_with_old_block(), on_click=submit)),
+                             "org-claim: CLAIMED org 1")
+            self.assertEqual(load_orgs(root), [{"username": "new.learner@example.test", "password": "NewSynth2!pass"}])
+
+    def test_a_username_already_in_the_org_file_is_never_new(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", \
+                OLD_BLOCK.replace("old.learner", "u0") + NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "verification-orgs.json").write_text(json.dumps(
+                {"orgs": [{"username": "U0@example.test", "password": "Synth1!xx"}]}))
+            save_gate(root, {"org": 1, "last_outcome": SUCCESS, "last_run": "run-3"})
+            self.assertEqual(self._claim(root, FakePage(_routes(), on_click=submit)), "org-claim: CLAIMED org 2")
+            self.assertEqual(load_orgs(root)[1]["username"], "new.learner@example.test")
+
+    def test_two_new_blocks_after_submit_need_review(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK + NEW_BLOCK + OTHER_NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            line = self._claim(root, FakePage(self._form_with_old_block(), on_click=submit))
+            self.assertEqual(line, "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertFalse((root / "verification-orgs.json").exists())
+
+    def test_only_the_old_block_after_submit_keeps_polling_then_needs_review(self):
+        reads = []
+
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK
+            page.on_eval = lambda p: reads.append(1)
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            line = self._claim(root, FakePage(self._form_with_old_block(), on_click=submit))
+            self.assertEqual(line, "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertGreater(len(reads), 1, "the page was read once, not polled")
+            self.assertFalse((root / "verification-orgs.json").exists())
 
     def test_guides_only_from_https_links_on_the_portal_host(self):
         html = PORTAL + '<a href="http://portal.example.test/files/plain.pdf">Plain</a>' \
@@ -507,6 +826,40 @@ class LockAndInboxTests(unittest.TestCase):
                 os.close(lock)
             worker.join(5)
             self.assertEqual([o["username"] for o in load_orgs(root)], ["a@example.test", "b@example.test"])
+
+    def test_gate_writes_wait_for_the_shared_gate_lock(self):
+        """automate.save_gate and the claim's gate step take the same lock."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "frozen": False, "reason": ""})
+            lock = os.open(root / ".gate.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                writers = [threading.Thread(target=save_gate, args=(root, {"org": 2, "frozen": False})),
+                           threading.Thread(target=org_claim.point_gate_at, args=(root, 4))]
+                for writer in writers:
+                    writer.start()
+                    writer.join(0.5)
+                    self.assertTrue(writer.is_alive(), "a gate write did not wait for the lock")
+                self.assertEqual(load_gate(root)["org"], 0)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                os.close(lock)
+            for writer in writers:
+                writer.join(5)
+            self.assertIn(load_gate(root)["org"], {2, 3})
+
+    def test_gate_json_is_replaced_atomically(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 1, "frozen": False, "reason": ""})
+            before = (root / "gate.json").read_text()
+            with mock.patch("workshop_validator.automate.os.replace", side_effect=OSError("disk")):
+                with self.assertRaises(OSError):
+                    save_gate(root, {"org": 2, "frozen": False, "reason": ""})
+            self.assertEqual((root / "gate.json").read_text(), before)
+            self.assertEqual(sorted(p.name for p in root.iterdir() if not p.name.endswith(".lock")), ["gate.json"])
+            self.assertEqual(stat.S_IMODE((root / "gate.json").stat().st_mode), 0o600)
 
     def test_inbox_folder_is_private_even_when_it_already_existed(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -586,6 +939,165 @@ class GuidesResponseTests(unittest.TestCase):
             # Verify result: 1 saved, 2 skipped (404 and 302)
             self.assertIn("GUIDES 1", result)
             self.assertIn("skipped 2", result)
+
+
+
+class W099FloorTests(unittest.TestCase):
+    """W-098, W-099: after a claim no run goes back to the retired orgs below the gate floor."""
+
+    NEW = "learner.synthetic@example.test"
+
+    def _five_orgs_on_org_three(self, root, *, last=SUCCESS, run="run-2"):
+        """Five retired orgs, gate on org 3 (index 2): orgs 3 to 5 are still unused."""
+        (root / "verification-orgs.json").write_text(json.dumps(
+            {"orgs": [{"username": f"u{i}@example.test", "password": "Synth1!xx"} for i in range(5)]}))
+        save_gate(root, {"org": 2, "frozen": last != SUCCESS, "reason": "", "last_outcome": last,
+                         "last_run": run})
+
+    def _claim(self, root):
+        page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+        with mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(None, page)):
+            return org_claim.claim(root, {"portal_url": PORTAL_URL, "event_code": "SYNTHETIC"})
+
+    def _selected(self, root):
+        index = automate.next_org_index(load_gate(root))
+        return automate.load_orgs(root)[index]["username"]
+
+    def test_w098_claim_with_unused_old_orgs_never_selects_them_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._five_orgs_on_org_three(root)
+            self.assertEqual(self._claim(root), "org-claim: CLAIMED org 6")
+            gate = load_gate(root)
+            self.assertEqual((gate["org"], gate["floor"]), (5, 5))
+            self.assertEqual(self._selected(root), self.NEW)
+            # A gate write from before the claim (org 3) cannot bring the old orgs back.
+            automate.update_gate(root, lambda g: g.update(org=2))
+            self.assertEqual(self._selected(root), self.NEW)
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                automate.reset_gate(root)
+            self.assertEqual(out.getvalue().strip(), "Gate open. Next run uses org 6.")
+
+    def _run_next_with_claim_during_walk(self, root, *, outcome, used):
+        """automate.run_next on old org 3; the claim lands while the walk runs."""
+        def walk(*_args, **_kwargs):
+            self.assertEqual(self._claim(root), "org-claim: CLAIMED org 6")
+            return SimpleNamespace(signed_in=False, message="synthetic stop", report_steps=())
+        live = mock.Mock()
+        with mock.patch.object(automate, "extract_inventory", return_value=SimpleNamespace(steps=[])), \
+                mock.patch.object(automate, "run_uploaded_guide", side_effect=walk), \
+                mock.patch.object(automate, "LiveReport", return_value=live), \
+                mock.patch.object(automate, "load_aliases", return_value={}), \
+                mock.patch.object(automate, "record_lessons"), \
+                mock.patch.object(automate, "outcome_of", return_value=(outcome, "synthetic stop")), \
+                mock.patch.object(automate, "gate_outcome_of", return_value=outcome), \
+                mock.patch.object(automate, "org_changed", return_value=used), \
+                mock.patch.object(automate, "append_history", return_value=root / "history.json"), \
+                mock.patch.object(automate, "write_history_index"), \
+                contextlib.redirect_stdout(io.StringIO()):
+            return automate.run_next(Path("."), root, Path("synthetic-guide.pdf"), opener=None)
+
+    def test_w098_a_run_on_an_old_org_ending_after_the_claim_keeps_the_floor(self):
+        for outcome, used in ((INCONCLUSIVE, False), (FAILED, True)):
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as folder:
+                root = Path(folder)
+                self._five_orgs_on_org_three(root)
+                self._run_next_with_claim_during_walk(root, outcome=outcome, used=used)
+                gate = load_gate(root)
+                self.assertEqual((gate["org"], gate["floor"], gate["last_outcome"]), (5, 5, outcome))
+                self.assertTrue(gate["frozen"])
+                gate["frozen"] = False
+                self.assertEqual(automate.load_orgs(root)[automate.next_org_index(gate)]["username"], self.NEW)
+
+    def test_w098_keep_org_on_a_retired_org_run_is_refused(self):
+        """Org 5 run moved the gate to 6, then the claim set floor 5: keep-org may not go back to org 5."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            run_id = "20990101T000000Z-org5"
+            run_dir = root / "runs" / "org-0000000000" / run_id
+            run_dir.mkdir(parents=True)
+            (run_dir / "summary.json").write_text(json.dumps(
+                {"org": 5, "orgs": 5, "outcome": "failed", "stop_step": "s2"}))
+            (run_dir / "verdicts.json").write_text(json.dumps({"run_id": run_id, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}))
+            (root / "verification-orgs.json").write_text(json.dumps(
+                {"orgs": [{"username": f"u{i}@example.test", "password": "Synth1!xx"} for i in range(5)]}))
+            save_gate(root, {"org": 5, "frozen": True, "reason": "x", "last_outcome": FAILED, "last_run": run_id})
+            self.assertEqual(self._claim(root), "org-claim: CLAIMED org 6")
+            before = (root / "gate.json").read_bytes()
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = automate.main(["--reset-gate", "--keep-org", str(run_dir), "--private-root", folder])
+            self.assertEqual(code, 2)
+            self.assertEqual(out.getvalue().strip(),
+                             "Refused: that run used a retired org (W-098). The gate is unchanged.")
+            self.assertEqual((root / "gate.json").read_bytes(), before)
+
+
+class GateNotUpdatedTests(unittest.TestCase):
+    """E: the org was claimed but the gate step failed; --repoint fixes the gate."""
+
+    def _root(self, folder):
+        root = Path(folder)
+        (root / "verification-orgs.json").write_text(json.dumps(
+            {"orgs": [{"username": f"u{i}@example.test", "password": "Synth1!xx"} for i in range(5)]}))
+        save_gate(root, {"org": 2, "frozen": False, "reason": "", "last_outcome": SUCCESS, "last_run": "run-2"})
+        return root
+
+    def _main(self, folder, *argv, gate_fails=False):
+        page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+        out = io.StringIO()
+        config = {"portal_url": PORTAL_URL, "event_code": "SYNTHETIC"}
+        patches = [mock.patch.object(org_claim, "_browser", side_effect=lambda run: run(None, page)),
+                   mock.patch.object(org_claim, "load_config", return_value=config)]
+        if gate_fails:
+            patches.append(mock.patch.object(org_claim, "update_gate", side_effect=OSError("synthetic disk")))
+        with contextlib.ExitStack() as stack:
+            for patch in patches:
+                stack.enter_context(patch)
+            stack.enter_context(contextlib.redirect_stdout(out))
+            code = org_claim.main([*argv, "--private-root", folder])
+        return code, out.getvalue()
+
+    def _claimed_with_stale_gate(self, folder):
+        root = self._root(folder)
+        code, out = self._main(folder, "--claim", gate_fails=True)
+        self.assertEqual((code, out), (org_claim.INCONCLUSIVE, "org-claim: CLAIMED org 6, gate not updated\n"))
+        return root
+
+    def test_a_gate_failure_after_claimed_prints_one_safe_line_and_exits_3(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = self._claimed_with_stale_gate(folder)
+            self.assertEqual(load_gate(root)["org"], 2)  # not updated
+            self.assertEqual(json.loads((root / "team" / "claim-attempt").read_text())["result"], "CLAIMED")
+
+    def test_repoint_points_the_gate_and_floor_at_the_last_org_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = self._claimed_with_stale_gate(folder)
+            code, out = self._main(folder, "--repoint")
+            self.assertEqual((code, out.strip()), (org_claim.OK, "org-claim: REPOINTED gate at org 6"))
+            gate = load_gate(root)
+            self.assertEqual((gate["org"], gate["floor"], gate["last_run"]), (5, 5, "run-2"))
+            self.assertNotIn("Synth", out)
+            self.assertNotIn("@", out)
+            before = (root / "gate.json").read_bytes()
+            code, out = self._main(folder, "--repoint")  # the floor is no longer lower
+            self.assertEqual((code, out.strip()),
+                             (org_claim.REFUSED, "org-claim: REFUSED the gate floor is already at the last org"))
+            self.assertEqual((root / "gate.json").read_bytes(), before)
+
+    def test_repoint_is_refused_unless_the_marker_says_claimed(self):
+        for marker in (None, {"result": "started"}, {"result": "reserved"}):
+            with self.subTest(marker=marker), tempfile.TemporaryDirectory() as folder:
+                root = self._root(folder)
+                if marker is not None:
+                    (root / "team").mkdir()
+                    (root / "team" / "claim-attempt").write_text(json.dumps(marker))
+                before = (root / "gate.json").read_bytes()
+                code, out = self._main(folder, "--repoint")
+                self.assertEqual((code, out.strip()),
+                                 (org_claim.REFUSED, "org-claim: REFUSED the last claim did not end CLAIMED"))
+                self.assertEqual((root / "gate.json").read_bytes(), before)
 
 
 if __name__ == "__main__":
