@@ -601,6 +601,7 @@ class ClaimGateTests(unittest.TestCase):
                 self.assertEqual(self._submit(folder, self._details_page("one@example.test"))[0], 0)
                 self.assertEqual(json.loads((Path(folder) / "team" / "claim-baseline").read_text()),
                                  {"org_baseline": 2})
+                self.assertEqual(stat.S_IMODE((Path(folder) / "team" / "claim-baseline").stat().st_mode), 0o600)
                 marker = Path(folder) / "team" / "claim-attempt"
                 if emptied:
                     marker.write_text("{}")
@@ -647,6 +648,86 @@ class ClaimGateTests(unittest.TestCase):
                                  (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MARKER_REFUSED}\n"))
                 self.assertEqual((page.filled, page.clicked), ([], []))
                 self.assertEqual(path.read_bytes(), before)
+
+    def _ten_claims(self, folder):
+        for i in range(10):
+            self.assertEqual(self._submit(folder, self._details_page(f"ten{i}@example.test"))[0], 0)
+        self._assert_capped(folder)
+
+    def _assert_missing(self, folder):
+        page = self._details_page("past.cap@example.test")
+        self.assertEqual(self._submit(folder, page),
+                         (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MISSING_REFUSED}\n"))
+        self.assertEqual((page.filled, page.clicked), ([], []))
+
+    def _assert_kept(self, folder, value):
+        path = Path(folder) / "team" / "claim-baseline"
+        self.assertEqual(json.loads(path.read_text()), {"org_baseline": value})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_w102_a_rewritten_marker_is_refused_after_ten_claims(self):
+        for shape in ({"last_run": "x"}, {"result": "reserved", "claimed": [], "pending": []},
+                      {"result": "reserved", "claimed": [], "pending": [], "org_baseline": 99}):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                self._ten_claims(folder)
+                self._write_marker(folder, shape)
+                self._assert_missing(folder)
+                self.assertEqual(len(load_orgs(Path(folder))), 12)
+                self._assert_kept(folder, 2)
+
+    def test_w102_a_marker_with_another_baseline_is_refused(self):
+        """Counts intact, only org_baseline changed: the kept baseline is never replaced."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            for i in range(3):
+                self.assertEqual(self._submit(folder, self._details_page(f"three{i}@example.test"))[0], 0)
+            data = self._marker_data(folder)
+            data["org_baseline"] = 99
+            self._write_marker(folder, data)
+            self._assert_missing(folder)
+            self._assert_kept(folder, 2)
+
+    def test_w102_the_owner_lift_deletes_the_baseline_and_removes_digests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._ten_claims(folder)
+            data = self._marker_data(folder)
+            data["claimed"] = data["claimed"][:7]  # the owner verified three orgs
+            self._write_marker(folder, data)
+            (Path(folder) / "team" / "claim-baseline").unlink()
+            for i in range(3):
+                code, out = self._submit(folder, self._details_page(f"lift{i}@example.test"))
+                self.assertEqual((code, out.strip()), (0, f"org-claim: CLAIMED org {13 + i}"))
+            self._assert_kept(folder, 5)
+            self._assert_capped(folder)
+
+    def test_w102_a_deleted_marker_with_no_new_org_goes_ahead(self):
+        """Boundary: the org count equals the kept baseline, so nothing was claimed unseen."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            path = Path(folder) / "team" / "claim-baseline"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"org_baseline": 2}))
+            path.chmod(0o600)
+            code, out = self._submit(folder, self._details_page("first@example.test"))
+            self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+            self.assertEqual(self._marker_data(folder)["org_baseline"], 2)
+            self._assert_kept(folder, 2)
+
+    def test_w102_an_unreadable_or_malformed_baseline_is_refused(self):
+        for text in ("not json", "[]", "{}", '{"org_baseline": -1}', '{"org_baseline": true}',
+                     '{"org_baseline": "2"}'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                path = Path(folder) / "team" / "claim-baseline"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                page = self._details_page("bad.base@example.test")
+                self.assertEqual(self._submit(folder, page),
+                                 (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MARKER_REFUSED}\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+                self.assertEqual(path.read_text(), text)
 
     def test_w104_the_try_count_resets_after_a_successful_claim(self):
         with tempfile.TemporaryDirectory() as folder:

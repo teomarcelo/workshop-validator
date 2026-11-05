@@ -30,15 +30,21 @@ Modes:
   it in ``pending``. Nothing clears ``pending`` automatically. When
   ``len(claimed) + len(pending)`` reaches 10, the next claim is refused with
   exit 2 before the browser opens. No flag or environment variable lifts the
-  cap. The owner lifts it by hand, after verifying the orgs, by removing
-  digests from ``claimed`` or ``pending`` in that private marker.
+  cap.
 
-  A deleted or emptied marker does not reset the count. The org count before
-  any claim is kept as ``org_baseline`` in the marker and in a second private
-  file, ``team/claim-baseline``. When the marker is missing or empty but the
-  org file holds more orgs than that baseline, the claim is refused ("the
-  claim marker is missing; the owner must verify (W-102)"). After verifying,
-  the owner restores the marker or deletes ``team/claim-baseline`` by hand.
+  A deleted, emptied or rewritten marker does not reset the count. The org
+  count before the first claim is kept in a second private file,
+  ``team/claim-baseline`` (and copied into the marker as ``org_baseline``).
+  While that file exists it is never rebuilt, and a claim is refused ("the
+  claim marker is missing; the owner must verify (W-102)") when the marker
+  accounts for fewer submits than the orgs added since the baseline
+  (``len(claimed) + len(pending) < orgs - baseline``) or when the marker's
+  ``org_baseline`` differs from it.
+
+  The owner lifts the cap by hand, after verifying the orgs: remove digests
+  from ``claimed`` or ``pending`` in the marker and delete
+  ``team/claim-baseline``. The next claim then records a new baseline, the
+  current org count less the digests left in ``claimed``.
 * ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
   point the gate (and floor) at the last org in the org file. Refused unless
   the marker says CLAIMED and the gate floor is lower.
@@ -524,14 +530,14 @@ def reserve_attempt(root: Path, code: str) -> dict:
     if claimed is None or pending is None:
         raise ClaimRefused(MARKER_REFUSED)
     orgs, kept = count_orgs(root), _read_baseline(root)
-    if not marker:  # missing or empty: the count is gone, so the org file is the backstop
-        if kept is not None and orgs > kept:
-            raise ClaimRefused(MISSING_REFUSED)
-        baseline = orgs if kept is None else kept
-    else:  # an older marker has no baseline: the orgs it did not claim
-        baseline = _count(marker.get("org_baseline"))
-        if baseline is None:
-            baseline = max(orgs - len(claimed), 0)
+    if kept is not None:  # the backstop: never rebuilt while it exists
+        if len(claimed) + len(pending) < orgs - kept:
+            raise ClaimRefused(MISSING_REFUSED)  # the marker lost or hid submits
+        if "org_baseline" in marker and _count(marker.get("org_baseline")) != kept:
+            raise ClaimRefused(MISSING_REFUSED)  # the marker carries another baseline
+        baseline = kept
+    else:  # first claim, an older marker, or the owner's lift: the orgs not claimed here
+        baseline = max(orgs - len(claimed), 0)
     if len(claimed) + len(pending) >= MAX_CLAIMED:
         raise ClaimRefused(TOTAL_CAP_REFUSED)
     counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
