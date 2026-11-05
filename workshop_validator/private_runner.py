@@ -241,6 +241,8 @@ LOGIN_URL = "https://login.salesforce.com/"
 # Every wait inside one sign-in shares this total, so the email card's extra
 # waits cannot push sign-in past LOGIN_BUDGET_SECONDS (180 s).
 LOGIN_WAIT_SECONDS = 150
+# Wait for the password box after a username-first submit.
+PASSWORD_WAIT_MS = 20000
 
 
 def _login_clock() -> float:
@@ -311,19 +313,19 @@ def login_to_salesforce(
         except PlaywrightTimeout:
             raise PrivateRunnerError(
                 "Salesforce login page: neither the username form nor "
-                "the Log In with Username button appeared"
+                "the Log In with Username button or link appeared"
             ) from None
         if username_box.count() == 0:
             matches = username_button.count()
             if matches > 1:
                 raise PrivateRunnerError(
                     "Salesforce login page showed more than one Log In with "
-                    "Username button; nothing was clicked"
+                    "Username button or link; nothing was clicked"
                 )
             if matches != 1:
                 raise PrivateRunnerError(
                     "Salesforce login page: neither the username form nor "
-                    "the Log In with Username button appeared"
+                    "the Log In with Username button or link appeared"
                 )
             username_button.click(timeout=left(15000))
             try:
@@ -340,14 +342,22 @@ def login_to_salesforce(
             # Username-first: submit the username once, then wait for the
             # password screen. A spent budget stays a timeout (left raises).
             login_button.click(timeout=left(15000))
-            password_wait = left(20000)
+            password_wait = left(PASSWORD_WAIT_MS)
             try:
                 password_box.wait_for(state="visible", timeout=password_wait)
             except PlaywrightTimeout:
-                raise PrivateRunnerError(
+                if password_wait < PASSWORD_WAIT_MS:
+                    # The shared budget ended first: a budget timeout.
+                    raise
+                message = (
                     "Salesforce login page: the password box did not appear "
                     "after the username step"
-                ) from None
+                )
+                # Salesforce's own reason (#error), page text only.
+                detail = _visible_login_error(page)
+                if detail:
+                    message = f"{message}. {detail}"
+                raise PrivateRunnerError(message) from None
         password_box.fill(password, timeout=left(15000))
         submitted = True
         login_button.click(timeout=left(15000))
