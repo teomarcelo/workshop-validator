@@ -19,6 +19,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Callable, Sequence
 from urllib.parse import urlparse
 from uuid import uuid4
@@ -236,49 +237,120 @@ def _org_open(page) -> bool:
     return not _login_form_visible(page)
 
 
-def login_to_salesforce(page, username: str, password: str) -> None:
+LOGIN_URL = "https://login.salesforce.com/"
+# Every wait inside one sign-in shares this total, so the email card's extra
+# waits cannot push sign-in past LOGIN_BUDGET_SECONDS (180 s).
+LOGIN_WAIT_SECONDS = 150
+
+
+def _login_clock() -> float:
+    return time.monotonic()
+
+
+def login_to_salesforce(
+    page, username: str, password: str, login_url: str = LOGIN_URL
+) -> None:
     """Standard login form only. No SSO/MFA bypass; fail closed on other flow.
 
+    The page may open on the classic username form or on the "Log In with
+    Email" card, which has no username box. Sign-in first waits up to about
+    30 s for either the username box or the exact "Log In with Username"
+    button. Only visible elements count: the email card may keep a hidden
+    username box ahead of the button. On the email card that one visible
+    button is clicked, then the username form must appear. More than one
+    visible such button is refused unclicked. login_url is for tests only.
     login.salesforce.com currently asks for the username first, then the
     password on the next screen. Older combined forms still work: if the
     password field is already visible, it is filled without an extra click.
     The promos.html iframe is cosmetic. A block on that frame is not a
     failed login. Sign-in fails only when the form never submits or
     Lightning never opens. The password Login control is clicked once.
+    All waits together stay within LOGIN_WAIT_SECONDS.
     """
     if not username or not password:
         raise PrivateRunnerError("Missing approved secret environment variables")
     from playwright.sync_api import TimeoutError as PlaywrightTimeout
+
+    deadline = _login_clock() + LOGIN_WAIT_SECONDS
+
+    def left(ms: int) -> int:
+        remaining = int((deadline - _login_clock()) * 1000)
+        if remaining <= 0:
+            raise PlaywrightTimeout("sign-in wait budget used up")
+        return min(ms, remaining)
 
     _ignore_promo_iframe(page)
     submitted = False
     try:
         try:
             page.goto(
-                "https://login.salesforce.com/",
+                login_url,
                 wait_until="domcontentloaded",
-                timeout=30000,
+                timeout=left(30000),
             )
         except Exception as exc:
             if not _promo_failure(exc):
                 raise
-        page.locator("#username").fill(username, timeout=15000)
+        # Visible matches only. A hidden #username ahead of the button must
+        # not be the element waited on or taken as the form being shown.
+        username_box = page.locator("#username").filter(visible=True)
+        username_button = page.get_by_role(
+            "button", name="Log In with Username", exact=True
+        ).filter(visible=True)
+        # A slow or script-built page is still loading, not a failure.
+        try:
+            username_box.or_(username_button).first.wait_for(
+                state="visible", timeout=left(30000)
+            )
+        except PlaywrightTimeout:
+            raise PrivateRunnerError(
+                "Salesforce login page: neither the username form nor "
+                "the Log In with Username button appeared"
+            ) from None
+        if username_box.count() == 0:
+            matches = username_button.count()
+            if matches > 1:
+                raise PrivateRunnerError(
+                    "Salesforce login page showed more than one Log In with "
+                    "Username button; nothing was clicked"
+                )
+            if matches != 1:
+                raise PrivateRunnerError(
+                    "Salesforce login page: neither the username form nor "
+                    "the Log In with Username button appeared"
+                )
+            username_button.click(timeout=left(15000))
+            try:
+                username_box.wait_for(state="visible", timeout=left(20000))
+            except PlaywrightTimeout:
+                raise PrivateRunnerError(
+                    "Salesforce login page showed the Log In with Email screen; "
+                    "the username form did not appear after Log In with Username"
+                ) from None
+        username_box.fill(username, timeout=left(15000))
         password_box = page.locator("#password")
         if password_box.count() == 0 or not password_box.is_visible():
-            page.locator("#Login").click(timeout=15000)
-            password_box.wait_for(state="visible", timeout=20000)
-        password_box.fill(password, timeout=15000)
+            page.locator("#Login").click(timeout=left(15000))
+            password_box.wait_for(state="visible", timeout=left(20000))
+        password_box.fill(password, timeout=left(15000))
         submitted = True
-        page.locator("#Login").click(timeout=15000)
+        page.locator("#Login").click(timeout=left(15000))
         try:
+            wall_end = _login_clock() + 45
+            # The URL callback reads the URL only. A Playwright call made
+            # inside it never returns, so the page is read after it.
             page.wait_for_url(
                 lambda url: (
                     _on_lightning(str(url))
                     and _usable_org_host(_hostname(str(url)))
-                    and not _login_form_visible(page)
                 ),
-                timeout=45000,
+                timeout=left(45000),
             )
+            # The org's own login wall is not an open org. Poll about 2 s.
+            while _login_form_visible(page):
+                if _login_clock() >= wall_end:
+                    raise PlaywrightTimeout("org login wall still shown")
+                page.wait_for_timeout(left(2000))
         except Exception as exc:
             if not (_promo_failure(exc) and _org_open(page)):
                 raise
