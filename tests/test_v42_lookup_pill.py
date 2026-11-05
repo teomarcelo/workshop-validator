@@ -1,9 +1,11 @@
-"""V42: a lookup pick is proven by a selected pill in the field's own container (P006N002).
+"""V42: a selected pill after a lookup pick is never PASS evidence (P006N002, W-110).
 
 Lightning can replace the lookup input with a pill (an icon with screen-reader text, the label,
-and a remove button), and can re-render the field around it. The pill counts only when it is the
-one visible pill in the container that holds the box and its label, its visible label read
-fail-closed equals the value, and any title agrees with that visible label.
+and a remove button), and can re-render the field around it. Which field a pill belongs to after
+a re-render cannot be proven, so a pill only flags the pick for review: NEEDS_REVIEW, not frozen,
+when it is the one visible pill in the container that held the box and its label, its visible
+label read fail-closed equals the value, and any title agrees with that visible label. Anything
+else is the frozen UI_MISMATCH. Neither is ever PASS.
 """
 
 import os
@@ -17,7 +19,7 @@ except ImportError:
     sync_playwright = None
 
 from workshop_validator import guide_walk
-from workshop_validator.automate import SUCCESS, gate_outcome_of, outcome_of
+from workshop_validator.automate import INCONCLUSIVE, gate_outcome_of, outcome_of
 from workshop_validator.guide_inventory import GuideStep
 from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.report import ReportStep
@@ -162,6 +164,9 @@ def shadow_only(markup):
 
 
 SHADOW_LABEL = shadow_only("<label>Sample Other Field</label>")
+# Probe closedshadow: the sibling's only label is in a CLOSED shadow root, the pill in its slot.
+CLOSED_SHADOW_LABEL = ('<script>document.currentScript.parentElement.attachShadow({mode: "closed"}).innerHTML = '
+                       "'<label>Sample Other Field</label><slot></slot>';</script>")
 SHADOW_SPAN = shadow_only('<span class="slds-form-element__label">Sample Other Field</span>')
 
 
@@ -172,6 +177,10 @@ def beside_html(mode):
     MODE "lone": the pick empties the field's control and adds the pill in a new unlabelled div
     beside the form element. MODE "lone2": the pick removes the whole form element, label included,
     and adds the pill in a new unlabelled div, so the wrapper holds no field name at all.
+    MODE "lone3": the pick re-renders the form element in place (a new element, same label, empty
+    control) and adds the pill in a new unlabelled div beside it. MODE "ariadiv": the wrapper also
+    holds a sibling div named only by aria-label Sample Other Field; the pick re-renders the form
+    element in place as in "lone3" and shows the pill in that sibling div.
     """
     return f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
@@ -191,6 +200,7 @@ def beside_html(mode):
         </div>
       </div>
       <div id="slot"></div>
+      {'<div id="aria-sib" aria-label="Sample Other Field"></div>' if mode == "ariadiv" else ""}
     </div>
   </section>
 </div>
@@ -207,6 +217,12 @@ def beside_html(mode):
       box.setAttribute("aria-expanded", "false");
       list.hidden = true;
       document.getElementById("slot").innerHTML = {pill()!r};
+    }} else if ({mode!r} === "lone3" || {mode!r} === "ariadiv") {{
+      document.querySelector("#wrap > .slds-form-element").outerHTML =
+        '<div class="slds-form-element"><label class="slds-form-element__label">Record Variable</label>' +
+        '<div class="slds-form-element__control"></div></div>';
+      if ({mode!r} === "ariadiv") document.getElementById("aria-sib").innerHTML = {pill()!r};
+      else document.getElementById("wrap").insertAdjacentHTML("beforeend", "<div>" + {pill()!r} + "</div>");
     }} else if ({mode!r} === "lone2") {{
       document.querySelector("#wrap > .slds-form-element").remove();
       document.getElementById("wrap").insertAdjacentHTML("beforeend", "<div>" + {pill()!r} + "</div>");
@@ -262,6 +278,11 @@ def moved_html():
   document.getElementById("rv").focus();
 </script>
 """
+
+
+REVIEW_NOTE = ("Record Variable option varWidgetRec was clicked and a selected pill labelled varWidgetRec "
+               "appears near the field, but the validator cannot prove the pill belongs to this field; "
+               "please confirm.")
 
 
 def make_step(step_id, text):
@@ -322,18 +343,22 @@ class LookupPillBrowserTests(unittest.TestCase):
         self.assertNotEqual(result.status, "PASS", result.note)
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
 
-    def test_pill_in_the_rerendered_field_is_pass_evidence_naming_the_pill(self):
+    def assert_review(self, result):
+        """A pill near the field: NEEDS_REVIEW, not frozen, no evidence id, the safe note."""
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertFalse(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
+        self.assertEqual(result.note, REVIEW_NOTE)
+        self.assert_not_pass(result)
+
+    def test_pill_in_the_rerendered_field_is_review_not_pass(self):
         result = self.fill(screen_html())
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.evidence_ids, ("rv:pill",))
-        self.assertIn("one selected pill labelled varWidgetRec", result.note)
-        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+        self.assert_review(result)
         self.assertEqual(self.page.locator("#host-rv .slds-pill__label").inner_text(), "varWidgetRec")
 
-    def test_pill_in_a_host_with_no_form_element_is_pass_evidence(self):
+    def test_pill_in_a_host_with_no_form_element_is_review_not_pass(self):
         result = self.fill(screen_html(form_element=False))
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.evidence_ids, ("rv:pill",))
+        self.assert_review(result)
 
     def test_pill_with_another_label_is_a_mismatch(self):
         result = self.fill(screen_html(shown=pill("varOtherRec")))
@@ -449,10 +474,10 @@ class LookupPillBrowserTests(unittest.TestCase):
         self.assert_not_pass(result)
         self.assertEqual(self.page.locator("#host-new .slds-pill__label").inner_text(), "varWidgetRec")
 
-    def test_pill_beside_a_rerendered_inner_form_element_is_pass(self):
+    def test_pill_beside_a_rerendered_inner_form_element_is_review_not_pass(self):
         # The inner .slds-form-element is replaced while its host stays attached.
         result = self.fill(screen_html())
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assert_review(result)
         self.assertEqual(self.page.locator("#host-rv > .slds-form-element").count(), 1)
         self.assertEqual(self.page.locator("#rv").count(), 0)
 
@@ -464,15 +489,13 @@ class LookupPillBrowserTests(unittest.TestCase):
 
     def test_required_marker_is_not_part_of_the_field_name(self):
         result = self.fill(screen_html(required=True))
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.evidence_ids, ("rv:pill",))
+        self.assert_review(result)
         self.assertEqual(self.page.locator("#host-rv abbr.slds-required").count(), 1)
         self.assertIsNone(self.page.locator("#host-rv abbr.slds-required").get_attribute("aria-hidden"))
 
     def test_required_assistive_text_is_not_part_of_the_field_name(self):
         result = self.fill(screen_html(required='<span class="slds-assistive-text">Required</span>'))
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.evidence_ids, ("rv:pill",))
+        self.assert_review(result)
 
     def test_required_class_with_other_text_stays_in_the_field_name(self):
         # Only a "*" marker is dropped; other text in a required-styled element is part of the name.
@@ -486,8 +509,7 @@ class LookupPillBrowserTests(unittest.TestCase):
 
     def test_icon_title_is_not_compared_with_the_label(self):
         result = self.fill(screen_html(shown=pill(icon_title="Record")))
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.evidence_ids, ("rv:pill",))
+        self.assert_review(result)
 
     def test_title_alone_never_stands_in_for_the_visible_label(self):
         result = self.fill(screen_html(shown=pill("varOtherRec", title="varWidgetRec")))
@@ -502,17 +524,46 @@ class LookupPillBrowserTests(unittest.TestCase):
         result = self.fill(screen_html(shown=pill(title=False, label_html=unclear)))
         self.assert_not_pass(result)
 
-    def test_walk_records_the_pill_pick_as_pass_through_automate(self):
+    def test_probes_whose_pill_wrapper_is_a_guess_are_never_pass(self):
+        # Final-review probes for 889240f. lone3: the form element is re-rendered in place with
+        # the same label and the pill shows in a new unlabelled div beside it. ariadiv: a sibling
+        # div named by aria-label holds the pill. closedshadow: the sibling's label is in a closed
+        # shadow root and the pill in its slot.
+        probes = {
+            "lone3": lambda: beside_html("lone3"),
+            "ariadiv": lambda: beside_html("ariadiv"),
+            "closedshadow": lambda: screen_html(home="ot", compound=True, other_html=CLOSED_SHADOW_LABEL,
+                                                other_tag="sample-sibling"),
+        }
+        for probe, html in probes.items():
+            with self.subTest(probe=probe):
+                result = self.fill(html())
+                self.assert_not_pass(result)
+                self.assertIn(result.status, ("NEEDS_REVIEW", "UI_MISMATCH"), result.note)
+                self.assertEqual(self.page.locator(".slds-pill__label").count(), 1)
+
+    def test_walk_goes_on_after_a_pill_pick_and_the_run_is_inconclusive_through_automate(self):
         page = self.open(screen_html())
-        steps = (make_step("s1", "Add a Sample Screen."), make_step("s2", STEP))
-        checks = (GuideCheck("opened", lambda item: item.step_id == "s1", opened_screen),)
+        ran = []
+
+        def next_step(state, item):
+            ran.append(item.step_id)
+            return CheckResult("PASS", "Sample next step read.", (f"{item.step_id}:read",))
+
+        steps = (make_step("s1", "Add a Sample Screen."), make_step("s2", STEP),
+                 make_step("s3", "Sample next step."))
+        checks = (GuideCheck("opened", lambda item: item.step_id == "s1", opened_screen),
+                  GuideCheck("next", lambda item: item.step_id == "s3", next_step))
         outcome = walk_guide(page, SimpleNamespace(steps=steps), checks=checks, timeout_s=3, interval_s=0.2,
                              page_wait_s=1.5, page_poll_s=0.2)
-        self.assertEqual(outcome.statuses["s2"], "PASS", outcome.notes.get("s2"))
-        self.assertEqual(tuple(outcome.evidence.get("s2", ())), ("s2:pill",))
+        self.assertEqual(outcome.statuses["s2"], "NEEDS_REVIEW", outcome.notes.get("s2"))
+        self.assertEqual(outcome.notes.get("s2"), REVIEW_NOTE)
+        self.assertEqual(tuple(outcome.evidence.get("s2", ())), ())
+        self.assertEqual(ran, ["s3"])
+        self.assertEqual(outcome.statuses["s3"], "PASS")
         result = SimpleNamespace(signed_in=True, message="", report_steps=report_steps(outcome, steps))
-        self.assertEqual(outcome_of(result), (SUCCESS, ""))
-        self.assertEqual(gate_outcome_of(result), SUCCESS)
+        self.assertEqual(outcome_of(result), (INCONCLUSIVE, REVIEW_NOTE))
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
 
 
 class PagePillsTests(unittest.TestCase):

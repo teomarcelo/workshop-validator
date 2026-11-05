@@ -4796,7 +4796,10 @@ def _one_field(container, name: str) -> bool:
 def _pill_shows(containers, want: str, name: str, before) -> bool:
     """Exactly one visible selected pill inside the field's own recorded elements, its label
     exactly WANT, not one of the pills BEFORE the click (None: unknown, so never), and those
-    elements still one field named NAME (the lookup's label)."""
+    elements still one field named NAME (the lookup's label).
+
+    A NEEDS_REVIEW detector only, never PASS evidence (W-110): after a re-render the wrapper
+    a pill sits in is a guess."""
     container = _live_container(containers)
     if container is None or not want:
         return False
@@ -4891,14 +4894,22 @@ def _lookup_miss_result(state: WalkState, target: str) -> CheckResult | None:
     return CheckResult("UI_MISMATCH", state.lookup_miss[1], (), freeze=True)
 
 
+def _pill_review_note(label: str, want: str) -> str:
+    """The NEEDS_REVIEW note for a lookup pick that shows only a pill near the field."""
+    return (f"{label} option {want} was clicked and a selected pill labelled {want} appears near the "
+            "field, but the validator cannot prove the pill belongs to this field; please confirm.")
+
+
 def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: str) -> CheckResult | None:
     """Fill a lookup and click the one option whose first line is VALUE, inside the lookup's own list.
 
     The list is the one the box (or its combobox ancestor) names by aria-controls or aria-owns,
     else the dialog that holds the box. With neither, nothing is clicked (NEEDS_REVIEW).
     None means no such option is shown yet (the caller keeps waiting). Two or more matches
-    are never clicked. PASS only when the box then shows VALUE, or a selected pill in the same
-    field shows exactly VALUE, and the list closed.
+    are never clicked. PASS only when the box itself then shows VALUE and the list closed.
+    A selected pill is never PASS evidence (W-110): which field a pill belongs to after a
+    re-render cannot be proven. A pill labelled VALUE near the field (_pill_shows, all its
+    guards) gives NEEDS_REVIEW, not frozen, so the walk continues; nothing gives UI_MISMATCH.
     """
     want = _plain(value)
     state.lookup_miss = ()
@@ -4962,8 +4973,8 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
     missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
     if missed is None and by_pill:
-        return passed(step, "pill", f"{label} is {want}. The field shows one selected pill labelled "
-                                    f"{by_pill[-1]} and its list closed.")
+        # Never PASS: the pill may belong to another field. The walk goes on (not frozen).
+        return CheckResult("NEEDS_REVIEW", _pill_review_note(label, by_pill[-1]), ())
     if missed is None:
         return passed(step, "filled", f"{label} is {want}. The field shows it and its list closed.")
     return _stop_here(missed)
