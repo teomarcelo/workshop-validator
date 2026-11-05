@@ -928,6 +928,10 @@ def run_uploaded_guide(
         produced = _inventory_report(
             inventory, outcome.statuses, notes, evidence, outcome.timestamps, outcome.suspects,
             getattr(outcome, "snapshots", None),
+            {
+                step_id: _scrub(text, username, password)
+                for step_id, text in (getattr(outcome, "guide_notes", None) or {}).items()
+            },
         )
         # Company Information is read in its own tab only after the walk, so
         # the guide order is never disturbed.
@@ -1095,6 +1099,7 @@ def _inventory_report(
     timestamps: dict[str, tuple[float, float]] | None = None,
     suspects: dict[str, tuple[str, ...]] | None = None,
     snapshots: dict[str, str] | None = None,
+    guide_notes: dict[str, str] | None = None,
 ) -> tuple[ReportStep, ...]:
     statuses = statuses or {}
     notes = notes or {}
@@ -1102,6 +1107,7 @@ def _inventory_report(
     timestamps = timestamps or {}
     suspects = suspects or {}
     snapshots = snapshots or {}
+    guide_notes = guide_notes or {}
     items = []
     for step in inventory.steps:
         status = statuses.get(step.step_id, "NOT_RUN")
@@ -1131,6 +1137,7 @@ def _inventory_report(
             t_end=t_end,
             suspect=suspects.get(step.step_id, ()),
             snapshot=snapshots.get(step.step_id, "") if status != "PASS" else "",
+            guide_note=guide_notes.get(step.step_id, "") if status == "PASS" else "",
         ))
     return tuple(items)
 

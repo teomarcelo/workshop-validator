@@ -61,6 +61,9 @@ class CheckResult:
     evidence_ids: tuple[str, ...] = ()
     freeze: bool = False
     suspect: tuple[str, ...] = ()
+    # W-105: the outcome was read from the page, reached differently than the guide says.
+    # Shown on PASS rows only, as "Guide differs: <guide_note>".
+    guide_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,8 @@ class WalkOutcome:
     timestamps: dict[str, tuple[float, float]] = field(default_factory=dict)
     # Non-PASS steps: snapshot JSON path relative to the run dir.
     snapshots: dict[str, str] = field(default_factory=dict)
+    # PASS steps whose outcome was reached differently than the guide says (W-105).
+    guide_notes: dict[str, str] = field(default_factory=dict)
 
 
 def norm(value: str | None) -> str:
@@ -5720,6 +5725,8 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     done: list[str] = []
     renamed: CheckResult | None = None
     opened = {"done": False, "error": False}
+    # Whether "successfully saved" was already visible before the last click.
+    saved_before_click = True
     for name in names:
         if norm(name) in {"ok", "okay"} and _locator_for_name(state.page, name) is None:
             if _words_visible(state.page, "successfully saved"):
@@ -5729,11 +5736,23 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
                 evidence_token = re.sub(r"[^A-Za-z0-9_.:-]+", "-", banner_text).strip("-")
                 evidence_ids = (f"{step.step_id}:{evidence_token}",)
                 prefix = "Clicked " + " then ".join(done) + ". " if done else ""
+                if done and not saved_before_click and renamed is None:
+                    # W-105: the saved message is new after the click, so the intent is met.
+                    return CheckResult(
+                        "PASS",
+                        f"{prefix}The page shows an inline saved message: {_snippet(banner_text)}",
+                        evidence_ids,
+                        guide_note=f"inline saved message instead of a popup with {name}.",
+                    )
                 note = (
                     f"{prefix}The guide expects a popup with {name}, but the page shows an inline "
                     f"saved message: {_snippet(banner_text)}"
                 )
                 return CheckResult("UI_MISMATCH", note, evidence_ids, freeze=False)
+        # A loading page is an unread before-state, so the saved text never counts as new.
+        saved_before_click = page_is_loading(state.page) or _words_visible(
+            state.page, "successfully saved",
+        )
         result = _finish_attempt(state, step, _Intent("click", name), opened)
         if _modal_blocked(result):
             # W-080: resume at this name only; names already clicked are not clicked again.
@@ -5908,6 +5927,7 @@ def walk_guide(
     suspects: dict[str, tuple[str, ...]] = {}
     timestamps: dict[str, tuple[float, float]] = {}
     snapshots: dict[str, str] = {}
+    guide_notes: dict[str, str] = {}
     executed: list[str] = []
     total = len(steps)
     if progress is not None:
@@ -5974,12 +5994,8 @@ def walk_guide(
         state.step_deadline = None
         if popup_notes:
             # Closing is never evidence: the status comes from the resumed action only.
-            result = CheckResult(
-                result.status,
-                " ".join([*popup_notes, result.note or ""]).strip(),
-                result.evidence_ids,
-                result.freeze,
-                result.suspect,
+            result = replace(
+                result, note=" ".join([*popup_notes, result.note or ""]).strip(),
             )
         t_end = _clock()
         if snapshot_dir is not None and result.status in SNAPSHOT_STATUSES:
@@ -6003,6 +6019,8 @@ def walk_guide(
             evidence[step.step_id] = tuple(result.evidence_ids)
         if result.suspect:
             suspects[step.step_id] = result.suspect
+        if result.status == "PASS" and result.guide_note:
+            guide_notes[step.step_id] = result.guide_note
         if video_origin is not None:
             timestamps[step.step_id] = (t_start - video_origin, t_end - video_origin)
         executed.append(step.step_id)
@@ -6013,4 +6031,6 @@ def walk_guide(
                 blocked = result.note or "The following steps were not run."
             else:
                 blocked = "The org session was blocked, so the following steps were not run."
-    return WalkOutcome(statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots)
+    return WalkOutcome(
+        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes,
+    )

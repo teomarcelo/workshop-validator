@@ -150,6 +150,8 @@ li.fail {
 }
 .num { color: #5c665e; font-variant-numeric: tabular-nums; }
 .text { overflow-wrap: anywhere; }
+.guide-note { color: #6b4fa0; font-style: italic; border-left: 3px solid #6b4fa0; padding-left: 8px; margin: 6px 0 0 calc(2.25rem + 12px); }
+.metric.guide-note strong { color: #6b4fa0; }
 .reason {
   margin: 4px 0 2px calc(2.25rem + 12px);
   color: #7f1d1d;
@@ -348,6 +350,7 @@ class StepOutcome:
     evidence_ids: tuple[str, ...] = ()
     suspect: tuple[str, ...] = ()
     snapshot: str = ""
+    guide_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -361,6 +364,8 @@ class StepView:
     status: str = ""
     chips: tuple[str, ...] = ()
     snapshot: str = ""
+    # W-105: shown on PASS rows only, as "Guide differs: ...". Old board.json files load without it.
+    guide_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -393,6 +398,15 @@ class Board:
     tasks_not_run: int
     unmatched: int
     suspect_passes: int = 0
+    guide_noted: int = 0
+
+
+GUIDE_NOTE_PREFIX = "Guide differs: "
+
+
+def guide_note_line(note: str) -> str:
+    """The visible instructor note for a PASS reached differently than the guide says."""
+    return GUIDE_NOTE_PREFIX + " ".join(note.split())
 
 
 def outcomes_from_report_steps(steps: Sequence[ReportStep]) -> dict[str, StepOutcome]:
@@ -405,6 +419,7 @@ def outcomes_from_report_steps(steps: Sequence[ReportStep]) -> dict[str, StepOut
             evidence_ids=tuple(step.evidence_ids),
             suspect=step.suspect,
             snapshot=getattr(step, "snapshot", "") or "",
+            guide_note=getattr(step, "guide_note", "") or "",
         )
     return outcomes
 
@@ -446,6 +461,12 @@ def build_board(
             )
         )
     )
+    guide_noted = sum(
+        1 for section in sections
+        for task in section.tasks
+        for step in task.steps
+        if step.label == "PASS" and step.guide_note
+    )
     if failed:
         tone = "failed"
     elif passed and not not_run:
@@ -465,6 +486,7 @@ def build_board(
         tasks_not_run=task_labels.count("NOT RUN"),
         unmatched=unmatched,
         suspect_passes=suspect_passes,
+        guide_noted=guide_noted,
     )
 
 
@@ -525,7 +547,7 @@ def write_results_pdf(board: Board, path: Path) -> None:
         Paragraph(_pdf_text(board.notice), body),
         Spacer(1, 6),
         Paragraph(
-            f"PASS {board.passed}. FAIL {board.failed}. NOT RUN {board.not_run}.",
+            f"PASS {board.passed}{_pdf_guide_count(board)}. FAIL {board.failed}. NOT RUN {board.not_run}.",
             body,
         ),
         Spacer(1, 12),
@@ -541,12 +563,19 @@ def write_results_pdf(board: Board, path: Path) -> None:
                 story.append(Paragraph(line, body))
                 if step.reason:
                     story.append(Paragraph(_pdf_text(step.reason), body))
+                if step.guide_note and step.label == "PASS":
+                    story.append(Paragraph(f"<i>{_pdf_text(guide_note_line(step.guide_note))}</i>", body))
             story.append(Spacer(1, 8))
     path.parent.mkdir(mode=0o700, exist_ok=True)
     SimpleDocTemplate(
         str(path), pagesize=letter, title="Workshop Validator results",
     ).build(story)
     path.chmod(0o600)
+
+
+def _pdf_guide_count(board: Board) -> str:
+    count = getattr(board, "guide_noted", 0) or 0
+    return f" ({count} with a guide note)" if count > 0 else ""
 
 
 def _pdf_text(value: str) -> str:
@@ -814,7 +843,16 @@ def _view_step(step: GuideStep, outcome: StepOutcome | None) -> StepView:
         status=outcome.status if isinstance(outcome.status, str) else "",
         chips=chips,
         snapshot=_snapshot_href(outcome),
+        guide_note=_guide_note(outcome, label),
     )
+
+
+def _guide_note(outcome: StepOutcome, label: str) -> str:
+    """Only on a shown PASS; a failure keeps its own reason instead."""
+    note = outcome.guide_note if isinstance(outcome.guide_note, str) else ""
+    if label != "PASS":
+        return ""
+    return " ".join(note.split())
 
 
 def _snapshot_href(outcome: StepOutcome) -> str:
@@ -893,6 +931,11 @@ def _metrics(board: Board) -> str:
             f"<div class='metric {tone}'><strong>{value}</strong>"
             f"<span>{escape(label)}</span></div>"
         )
+    if board.guide_noted > 0:
+        parts.append(
+            f"<div class='metric guide-note'><strong>{board.guide_noted}</strong>"
+            f"<span>{escape(_guide_noted_label(board.guide_noted))}</span></div>"
+        )
     if board.suspect_passes > 0:
         label = "pass needs a check" if board.suspect_passes == 1 else "passes need a check"
         parts.append(
@@ -900,6 +943,10 @@ def _metrics(board: Board) -> str:
             f"<span>{escape(label)}</span></div>"
         )
     return "<div class='metrics'>" + "".join(parts) + "</div>"
+
+
+def _guide_noted_label(count: int) -> str:
+    return "pass with a guide note" if count == 1 else "passes with a guide note"
 
 
 def _task_roll(board: Board) -> str:
@@ -954,6 +1001,8 @@ def _render_task(task: TaskView) -> str:
 
 def _render_step(step: StepView) -> str:
     reason = f"<p class='reason'>{escape(step.reason)}</p>" if step.reason else ""
+    if step.guide_note and step.label == "PASS":
+        reason += f"<p class='guide-note'>{escape(guide_note_line(step.guide_note))}</p>"
     chips_html = ""
     if step.chips:
         chip_items = []
@@ -1148,6 +1197,7 @@ def render_run_report(
     not_run_count = len(statuses) - pass_count - fail_count - needs_review_count - blocked_count
     already_set_count = sum("already-set" in step.chips for step in steps)
     renamed_count = sum("renamed" in step.chips for step in steps)
+    guide_note_count = sum(1 for step in steps if step.label == "PASS" and step.guide_note)
     suspect_pass_count = sum(
         1 for step in steps
         if step.status == "PASS" and any(
@@ -1175,6 +1225,12 @@ def render_run_report(
     if renamed_count > 0:
         stats_parts.append(
             f"<div class='stat'><span class='stat-value'>{renamed_count}</span><span class='stat-label'>Renamed in UI</span></div>"
+        )
+
+    if guide_note_count > 0:
+        stats_parts.append(
+            f"<div class='stat guide-note'><span class='stat-value'>{guide_note_count}</span>"
+            f"<span class='stat-label'>{escape(_guide_noted_label(guide_note_count))}</span></div>"
         )
 
     if suspect_pass_count > 0:
@@ -1312,6 +1368,11 @@ def render_run_report(
                         f"<div class='step-reason'>{escape(step.reason)}</div>"
                     )
 
+                if step.guide_note and step.label == "PASS":
+                    sections_html.append(
+                        f"<div class='step-reason guide-note'>{escape(guide_note_line(step.guide_note))}</div>"
+                    )
+
                 if step.snapshot and SNAPSHOT_HREF.fullmatch(step.snapshot):
                     sections_html.append(
                         f"<div class='step-reason'><a href='{escape(step.snapshot)}'>Failure snapshot</a></div>"
@@ -1408,7 +1469,7 @@ def render_run_report(
         "<meta name='robots' content='noindex, nofollow'>\n"
         f"<title>{escape(guide_name or 'Workshop Validation Report')}</title>\n"
         "<style>\n"
-        + theme.get_shared_css() + SWITCHER_CSS +
+        + theme.get_shared_css() + SWITCHER_CSS + GUIDE_NOTE_CSS +
         "</style>\n"
         "</head>\n"
         "<body>\n"
@@ -1494,6 +1555,13 @@ SWITCHER_CSS = """
 .instances a.current, .instances button.current { opacity: 1; font-weight: 600; background: rgba(127,127,127,.18); }
 .live { padding: 12px 16px; border-radius: 8px; background: rgba(127,127,127,.12); margin: 16px 0; }
 .live ol { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
+"""
+
+
+# W-105: an instructor note on a PASS. Not green like PASS evidence, not red like FAIL.
+GUIDE_NOTE_CSS = """
+.guide-note { color: #6b4fa0; font-style: italic; border-left: 3px solid #6b4fa0; padding-left: 8px; }
+.stat.guide-note .stat-value { color: #6b4fa0; }
 """
 
 
