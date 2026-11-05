@@ -4581,43 +4581,116 @@ def _variable_options(page) -> list:
 
 
 _LOOKUP_ROLES = ("combobox", "searchbox")
-# A Lightning lookup can show the chosen record as a pill instead of an input value.
-_PILL_SELECTOR = ".slds-pill, lightning-pill"
-_FIELD_CONTAINER_XPATH = (
-    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' slds-form-element ')][1]"
-)
+# The lookup's field containers, nearest first: each ancestor of the box that holds the box's own
+# label and is a form element, a combobox container's parent, or a combobox / lookup custom
+# element host. The walk stops before a dialog, section, tab panel or modal body (never the
+# dialog), and before any ancestor that holds another input (never another field).
+_FIELD_CONTAINERS_JS = r"""
+(box) => {
+  const up = (el) => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null);
+  const within = (node, root) => { for (let n = node; n; n = up(n)) if (n === root) return true; return false; };
+  const home = box.getRootNode();
+  const labels = [...(box.labels || [])];
+  for (const id of String(box.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) {
+    const el = home.getElementById ? home.getElementById(id) : document.getElementById(id);
+    if (el) labels.push(el);
+  }
+  if (!labels.length) return [];
+  const edge = (el) => el === document.body || el === document.documentElement || el.tagName === "SECTION"
+    || ["dialog", "alertdialog", "tabpanel"].includes(el.getAttribute("role") || "")
+    || el.getAttribute("aria-modal") === "true" || el.classList.contains("slds-modal__content");
+  const kind = (el) => {
+    const tag = el.tagName.toLowerCase();
+    return String(el.getAttribute("class") || "").includes("form-element")
+      || [...el.children].some((kid) => kid.classList.contains("slds-combobox_container"))
+      || (tag.includes("-") && (tag.endsWith("combobox") || tag.endsWith("lookup")));
+  };
+  const others = (el) => [...el.querySelectorAll("input:not([type=hidden]), textarea, select")]
+    .some((kid) => kid !== box);
+  const out = [];
+  for (let el = up(box); el && !edge(el); el = up(el)) {
+    if (others(el)) break;
+    if (kind(el) && labels.some((label) => within(label, el))) out.push(el);
+  }
+  return out;
+}
+"""
+# Selected pills inside one field container, outermost only (a pill's own parts are not pills).
+_PILLS_JS = r"""
+(root) => {
+  const named = '.slds-pill, lightning-pill, .slds-listbox_selection > *, '
+    + '.slds-listbox_selection [role="option"][aria-selected="true"], '
+    + '.slds-listbox_horizontal [role="option"][aria-selected="true"]';
+  const pillish = (el) => el.matches(named) || String(el.getAttribute("class") || "").split(/\s+/)
+    .some((t) => t.includes("pill") && !t.includes("__") && !t.endsWith("container"));
+  const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
+  return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
+}
+"""
+
+
+def _handles(target, script) -> list:
+    """The element handles an array-returning page script gives, in order; [] on any error."""
+    try:
+        array = target.evaluate_handle(script)
+        items = sorted((int(key), value) for key, value in array.get_properties().items() if key.isdigit())
+        return [element for _key, value in items if (element := value.as_element()) is not None]
+    except Exception:
+        return []
 
 
 def _field_container(box):
-    """The form element that holds this box, as a handle that outlives the box, or None."""
-    try:
-        loc = box.locator(_FIELD_CONTAINER_XPATH)
-        if _count(loc) != 1:
-            return None
-        return _first(loc).element_handle(timeout=1000)
-    except Exception:
-        return None
+    """The box's field containers, nearest first, as handles that outlive the box ([] if none)."""
+    return _handles(box, _FIELD_CONTAINERS_JS) if box is not None else []
 
 
-def _pill_shows(container, want: str) -> bool:
-    """A visible selected pill inside this field container whose label is exactly WANT."""
-    if container is None or not want:
-        return False
-    try:
-        pills = container.query_selector_all(_PILL_SELECTOR)
-    except Exception:
-        return False
-    for pill in pills[:8]:
+def _live_container(containers):
+    """The nearest field container still on the page (a re-render can replace an inner one)."""
+    for container in containers or ():
         try:
-            if not pill.is_visible():
-                continue
-            label = pill.query_selector(".slds-pill__label") or pill
-            lines = [_plain(line) for line in str(label.inner_text() or "").splitlines()]
+            if container.evaluate("(el) => el.isConnected"):
+                return container
         except Exception:
             continue
-        if next((line for line in lines if line), "") == want:
-            return True
-    return False
+    return None
+
+
+def _pill_label(pill) -> str:
+    """A pill's visible label, read fail-closed; a title that differs from it gives no label."""
+    try:
+        parts = pill.query_selector_all(".slds-pill__label")
+    except Exception:
+        return ""
+    if len(parts) > 1:
+        return ""
+    label = parts[0] if parts else pill
+    lines = _option_lines(label)
+    if len(lines) != 1:
+        return ""
+    try:
+        titled = pill.query_selector_all("[title]:not(button):not(.slds-pill__remove)")
+        titles = [_plain(item.get_attribute("title")) for item in [pill, label, *titled]
+                  if item.get_attribute("title") is not None]
+    except Exception:
+        return ""
+    if any(title != lines[0] for title in titles):
+        return ""
+    return lines[0]
+
+
+def _pill_shows(containers, want: str) -> bool:
+    """Exactly one visible selected pill in this field's container, and its label is exactly WANT."""
+    container = _live_container(containers)
+    if container is None or not want:
+        return False
+    shown = []
+    for pill in _handles(container, _PILLS_JS)[:8]:
+        try:
+            if pill.is_visible():
+                shown.append(pill)
+        except Exception:
+            return False
+    return len(shown) == 1 and _pill_label(shown[0]) == want
 
 
 def _named_lists(box) -> list:
@@ -4761,10 +4834,17 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             return False
         if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
             return False
-        return not any(shown for _option, _label, shown in _scoped_options(scope))
+        if any(shown for _option, _label, shown in _scoped_options(scope)):
+            return False
+        by_pill.append(want)
+        return True
 
+    by_pill: list = []
     limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
     missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
+    if missed is None and by_pill:
+        return passed(step, "pill", f"{label} is {want}. The field shows one selected pill labelled "
+                                    f"{by_pill[-1]} and its list closed.")
     if missed is None:
         return passed(step, "filled", f"{label} is {want}. The field shows it and its list closed.")
     return _stop_here(missed)
