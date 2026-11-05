@@ -36,6 +36,7 @@ class ReportStep:
     t_end: float | None = None
     suspect: tuple[str, ...] = ()
     snapshot: str = ""
+    guide_note: str = ""
 
 
 def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: bool = False) -> str:

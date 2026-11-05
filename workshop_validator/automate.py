@@ -276,6 +276,11 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
             "step_id": first.step_id, "page": first.page, "status": first.status,
         },
         "stop_step": None if stop is None else stop.step_id,
+        # W-105: PASS steps (with evidence) that carry a "Guide differs" note.
+        "passes_with_guide_note": sum(
+            1 for s in result.report_steps
+            if s.status == "PASS" and s.evidence_ids and getattr(s, "guide_note", "")
+        ),
         "run_dir": str(run_dir),
     }
 
