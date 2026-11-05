@@ -2,7 +2,9 @@
 
 import contextlib
 import fcntl
+import hashlib
 import io
+import itertools
 import json
 import os
 import stat
@@ -13,7 +15,8 @@ from pathlib import Path
 from unittest import mock
 
 from workshop_validator import org_claim
-from workshop_validator.automate import FAILED, INCONCLUSIVE, SUCCESS, load_orgs, save_gate
+from workshop_validator import automate
+from workshop_validator.automate import FAILED, INCONCLUSIVE, SUCCESS, load_gate, load_orgs, save_gate
 
 PORTAL = """
 <html><body><header>Synthetic portal</header>
@@ -46,6 +49,22 @@ AMBIGUOUS = """
 <dl><dt>Username</dt><dd>first@example.test</dd><dt>Password</dt><dd>FirstSynth1!</dd></dl>
 <dl><dt>Username</dt><dd>second@example.test</dd><dt>Password</dt><dd>SecondSynth2!</dd></dl>
 """
+
+OLD_BLOCK = """
+<section class="event"><h3>Earlier event</h3><p>OrgClaim Code: SYNTH-OLD</p>
+  <div><span class="icon"></span>Salesforce Org Username:</div><div>old.learner@example.test</div>
+  <div><span class="icon"></span>Salesforce Org Password:</div><div>OldSynth1!pass</div>
+</section>
+"""
+
+NEW_BLOCK = """
+<section class="event"><h3>Just redeemed</h3><p>OrgClaim Code: SYNTH-NEW</p>
+  <div><span class="icon"></span>Salesforce Org Username:</div><div>new.learner@example.test</div>
+  <div><span class="icon"></span>Salesforce Org Password:</div><div>NewSynth2!pass</div>
+</section>
+"""
+
+OTHER_NEW_BLOCK = NEW_BLOCK.replace("new.learner", "other.learner").replace("NewSynth2", "OtherSynth3")
 
 SALESFORCE_ORG_LABELS = """
 <div class="credentials">
@@ -107,6 +126,29 @@ class PageLogicTests(unittest.TestCase):
         self.assertIsNone(org_claim.extract_credentials(DETAILS.replace("Synth3tic!Pass", "********")))
         self.assertIsNone(org_claim.extract_credentials("<p>Username</p><p>Password</p>"))
 
+    def test_two_event_blocks_pick_the_one_new_username_and_its_own_password(self):
+        """Brief point 2: the old block is excluded; the password comes from the new block."""
+        page = OLD_BLOCK + NEW_BLOCK
+        self.assertEqual(org_claim.extract_credentials(page, {"old.learner@example.test"}),
+                         ("new.learner@example.test", "NewSynth2!pass"))
+        self.assertEqual(org_claim.extract_credentials(NEW_BLOCK + OLD_BLOCK, {"OLD.learner@example.test"}),
+                         ("new.learner@example.test", "NewSynth2!pass"))
+
+    def test_two_new_usernames_or_only_old_ones_are_not_read(self):
+        page = OLD_BLOCK + NEW_BLOCK + OTHER_NEW_BLOCK
+        self.assertIsNone(org_claim.extract_credentials(page, {"old.learner@example.test"}))
+        self.assertIsNone(org_claim.extract_credentials(OLD_BLOCK, {"old.learner@example.test"}))
+
+    def test_a_new_username_without_a_password_in_its_own_block_is_not_read(self):
+        """The password is never borrowed from another block."""
+        new_without = NEW_BLOCK.replace("NewSynth2!pass", "")
+        new_without = new_without.replace('<div><span class="icon"></span>Salesforce Org Password:</div><div></div>', "")
+        self.assertIsNone(org_claim.extract_credentials(OLD_BLOCK + new_without, {"old.learner@example.test"}))
+
+    def test_usernames_on_page_collects_labelled_and_email_values(self):
+        seen = org_claim.usernames_on_page(OLD_BLOCK + "<p>Signed in as Owner.Synthetic@example.test</p>")
+        self.assertEqual(seen, {"old.learner@example.test", "owner.synthetic@example.test"})
+
     def test_guide_links_are_absolute_and_unique(self):
         links = org_claim.find_guide_links(PORTAL, "https://portal.example.test/home")
         self.assertEqual(links, ["https://portal.example.test/files/synthetic-guide.pdf",
@@ -128,9 +170,9 @@ class WriterTests(unittest.TestCase):
             orgs = load_orgs(root)
             self.assertEqual([o["username"] for o in orgs], ["a@example.test", "b@example.test"])
             self.assertEqual(orgs[0]["password"], "Shared1!x")
-            # W-098: append_org now also updates gate.json
+            # The gate is pointed at the new org by claim(), after CLAIMED is marked.
             files = sorted([p.name for p in root.iterdir() if not p.name.endswith(".lock")])
-            self.assertEqual(files, ["gate.json", "verification-orgs.json"])
+            self.assertEqual(files, ["verification-orgs.json"])
 
     def test_a_failed_write_leaves_the_old_file_untouched(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -182,13 +224,15 @@ class ClaimGateTests(unittest.TestCase):
         save_gate(root, {"org": gate_org, "frozen": last != SUCCESS, "reason": "", "last_outcome": last})
         return root
 
-    def _claim(self, folder, *extra):
+    def _claim(self, folder, *extra, event_code="SYNTH"):
+        """main --claim with the real claim() and its locks; only the browser is replaced."""
         out = io.StringIO()
-        with contextlib.redirect_stdout(out), mock.patch.object(org_claim, "claim") as claim, \
-                mock.patch.object(org_claim, "load_config", return_value={"portal_url": "https://x.test", "event_code": "SYNTH"}):
-            claim.return_value = "org-claim: CLAIMED org 3"
+        config = {"portal_url": "https://x.test", "event_code": event_code}
+        with contextlib.redirect_stdout(out), mock.patch.object(org_claim, "_browser") as browser, \
+                mock.patch.object(org_claim, "load_config", return_value=config):
+            browser.return_value = "org-claim: CLAIMED org 3"
             code = org_claim.main(["--claim", "--private-root", folder, *extra])
-        return code, out.getvalue(), claim
+        return code, out.getvalue(), browser
 
     def test_w097_allowed_with_inconclusive_gate_and_unused_org(self):
         """W-097: claim allowed with inconclusive gate and unused org left."""
@@ -262,40 +306,95 @@ class ClaimGateTests(unittest.TestCase):
             claim.assert_not_called()
 
     def test_the_marker_is_reserved_before_the_browser_opens(self):
-        """The first claim reserves the marker; concurrent second claim sees O_EXCL failure."""
+        """The first claim reserves the marker; a finished "started" claim does not block the next."""
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
             first, _, claim = self._claim(folder)  # claim() mocked: no browser, marker stays "started"
-            # W-097: "started" no longer blocks, but the O_EXCL lock in reserve_attempt does
-            # To test O_EXCL blocking, we need to call reserve_attempt directly while marker exists
             self.assertEqual(first, 0)
             marker = Path(folder) / "team" / "claim-attempt"
             self.assertTrue(marker.exists())
-            self.assertEqual(json.loads(marker.read_text()), {"last_run": "run-1", "result": "started"})
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            self.assertEqual(json.loads(marker.read_text()),
+                             {"last_run": "run-1", "result": "started", "code_sha256": digest,
+                              "code_attempts": {digest: 1}})
+            self.assertNotIn("SYNTH", marker.read_text().replace(digest, ""))
             self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
             # Now with marker at "started", another claim should be allowed (W-097)
             second, out, again = self._claim(folder)
             self.assertEqual(second, 0)  # W-097: allowed despite "started" marker
             again.assert_called_once()
 
-    def test_only_one_of_many_concurrent_claims_reserves_the_attempt(self):
-        """Concurrent claims are serialized by the flock; O_EXCL prevents races."""
+    def test_only_one_of_many_concurrent_claims_runs(self):
+        """The claim-run flock is held for the whole claim: of 8 concurrent claims one runs."""
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
-            # Start with marker for same run, CLAIMED status - this should block all attempts
-            self._marker(folder, "run-1", "CLAIMED")
-            start, results = threading.Barrier(8), []
+            start, release, entered, results = threading.Barrier(8), threading.Event(), [], []
+            config = {"portal_url": "https://x.test", "event_code": "SYNTH"}
+
+            def browser(_run):
+                entered.append(1)
+                release.wait(5)
+                return "org-claim: CLAIMED org 3"
 
             def go():
                 start.wait()
-                results.append(org_claim.reserve_attempt(Path(folder)))
-            workers = [threading.Thread(target=go) for _ in range(8)]
-            for worker in workers:
-                worker.start()
-            for worker in workers:
-                worker.join(5)
-            # All should be blocked because marker has CLAIMED status for current run
-            self.assertEqual(sorted(results), [False] * 8)
+                try:
+                    results.append(org_claim.claim(Path(folder), config))
+                except org_claim.ClaimRefused as exc:
+                    results.append(str(exc))
+            with mock.patch.object(org_claim, "_browser", side_effect=browser):
+                workers = [threading.Thread(target=go) for _ in range(8)]
+                for worker in workers:
+                    worker.start()
+                for _ in range(100):  # the seven refusals return while the first claim runs
+                    if len(results) == 7:
+                        break
+                    threading.Event().wait(0.05)
+                running = list(results)
+                release.set()
+                for worker in workers:
+                    worker.join(5)
+            self.assertEqual(running, [org_claim.RUNNING_REFUSED] * 7)
+            self.assertEqual(len(entered), 1)
+            self.assertEqual(sorted(results), sorted(["org-claim: CLAIMED org 3"] + [org_claim.RUNNING_REFUSED] * 7))
+
+    def test_a_claim_is_refused_while_the_run_lock_is_held_by_another_fd(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            lock_path = Path(folder) / "team" / ".claim-run.lock"
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                code, out, browser = self._claim(folder)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+            self.assertEqual((code, out.strip()), (org_claim.REFUSED, "org-claim: REFUSED another claim is running"))
+            browser.assert_not_called()
+            self.assertFalse((Path(folder) / "team" / "claim-attempt").exists())
+            code, _, browser = self._claim(folder)  # the lock is free again
+            self.assertEqual(code, 0)
+            browser.assert_called_once()
+
+    def test_one_event_code_is_tried_at_most_three_times(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            codes = []
+            for _ in range(3):
+                code, _, browser = self._claim(folder)
+                codes.append(code)
+                browser.assert_called_once()
+            code, out, browser = self._claim(folder)
+            self.assertEqual(codes, [0, 0, 0])
+            self.assertEqual((code, out.strip()),
+                             (org_claim.REFUSED, "org-claim: REFUSED this event code was already tried 3 times"))
+            browser.assert_not_called()
+            marker = (Path(folder) / "team" / "claim-attempt").read_text()
+            self.assertNotIn("SYNTH", marker.replace(hashlib.sha256(b"SYNTH").hexdigest(), ""))
+            code, _, browser = self._claim(folder, event_code="SYNTH-TWO")  # another code has its own count
+            self.assertEqual(code, 0)
+            browser.assert_called_once()
 
     def test_claim_is_allowed_after_a_new_run_or_non_claimed_marker(self):
         """W-097: allowed for different run, or same run with non-CLAIMED status."""
@@ -486,7 +585,8 @@ class PortalBoundaryTests(unittest.TestCase):
             page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
             self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 1")
             marker = root / "team" / "claim-attempt"
-            self.assertEqual(json.loads(marker.read_text()), {"last_run": "run-7", "result": "CLAIMED"})
+            marker_data = json.loads(marker.read_text())
+            self.assertEqual((marker_data["last_run"], marker_data["result"]), ("run-7", "CLAIMED"))
             self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
 
     def test_w098_gate_points_at_new_org_after_successful_claim(self):
@@ -497,7 +597,7 @@ class PortalBoundaryTests(unittest.TestCase):
             page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
             self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 1")
             gate = json.loads((root / "gate.json").read_text())
-            self.assertEqual(gate["org"], 1)
+            self.assertEqual(gate["org"], 0)  # automate's 0-based index of org 1
 
     def test_the_attempt_is_marked_before_the_submit_click(self):
         seen = []
@@ -511,8 +611,106 @@ class PortalBoundaryTests(unittest.TestCase):
                 page.url, page.html = "https://elsewhere.example.test/x", DETAILS
             with self.assertRaises(org_claim.ClaimError):
                 self._claim(root, FakePage(_routes(), on_click=on_click))
-            self.assertEqual(seen, [{"last_run": "run-8", "result": "started"}])
+            self.assertEqual([(m["last_run"], m["result"]) for m in seen], [("run-8", "started")])
             self.assertEqual(json.loads(marker.read_text())["result"], "started")
+
+    def _five_orgs(self, root, *, frozen=False):
+        (root / "verification-orgs.json").write_text(json.dumps(
+            {"orgs": [{"username": f"u{i}@example.test", "password": "Synth1!xx"} for i in range(5)]}))
+        save_gate(root, {"org": 5, "frozen": frozen, "reason": "", "last_outcome": SUCCESS, "last_run": "run-5"})
+
+    def test_w098_automate_selects_the_claimed_org_after_five_used_orgs(self):
+        """The gate holds automate's 0-based index: the next run picks the new username."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._five_orgs(root)
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 6")
+            index = automate.next_org_index(load_gate(root))
+            orgs = automate.load_orgs(root)
+            self.assertIsNotNone(index)
+            self.assertLess(index, len(orgs))
+            self.assertEqual(orgs[index]["username"], "learner.synthetic@example.test")
+
+    def test_w098_a_frozen_gate_stays_frozen_after_a_claim(self):
+        """Producer decision: the claim never clears a freeze; --reset-gate does."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            self._five_orgs(root, frozen=True)
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            self.assertEqual(self._claim(root, page), "org-claim: CLAIMED org 6")
+            gate = load_gate(root)
+            self.assertTrue(gate["frozen"])
+            self.assertEqual(gate["org"], 5)
+
+    def test_a_gate_failure_after_the_org_is_saved_never_redeems_the_code_again(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-4"})
+            page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            with mock.patch.object(org_claim, "update_gate", side_effect=OSError("disk")):
+                with self.assertRaises(OSError):
+                    self._claim(root, page)
+            self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
+            marker = json.loads((root / "team" / "claim-attempt").read_text())
+            self.assertEqual(marker["result"], "CLAIMED")
+            retry = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
+            with self.assertRaises(org_claim.ClaimRefused):
+                self._claim(root, retry)
+            self.assertEqual((retry.filled, retry.clicked), ([], []))
+
+    def _form_with_old_block(self):
+        return {PORTAL_URL: (PORTAL_URL, PORTAL),
+                "https://portal.example.test/events/new": ("https://portal.example.test/events/new",
+                                                           OLD_BLOCK + FORM)}
+
+    def test_a_claim_saves_the_new_block_not_the_earlier_event(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK + NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            self.assertEqual(self._claim(root, FakePage(self._form_with_old_block(), on_click=submit)),
+                             "org-claim: CLAIMED org 1")
+            self.assertEqual(load_orgs(root), [{"username": "new.learner@example.test", "password": "NewSynth2!pass"}])
+
+    def test_a_username_already_in_the_org_file_is_never_new(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", \
+                OLD_BLOCK.replace("old.learner", "u0") + NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "verification-orgs.json").write_text(json.dumps(
+                {"orgs": [{"username": "U0@example.test", "password": "Synth1!xx"}]}))
+            save_gate(root, {"org": 1, "last_outcome": SUCCESS, "last_run": "run-3"})
+            self.assertEqual(self._claim(root, FakePage(_routes(), on_click=submit)), "org-claim: CLAIMED org 2")
+            self.assertEqual(load_orgs(root)[1]["username"], "new.learner@example.test")
+
+    def test_two_new_blocks_after_submit_need_review(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK + NEW_BLOCK + OTHER_NEW_BLOCK
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            line = self._claim(root, FakePage(self._form_with_old_block(), on_click=submit))
+            self.assertEqual(line, "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertFalse((root / "verification-orgs.json").exists())
+
+    def test_only_the_old_block_after_submit_keeps_polling_then_needs_review(self):
+        reads = []
+
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", OLD_BLOCK
+            page.on_eval = lambda p: reads.append(1)
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            root = Path(folder)
+            save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-3"})
+            line = self._claim(root, FakePage(self._form_with_old_block(), on_click=submit))
+            self.assertEqual(line, "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertGreater(len(reads), 1, "the page was read once, not polled")
+            self.assertFalse((root / "verification-orgs.json").exists())
 
     def test_guides_only_from_https_links_on_the_portal_host(self):
         html = PORTAL + '<a href="http://portal.example.test/files/plain.pdf">Plain</a>' \
@@ -568,6 +766,40 @@ class LockAndInboxTests(unittest.TestCase):
                 os.close(lock)
             worker.join(5)
             self.assertEqual([o["username"] for o in load_orgs(root)], ["a@example.test", "b@example.test"])
+
+    def test_gate_writes_wait_for_the_shared_gate_lock(self):
+        """automate.save_gate and the claim's gate step take the same lock."""
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 0, "frozen": False, "reason": ""})
+            lock = os.open(root / ".gate.json.lock", os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                writers = [threading.Thread(target=save_gate, args=(root, {"org": 2, "frozen": False})),
+                           threading.Thread(target=org_claim.point_gate_at, args=(root, 4))]
+                for writer in writers:
+                    writer.start()
+                    writer.join(0.5)
+                    self.assertTrue(writer.is_alive(), "a gate write did not wait for the lock")
+                self.assertEqual(load_gate(root)["org"], 0)
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                os.close(lock)
+            for writer in writers:
+                writer.join(5)
+            self.assertIn(load_gate(root)["org"], {2, 3})
+
+    def test_gate_json_is_replaced_atomically(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            save_gate(root, {"org": 1, "frozen": False, "reason": ""})
+            before = (root / "gate.json").read_text()
+            with mock.patch("workshop_validator.automate.os.replace", side_effect=OSError("disk")):
+                with self.assertRaises(OSError):
+                    save_gate(root, {"org": 2, "frozen": False, "reason": ""})
+            self.assertEqual((root / "gate.json").read_text(), before)
+            self.assertEqual(sorted(p.name for p in root.iterdir() if not p.name.endswith(".lock")), ["gate.json"])
+            self.assertEqual(stat.S_IMODE((root / "gate.json").stat().st_mode), 0o600)
 
     def test_inbox_folder_is_private_even_when_it_already_existed(self):
         with tempfile.TemporaryDirectory() as folder:

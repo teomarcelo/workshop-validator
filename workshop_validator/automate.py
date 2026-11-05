@@ -14,8 +14,12 @@ from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 import argparse
+import contextlib
+import fcntl
 import json
+import os
 import sys
+import tempfile
 import time
 import webbrowser
 
@@ -69,8 +73,52 @@ def _write_private(path: Path, text: str) -> None:
     path.chmod(0o600)
 
 
+@contextlib.contextmanager
+def gate_lock(root: Path):
+    """An exclusive flock on a sibling lock file. Every gate.json write takes it."""
+    path = gate_path(root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(path.parent / f".{path.name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _save_gate_locked(root: Path, payload: dict) -> None:
+    """Write gate.json atomically (temp file, fsync, os.replace), mode 0600. Caller holds gate_lock."""
+    path = gate_path(root)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
+    try:  # mkstemp creates the file 0600
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(json.dumps(payload, indent=2) + "\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+    path.chmod(0o600)
+
+
 def save_gate(root: Path, payload: dict) -> None:
-    _write_private(gate_path(root), json.dumps(payload, indent=2) + "\n")
+    with gate_lock(root):
+        _save_gate_locked(root, payload)
+
+
+def update_gate(root: Path, change) -> dict:
+    """Read, change and write gate.json under one gate lock. Returns the written gate."""
+    with gate_lock(root):
+        gate = load_gate(root)
+        change(gate)
+        _save_gate_locked(root, gate)
+        return gate
 
 
 def load_orgs(root: Path) -> list[dict]:
@@ -373,10 +421,10 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
 
 
 def reset_gate(private_root: Path) -> int:
-    gate = load_gate(private_root)
-    gate["frozen"] = False
-    gate["reason"] = ""
-    save_gate(private_root, gate)
+    def unfreeze(gate: dict) -> None:
+        gate["frozen"] = False
+        gate["reason"] = ""
+    gate = update_gate(private_root, unfreeze)
     print(f"Gate open. Next run uses org {int(gate.get('org') or 0) + 1}.")
     return 0
 
@@ -435,6 +483,11 @@ def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     Only the gate's last run counts, and each run is kept at most once. Touches only
     gate.json. Refuses (exit 2, one line, nothing changed) otherwise.
     """
+    with gate_lock(private_root):  # the read, checks and write are one step
+        return _reset_gate_keep_org(private_root, run_dir)
+
+
+def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     def refuse(reason: str) -> int:
         print(f"Refused: {reason}. The gate is unchanged.")
         return 2
@@ -475,7 +528,7 @@ def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         "reason": "",
         "kept_org_reason": {"step_id": str(stop), "verdict": "FALSE_FAILURE", "run_id": run_id},
     })
-    save_gate(private_root, gate)
+    _save_gate_locked(private_root, gate)
     print(f"Gate open. Org kept: stop step {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
     return 0
 
