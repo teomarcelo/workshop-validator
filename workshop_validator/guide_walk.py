@@ -4606,9 +4606,11 @@ _FIELD_HELPERS_JS = r"""
 # including a dialog, section, tab panel or modal body, and stopping BEFORE the first ancestor
 # that holds any other field: another input, textarea or select (hidden ones too), an element
 # with role combobox / searchbox / textbox / spinbutton or aria-haspopup that is not the box or
-# around it, a -combobox / -lookup / -input / -picklist / -textarea custom element that does not
-# hold the box, a label / legend / .slds-form-element__label that is not this box's, an element
-# another control is labelled by (that control already stops it), or a pill already shown. These are the field's own elements,
+# around it, or a field custom element (-combobox, -combobox-*, -lookup, -input, -picklist,
+# -textarea, -field, -select, -datepicker, -radio-group, -checkbox-group) that does not hold the
+# box, all also searched inside open shadow roots; a label / legend / .slds-form-element__label
+# that is not this box's; or a pill already shown. A control named by aria-labelledby is itself
+# an input or field role, so it already stops the walk. These are the field's own elements,
 # recorded by identity before the click; a pill shown in one of them later was not there before.
 _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
   const home = box.getRootNode();
@@ -4623,11 +4625,23 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
   const around = (el) => el === box || within(box, el);
   const fields = 'input, textarea, select, [role="combobox"], [role="searchbox"], [role="textbox"], '
     + '[role="spinbutton"], [aria-haspopup]';
-  const hosts = /-(combobox|lookup|input|picklist|textarea)$/;
-  const others = (el) => [...el.querySelectorAll(fields)].some((kid) => !around(kid));
-  const otherHosts = (el) => [...el.querySelectorAll("*")]
+  const hosts = /-(combobox|lookup|input|picklist|textarea|field|select|datepicker|radio-group|checkbox-group)$|-combobox-/;
+  // Every element under EL, including inside the open shadow roots of EL and its descendants.
+  const deep = (el) => {
+    const out = [];
+    const visit = (root) => {
+      for (const kid of root.querySelectorAll("*")) {
+        out.push(kid);
+        if (kid.shadowRoot) visit(kid.shadowRoot);
+      }
+    };
+    visit(el);
+    if (el.shadowRoot) visit(el.shadowRoot);
+    return out;
+  };
+  const others = (el) => deep(el).some((kid) => kid.matches(fields) && !around(kid));
+  const otherHosts = (el) => deep(el)
     .some((kid) => hosts.test(kid.tagName.toLowerCase()) && !around(kid));
-  // A control labelled by aria-labelledby is itself an input or field role, so others() stops there.
   const foreign = (el) => marksIn(el).some((mark) => !labels.includes(mark));
   const out = [];
   for (let el = up(box); el && !edge(el); el = up(el)) {
@@ -4695,19 +4709,19 @@ def _field_container(box):
 
 
 def _live_container(containers):
-    """The outermost recorded field element still on the page, or None (no pill evidence).
+    """The innermost recorded field element still on the page, or None (no pill evidence).
 
-    Every recorded element held only this field before the click, and the outermost attached
-    one holds all attached inner ones, so its pills are this field's pills.
+    The pill must sit inside the nearest surviving ancestor of the box (never the box itself,
+    which is not recorded). A combobox wrapper around the box is the control, not the field,
+    so it is passed over. When a re-render removes the inner elements, their host is next.
     """
-    live = None
     for container in containers or ():
         try:
-            if container.evaluate("(el) => el.isConnected"):
-                live = container
+            if container.evaluate('(el) => el.isConnected && el.getAttribute("role") !== "combobox"'):
+                return container
         except Exception:
             continue
-    return live
+    return None
 
 
 def _pill_label(pill) -> str:
