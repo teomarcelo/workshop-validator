@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.failure_snapshot import redact_text, save_failure_snapshot
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
 from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.private_runner import _inventory_report, run_uploaded_guide
@@ -27,8 +27,11 @@ class Item:
     def is_visible(self):
         return self.visible
 
-    def get_attribute(self, attr):
+    def get_attribute(self, attr, timeout=None):
         return self.name if attr == "aria-label" else None
+
+    def text_content(self, timeout=None):
+        return self.text
 
     def inner_text(self, timeout=None):
         return self.text
@@ -47,6 +50,10 @@ class Loc:
     def nth(self, i):
         return self.items[i]
 
+    @property
+    def first(self):
+        return self.items[0]
+
     def aria_snapshot(self, timeout=None):
         return self.tree
 
@@ -57,6 +64,7 @@ class Page:
         self.frames = []
         self.screenshot_error = screenshot_error
         self.masks = None
+        self.selectors = []
         self.roles = {
             "button": [Item(text=f"Signed in as {EMAIL}"), Item(text="Save"), Item(text="Hidden", visible=False)],
             "link": [Item(name=f"Open {HOST}"), Item(text="Setup Home")],
@@ -73,6 +81,9 @@ class Page:
         return Loc(self.roles.get(role, []))
 
     def locator(self, selector):
+        self.selectors.append(selector)
+        if selector == "head > title":
+            return Loc([Item(text=self.title())])
         if selector == "body":
             return Loc(tree=(
                 f'- button "Signed in as {EMAIL}"\n'
@@ -292,6 +303,121 @@ class SnapshotTimeCapTests(unittest.TestCase):
             data = json.loads((Path(tmp) / outcome.snapshots["S1"]).read_text())
         self.assertEqual(outcome.statuses, {"S1": "UI_MISMATCH"})
         self.assertEqual(data["truncated"], "snapshot truncated (time)")
+
+
+PAGE_DEFAULT_S = 20.0
+
+
+def _wait(clock, timeout):
+    """A Playwright read on a detached element waits its timeout, or the page default."""
+    clock.now += (timeout / 1000.0) if timeout else PAGE_DEFAULT_S
+
+
+class DetachedItem(Item):
+    def __init__(self, clock):
+        super().__init__(text="Detached")
+        self.clock = clock
+
+    def get_attribute(self, attr, timeout=None):
+        _wait(self.clock, timeout)
+        raise TimeoutError("detached")
+
+    def inner_text(self, timeout=None):
+        _wait(self.clock, timeout)
+        raise TimeoutError("detached")
+
+
+class SlowTitle(Item):
+    def __init__(self, clock):
+        super().__init__()
+        self.clock = clock
+
+    def text_content(self, timeout=None):
+        _wait(self.clock, timeout)
+        raise TimeoutError("busy")
+
+
+class ReviewFixTests(unittest.TestCase):
+    def snapshot(self, page, clock, tmp, budget_s=8.0, roots=None):
+        from workshop_validator.guide_walk import _redact_aria_snapshot
+        href = save_failure_snapshot(
+            page, Path(tmp), 1, "S1", "UI_MISMATCH", "missed",
+            roots=roots or [page], redact_tree=_redact_aria_snapshot, clock=clock, budget_s=budget_s,
+        )
+        return json.loads((Path(tmp) / href).read_text())
+
+    def test_detached_attribute_reads_stay_within_the_cap(self):
+        clock = Clock()
+        page = Page()
+        page.roles["button"] = [DetachedItem(clock) for _ in range(10)]
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.snapshot(page, clock, tmp)
+        self.assertLessEqual(clock.now, 8.5)
+        self.assertEqual(data["truncated"], "snapshot truncated (time)")
+
+    def test_slow_title_is_bounded_by_the_budget(self):
+        clock = Clock()
+        page = Page()
+        page.title = lambda: (_wait(clock, None), "Late")[1]
+        original = page.locator
+        page.locator = lambda sel: Loc([SlowTitle(clock)]) if sel == "head > title" else original(sel)
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.snapshot(page, clock, tmp)
+        self.assertLessEqual(clock.now, 8.5)
+        self.assertEqual(data["title"], "unavailable")
+
+    def test_title_is_skipped_when_the_budget_is_short(self):
+        clock = Clock()
+        page = Page()
+        calls = []
+        page.title = lambda: calls.append("title") or "Late"
+        original = page.locator
+        page.locator = lambda sel: (calls.append(sel), original(sel))[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.snapshot(page, clock, tmp, budget_s=0.5)
+        self.assertEqual(data["title"], "skipped (time)")
+        self.assertNotIn("title", calls)
+        self.assertNotIn("head > title", calls)
+        self.assertEqual(data["truncated"], "snapshot truncated (time)")
+
+    def test_main_frame_is_not_scanned_twice(self):
+        page = Page()
+        main = Page()
+        page.main_frame = main
+        page.frames = [main]
+        clock = Clock()
+        from workshop_validator.guide_walk import _roots
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.snapshot(page, clock, tmp, roots=_roots(page))
+        self.assertEqual(len(data["panels"]), 2)
+
+    def test_child_frame_is_still_scanned(self):
+        page = Page()
+        main, child = Page(), Page()
+        child.roles = {"button": [Item(text="Frame Button")]}
+        page.main_frame = main
+        page.frames = [main, child]
+        from workshop_validator.guide_walk import _roots
+        with tempfile.TemporaryDirectory() as tmp:
+            data = self.snapshot(page, Clock(), tmp, roots=_roots(page))
+        self.assertIn("Frame Button", data["controls"]["button"])
+        self.assertEqual(len(data["panels"]), 2)
+
+    def test_plaintext_only_editable_is_masked(self):
+        page = Page()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.snapshot(page, Clock(), tmp)
+        masked = [sel for sel in page.selectors if sel.startswith("input")]
+        self.assertTrue(masked)
+        self.assertIn("[contenteditable='plaintext-only']", masked[0])
+
+    def test_dotless_addresses_and_ipv4_are_redacted(self):
+        local = "admin" + "@" + "localhost"
+        address = ".".join(("10", "0", "0", "12"))
+        text = redact_text(f"Mail {local} at {address}:8080 now")
+        self.assertNotIn(local, text)
+        self.assertNotIn(address, text)
+        self.assertEqual(text, "Mail <email> at <ip>:8080 now")
 
 
 class RunnerWiringTests(unittest.TestCase):

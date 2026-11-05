@@ -34,10 +34,16 @@ BUDGET_S = 8.0
 TRUNCATED_NOTE = "snapshot truncated (time)"
 CONTROL_ROLES = ("button", "link", "tab", "dialog")
 PANEL_ROLES = ("dialog", "alertdialog", "complementary")
-_INPUT_MASK = "input, textarea, select, [contenteditable=''], [contenteditable='true']"
+_INPUT_MASK = (
+    "input, textarea, select, [contenteditable=''], [contenteditable='true'], "
+    "[contenteditable='plaintext-only']"
+)
+TITLE_MIN_S = 1.0
 
 _URL = re.compile(r"\b[a-z][a-z0-9+.-]*://\S+", re.I)
-_EMAIL = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+")
+# Dotless addresses (user@localhost) are emails too.
+_EMAIL = re.compile(r"[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*")
+_IPV4 = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 _HOST = re.compile(r"\b(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,}\b")
 _TOKEN = re.compile(r"[A-Za-z0-9+/=_-]{32,}")
 
@@ -67,6 +73,7 @@ def redact_text(value: object, limit: int = NAME_LIMIT) -> str:
     text = " ".join(str(value or "").split())
     text = _URL.sub("<url>", text)
     text = _EMAIL.sub("<email>", text)
+    text = _IPV4.sub("<ip>", text)
     text = _HOST.sub("<host>", text)
     text = _TOKEN.sub("<redacted>", text)
     if len(text) > limit:
@@ -88,10 +95,17 @@ def _url_path(page) -> str:
 
 
 def _title(page, budget: _Budget) -> str:
+    """Read <title> with a timeout bounded by the budget (page.title() takes none)."""
     if budget.over():
         return "skipped (time)"
+    if budget.left() < TITLE_MIN_S:
+        budget.hit = True
+        return "skipped (time)"
     try:
-        return redact_text(page.title())
+        loc = page.locator("head > title")
+        if int(loc.count()) == 0:
+            return ""
+        return redact_text(loc.first.text_content(timeout=budget.timeout_ms(500)))
     except Exception:
         return "unavailable"
 
@@ -128,7 +142,12 @@ def _visible(loc, cap: int, budget: _Budget):
 
 def _name(item, *, read_text: bool, budget: _Budget) -> str:
     """aria-label, then title, then short inner text. Never an input's value."""
-    reads = [lambda: item.get_attribute("aria-label"), lambda: item.get_attribute("title")]
+    # Every read gets a budget-bound timeout; a detached element would otherwise
+    # wait the page default (about 20 s).
+    reads = [
+        lambda: item.get_attribute("aria-label", timeout=budget.timeout_ms(500)),
+        lambda: item.get_attribute("title", timeout=budget.timeout_ms(500)),
+    ]
     if read_text:
         reads.append(lambda: item.inner_text(timeout=budget.timeout_ms(500)))
     for read in reads:
@@ -235,6 +254,24 @@ def _write_private(path: Path, data: bytes) -> None:
     os.chmod(path, 0o600)
 
 
+def _distinct_roots(page, roots: list) -> list:
+    """The page once, then its child frames. page.frames includes the main frame,
+    which is the same document as the page, so it is dropped."""
+    try:
+        main = page.main_frame
+    except Exception:
+        main = None
+    page_listed = any(root is page for root in roots)
+    kept = []
+    for root in roots:
+        if page_listed and main is not None and root is not page and root == main:
+            continue
+        if any(root is seen for seen in kept):
+            continue
+        kept.append(root)
+    return kept
+
+
 def save_failure_snapshot(
     page,
     run_dir: Path,
@@ -251,6 +288,7 @@ def save_failure_snapshot(
 ) -> str:
     """Write the snapshot; return its path relative to RUN_DIR. Raises on a write error."""
     budget = _Budget(clock or time.monotonic, budget_s)
+    roots = _distinct_roots(page, roots)
     folder = _private_dir(Path(run_dir) / SNAPSHOT_FOLDER)
     stem = snapshot_stem(index, step_id)
     png_href = ""

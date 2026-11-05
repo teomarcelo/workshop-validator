@@ -28,9 +28,11 @@ TYPED = "typed-" + EMAIL
 HTML = f"""<!doctype html>
 <html><head><title>Home | {HOST}</title>
 <style>body {{ margin: 0; background: #ffffff; }} #mail {{ position: absolute; left: 20px; top: 20px;
-width: 300px; height: 40px; background: #ffffff; border: 0; }}</style></head>
+width: 300px; height: 40px; background: #ffffff; border: 0; }}
+#plain {{ position: absolute; left: 400px; top: 20px; width: 300px; height: 40px; background: #ffffff; }}</style></head>
 <body>
 <input id="mail" aria-label="Email" type="text">
+<div id="plain" contenteditable="plaintext-only">{TYPED}</div>
 <div style="margin-top: 80px">
 <button>Save</button>
 <button>Signed in as {EMAIL}</button>
@@ -107,6 +109,9 @@ class FailureSnapshotBrowserTests(unittest.TestCase):
         panels = {(p["role"], p["name"]): p["headings"] for p in data["panels"]}
         self.assertEqual(panels[("dialog", "")], ["Welcome Tour"])
         self.assertEqual(panels[("complementary", "Help panel")], ["Need help?"])
+        # One dialog and one aside: the main document is scanned once, not twice.
+        self.assertEqual(len(data["panels"]), 2)
+        self.assertEqual(data["controls"]["button"].count("Save"), 1)
         self.assertIn("- dialog", data["tree"])
         self.assertEqual(data["truncated"], "")
 
@@ -124,6 +129,8 @@ class FailureSnapshotBrowserTests(unittest.TestCase):
         self.assertTrue(png.startswith(b"\x89PNG"))
         # The input box is painted with the mask colour, so the typed text is hidden.
         self.assertTrue(_magenta_at(png, 60, 40))
+        # The plaintext-only editable is masked too.
+        self.assertTrue(_magenta_at(png, 450, 40))
         self.assertFalse(_magenta_at(png, 700, 580))
 
     def test_real_page_walk_writes_snapshot_for_failed_step(self):
