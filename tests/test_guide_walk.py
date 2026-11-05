@@ -228,6 +228,10 @@ class Loc:
             return {"text": text, "total": len("".join(text.split())), "parts": []}
         if script is guide_walk._FOCUS_INSIDE_JS:
             return getattr(self.page, "focus_inside", True)
+        if script is guide_walk._BOX_STATE_JS:
+            # One read of the box: is ARG (the box's current handle) this element, its value, aria-expanded.
+            return {"same": arg is self, "value": self.input_value() or self.inner_text() or "",
+                    "expanded": self.get_attribute("aria-expanded")}
         if "tagName" in script:
             return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
         if "data-wv-popup" not in script:

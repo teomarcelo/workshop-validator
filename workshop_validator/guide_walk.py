@@ -4594,8 +4594,9 @@ def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
     """The box shows WANT, is not expanded, and its own list shows no option. Fails closed.
 
     The box element is held first. After the options check on the box's own list, one evaluate
-    on that element reads that the box locator still resolves to it, its shown value and its aria-expanded. A vanished or replaced box, an unreadable value,
-    or a missing or unreadable aria-expanded is never closed.
+    on that element reads that the box locator still resolves to it, its shown value and its
+    aria-expanded. A vanished or replaced box, or an unreadable value or aria-expanded, is never
+    closed. A missing aria-expanded is read as not expanded, as before.
     """
     want = _plain(want)
     if box is None or not want:
@@ -4615,8 +4616,9 @@ def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
         _dispose(held, now)
     if not isinstance(read, dict) or read.get("same") is not True:
         return False
-    expanded = read.get("expanded")
-    if not isinstance(expanded, str) or _plain(expanded) == "true":
+    # A missing aria-expanded (null) was read: closed, as before, when the list shows no option.
+    expanded = read.get("expanded", False)
+    if not (expanded is None or isinstance(expanded, str)) or _plain(expanded) == "true":
         return False
     return _plain(read.get("value")) == want
 

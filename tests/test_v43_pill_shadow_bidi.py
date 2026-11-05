@@ -602,13 +602,17 @@ def race_html(after_html, expanded_after_click="true", hide_list=True):
 
 
 def unreadable_expanded_html(how):
-    """The option click closes the list and keeps recThing in the box, but its aria-expanded cannot be
-    read: HOW is "missing" (the attribute is removed) or "throws" (reading it in the page throws)."""
+    """The option click closes the list and keeps recThing in the box, then HOW: "missing" removes
+    aria-expanded; "throws" makes reading aria-expanded in the page throw; "value-throws" makes reading
+    the box's value in the page throw (aria-expanded is "false")."""
     if how == "missing":
         spoil = 'box.removeAttribute("aria-expanded");'
-    else:
+    elif how == "throws":
         spoil = ('box.setAttribute("aria-expanded", "false"); '
                  'box.getAttribute = () => { throw new Error("unreadable"); };')
+    else:
+        spoil = ('box.setAttribute("aria-expanded", "false"); Object.defineProperty(box, "value", '
+                 '{ get() { throw new Error("unreadable"); }, configurable: true });')
     return f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
@@ -684,6 +688,50 @@ class _SwapAfterValueRead:
                 return held
             return handle
         return attr
+
+
+class _ReadBox:
+    """A box whose one-evaluate read returns READ; it is its own current handle."""
+
+    def __init__(self, read):
+        self.read = read
+
+    def element_handle(self, timeout=None):
+        return self
+
+    def evaluate(self, script, arg=None):
+        assert script is guide_walk._BOX_STATE_JS
+        if isinstance(self.read, dict) and "same" not in self.read:
+            return dict(self.read, same=arg is self)
+        return self.read
+
+    def dispose(self):
+        pass
+
+
+class ListClosedReadTests(unittest.TestCase):
+    """The one-evaluate read fails closed on anything it cannot read as expected."""
+
+    def closed(self, read):
+        return guide_walk._list_closed(None, _ReadBox(read), "recThing")
+
+    def test_value_and_closed_state_read_from_the_same_box_count_as_closed(self):
+        self.assertTrue(self.closed({"value": "recThing", "expanded": "false"}))
+        self.assertTrue(self.closed({"value": " recThing ", "expanded": None}))
+
+    def test_anything_unexpected_in_the_read_is_never_closed(self):
+        for read in ({"value": "recThing"}, {"value": "recThing", "expanded": 0},
+                     {"value": "recThing", "expanded": "true"}, {"value": "recThing", "expanded": False},
+                     {"value": "recThing", "expanded": "false", "same": False},
+                     {"value": "recThing", "expanded": "false", "same": 1},
+                     {"value": "", "expanded": "false"}, {"expanded": "false"}):
+            with self.subTest(read=read):
+                self.assertFalse(self.closed(read))
+
+    def test_a_read_that_is_not_a_record_or_a_missing_box_is_never_closed(self):
+        self.assertFalse(guide_walk._list_closed(None, _ReadBox(["recThing"]), "recThing"))
+        self.assertFalse(guide_walk._list_closed(None, None, "recThing"))
+        self.assertFalse(guide_walk._list_closed(None, _ReadBox({"value": "", "expanded": "false"}), ""))
 
 
 @unittest.skipUnless(SMOKE, SMOKE_REASON)
@@ -765,15 +813,29 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
         self.assertEqual(result.note, MISS_NOTE)
         self.assertTrue(result.freeze)
 
-    def test_box_whose_expanded_state_cannot_be_read_is_never_closed(self):
-        for how in ("missing", "throws"):
+    def box_value(self):
+        """The box's value through the browser's own getter (a page override cannot hide it)."""
+        return self.page.evaluate("Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')"
+                                  ".get.call(document.getElementById('rv'))")
+
+    def test_box_whose_state_cannot_be_read_is_never_closed(self):
+        for how in ("throws", "value-throws"):
             with self.subTest(how=how):
                 result = self.fill(unreadable_expanded_html(how))
-                self.assertEqual(self.page.evaluate("document.getElementById('rv').value"), "recThing")
+                self.assertEqual(self.box_value(), "recThing")
                 self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
                 self.assertEqual(result.status, "UI_MISMATCH", result.note)
                 self.assertEqual(result.note, MISS_NOTE)
                 self.assertTrue(result.freeze)
+
+    def test_box_with_no_expanded_attribute_and_no_shown_option_is_closed_as_before(self):
+        # Chosen: a missing aria-expanded is read as not expanded (base behavior, which the fake-page
+        # lookup tests rely on). PASS still needs the value read from the same box and no shown option.
+        result = self.fill(unreadable_expanded_html("missing"))
+        self.assertEqual(self.box_value(), "recThing")
+        self.assertIsNone(self.page.locator("#rv").get_attribute("aria-expanded"))
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.note, "Record Variable is recThing. The field shows it and its list closed.")
 
     def test_walk_goes_on_after_a_swap_between_reads_and_run_is_inconclusive(self):
         page = self.open(race_html(PILL_FIELD), swap_after_read=True)
