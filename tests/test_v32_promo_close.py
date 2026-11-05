@@ -10,7 +10,7 @@ except ImportError:
     sync_playwright = None
 
 from workshop_validator import guide_walk
-from tests.test_guide_walk import Clock, Page, as_builder, inventory_of, step, walk_guide
+from tests.test_guide_walk import Clock, Page, as_builder, inventory_of, new_resource_dialog, step, walk_guide
 
 FLOWS_URL = "https://example.lightning.force.com/lightning/setup/Flows/home"
 BUILDER_URL = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
@@ -177,7 +177,7 @@ class PromoCloseTests(unittest.TestCase):
         page.on_click = lambda kind, name: (
             page.roles.discard(("dialog", PROMO)) if name == "Close" else
             page.roles.add(("button", "New Resource")) if name == "Toggle Toolbox" else
-            page.roles.add(("option", "Variable")) if name == "New Resource" else
+            new_resource_dialog(page) if name == "New Resource" else
             page.roles.add(("textbox", "API Name")) if name == "Variable" else None
         )
         state = state_for(page)
@@ -256,7 +256,7 @@ class PromoScopeTests(unittest.TestCase):
         page = as_builder(promo_page(BUILDER_URL, buttons=("Close",), dialog=NOTICE))
         page.on_click = lambda kind, name: (
             page.roles.add(("button", "New Resource")) if name == "Toggle Toolbox" else
-            page.roles.add(("option", "Variable")) if name == "New Resource" else
+            new_resource_dialog(page) if name == "New Resource" else
             page.roles.add(("textbox", "API Name")) if name == "Variable" else None
         )
         state = state_for(page)

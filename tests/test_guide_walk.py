@@ -438,6 +438,14 @@ def as_builder(page):
     return page
 
 
+def new_resource_dialog(page):
+    """The New Resource dialog: a Resource Type combobox and, inside the dialog, a Variable option."""
+    page.roles.add(("dialog", "New Resource"))
+    page.roles.add(("combobox", "Resource Type"))
+    page.roles.add(("option", "Variable"))
+    page.children.setdefault(("dialog", "New Resource"), []).append(("option", "Variable"))
+
+
 def inventory_of(*items):
     return GuideInventory(1, tuple(items), (), ())
 
@@ -1315,8 +1323,7 @@ class WalkTests(unittest.TestCase):
             if name == "Toggle Toolbox":
                 page.roles.add(("button", "New Resource"))
             if name == "New Resource":
-                page.roles.add(("combobox", "Resource Type"))
-                page.roles.add(("option", "Variable"))
+                new_resource_dialog(page)
             if name == "Variable":
                 page.roles.add(("textbox", "API Name"))
 
@@ -2804,7 +2811,7 @@ class FlowBuilderEvidenceTests(unittest.TestCase):
             if name == "Toggle Toolbox":
                 page.roles.add(("button", "New Resource"))
             if name == "New Resource":
-                page.roles.add(("option", "Variable"))
+                new_resource_dialog(page)
             if name == "Variable":
                 page.roles.add(("textbox", "API Name"))
 
