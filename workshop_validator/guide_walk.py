@@ -129,6 +129,9 @@ class WalkState:
     miss_full_wait: dict[str, bool] = field(default_factory=dict)
     # Per step: triage notes added to the step result (never PASS evidence).
     step_notes: list[str] = field(default_factory=list)
+    # Per step: (normalized label, note) of the last lookup poll that found its list but no
+    # option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
+    lookup_miss: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -3353,11 +3356,31 @@ def _unnamed_modal(page, step_text: str, state=None):
     """
     step_norm = norm(step_text)
     recorded = _recorded_dialogs(page, state)
+    dialogs = _visible_dialogs(page)
+    # An open guide dialog with aria-modal=true is on top: a non-modal dialog outside it
+    # (a popover behind its backdrop) never covers the page. Another modal still can.
+    guide_modals = [
+        item for item, title, _text in dialogs
+        if title and _is_recorded(title, recorded) and _read_attr(item, "aria-modal") == "true"
+    ]
     candidates = [
-        (item, title) for item, title, dialog_text in _visible_dialogs(page)
+        (item, title) for item, title, dialog_text in dialogs
         if title and norm(title) not in step_norm and not _is_recorded(title, recorded) and len(dialog_text) > 5
+        and (not guide_modals or _read_attr(item, "aria-modal") == "true"
+             or any(_holds_element(modal, item) for modal in guide_modals))
     ]
     return _pick_unnamed(candidates, state)
+
+
+def _holds_element(outer, inner) -> bool:
+    """INNER is inside OUTER (and not OUTER itself). Unreadable means no."""
+    try:
+        handle = inner.element_handle(timeout=1000)
+        if handle is None:
+            return False
+        return bool(outer.evaluate("(el, other) => el !== other && el.contains(other)", handle))
+    except Exception:
+        return False
 
 
 def _visible_dialogs(page) -> list:
@@ -3571,6 +3594,31 @@ def _close_unrelated_popup(state: WalkState, step: GuideStep) -> tuple[str | Non
     return (title if success else None), attempt
 
 
+# Focus the pop-up (or its first focusable element; focus is not a click), then report
+# whether focus is inside it. Nothing is activated.
+_FOCUS_INSIDE_JS = """
+(el) => {
+  if (!el.contains(document.activeElement)) el.focus({preventScroll: true});
+  if (!el.contains(document.activeElement)) {
+    const first = el.querySelector(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])');
+    if (first) first.focus({preventScroll: true});
+  }
+  return el.contains(document.activeElement);
+}
+"""
+
+
+def _focus_inside(handle) -> bool:
+    """True only when focus is now inside this pop-up. Unreadable means no."""
+    if handle is None:
+        return False
+    try:
+        return handle.evaluate(_FOCUS_INSIDE_JS) is True
+    except Exception:
+        return False
+
+
 def _close_dialog(state: WalkState, dialog, promo_page=None) -> CloseAttempt:
     """Close this dialog with its own dismiss control (exact name), else Escape. Returns what happened.
 
@@ -3596,7 +3644,9 @@ def _close_dialog(state: WalkState, dialog, promo_page=None) -> CloseAttempt:
             button.click(timeout=5000)
         except Exception:
             click_raised = True
-    else:
+    elif _focus_inside(handle):
+        # Escape goes to the focused element: only with focus inside the pop-up,
+        # never into a guide field that still holds focus.
         page_for_escape = promo_page if promo_page is not None else state.page
         keyboard = getattr(page_for_escape, "keyboard", None)
         try:
@@ -4140,17 +4190,58 @@ def _resource_is_variable(page) -> bool:
     return box is not None and _shown_value(box) == "Variable"
 
 
-def _option_label(option) -> str:
-    """An option's label: its first non-empty line. Flow Builder adds a description line below it."""
+# The option's visible lines: text nodes with a rendered box, outside screen-reader-only text
+# (.slds-assistive-text) and aria-hidden parts. Text on one visual row is one line.
+_VISIBLE_LINES_JS = """
+(el) => {
+  const skip = (node) => {
+    for (let at = node; at && at !== el.parentNode; at = at.parentElement) {
+      if (at.classList && at.classList.contains("slds-assistive-text")) return true;
+      if (at.getAttribute("aria-hidden") === "true") return true;
+      if (at.getClientRects().length === 0) return true;
+    }
+    return false;
+  };
+  const lines = [];
+  let bottom = null;
+  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.data || skip(node.parentElement)) continue;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const box = range.getBoundingClientRect();
+    if (box.width === 0 && box.height === 0) continue;
+    if (bottom !== null && box.top < bottom - 1) {
+      lines[lines.length - 1] += node.data;
+      bottom = Math.max(bottom, box.bottom);
+    } else {
+      lines.push(node.data);
+      bottom = box.bottom;
+    }
+  }
+  return lines;
+}
+"""
+
+
+def _option_lines(option) -> list[str]:
+    """The option's visible, non-empty lines. Screen-reader-only text is never read.
+
+    An option that cannot be read in the browser has no lines, so it never matches.
+    """
     try:
-        text = str(option.inner_text(timeout=1000) or "")
+        raw = option.evaluate(_VISIBLE_LINES_JS)
     except Exception:
-        return ""
-    for line in text.splitlines():
-        label = _plain(line)
-        if label:
-            return label
-    return ""
+        return []
+    if not isinstance(raw, list):
+        return []
+    return [line for line in (_plain(item) for item in raw) if line]
+
+
+def _option_label(option) -> str:
+    """An option's label: its first visible line. Flow Builder adds a description line below it."""
+    lines = _option_lines(option)
+    return lines[0] if lines else ""
 
 
 def _by_id(root, ident: str):
@@ -4202,18 +4293,35 @@ def _owned_listbox(root, box, dialog_name: str = ""):
     DIALOG_NAME is a last fallback for a control whose own dialog cannot be read.
     Nothing outside that scope is ever searched.
     """
+    return _owned_scope(root, box, dialog_name)[1]
+
+
+def _owned_scope(root, box, dialog_name: str = ""):
+    """(kind, element) of _owned_listbox: kind is "aria-controls", "dialog" or "none".
+
+    A named list that holds no option falls back to the dialog that holds the box,
+    never to the page.
+    """
     if root is None or box is None:
-        return None
+        return "none", None
     owned = _id_owned_list(root, box)
-    if owned is not None:
-        return owned
     dialog = _enclosing_dialog(box)
+    if owned is not None and (dialog is None or _holds_options(owned)):
+        return "aria-controls", owned
     if dialog is not None:
-        return dialog
+        return "dialog", dialog
     if not dialog_name:
-        return None
+        return "none", None
     loc = _by_role(root, "dialog", dialog_name, exact=True)
-    return None if loc is None else _visible_match(loc)
+    found = None if loc is None else _visible_match(loc)
+    return ("dialog", found) if found is not None else ("none", None)
+
+
+def _holds_options(scope) -> bool:
+    try:
+        return _count(scope.get_by_role("option")) > 0
+    except Exception:
+        return False
 
 
 def _resource_listbox(root, box):
@@ -4350,6 +4458,39 @@ def _await_lookup_scope(state: WalkState, label: str, root, box) -> CheckResult 
     return _no_lookup_scope(label, named)
 
 
+def _option_kind(first: str, want: str) -> str:
+    if first == want:
+        return "match"
+    if first and (first.startswith(want) or want.startswith(first)):
+        return "typed-prefix"
+    return "other"
+
+
+def _lookup_miss_note(root, box, label: str, want: str) -> str:
+    """Why no option was picked, with safe facts only: the scope, counts, and per option
+    its first line's kind (match, typed-prefix, other) and line count. No option text is shown."""
+    kind, scope = _owned_scope(root, box)
+    options = _scoped_options(scope)
+    parts = []
+    for option, first, shown in options[:8]:
+        count = len(_option_lines(option))
+        hidden = "" if shown else ", hidden"
+        parts.append(f"{_option_kind(first, want)} ({count} line{'' if count == 1 else 's'}{hidden})")
+    visible = sum(1 for _option, _first, shown in options if shown)
+    return (
+        f"No visible option in the {label} list has the first line {want}, so none was clicked. "
+        f"Diagnostic: scope {kind}; {len(options)} options, {visible} visible; "
+        f"options: {', '.join(parts) or 'none'}."
+    )
+
+
+def _lookup_miss_result(state: WalkState, target: str) -> CheckResult | None:
+    """At the time limit: the last lookup poll's miss, as the step's frozen UI_MISMATCH."""
+    if not state.lookup_miss or state.lookup_miss[0] != norm(target):
+        return None
+    return CheckResult("UI_MISMATCH", state.lookup_miss[1], (), freeze=True)
+
+
 def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: str) -> CheckResult | None:
     """Fill a lookup and click the one option whose first line is VALUE, inside the lookup's own list.
 
@@ -4360,6 +4501,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     field shows exactly VALUE, and the list closed.
     """
     want = _plain(value)
+    state.lookup_miss = ()
     root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
     if box is None or not want:
         return None
@@ -4383,6 +4525,8 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             return None
         picks = _matching_options(root, box, want)
     if not picks:
+        # Not yet: the caller keeps polling. What was in scope is kept for the time limit.
+        state.lookup_miss = (norm(label), _lookup_miss_note(root, box, label, want))
         return None
     if len(picks) > 1:
         return CheckResult(
@@ -6196,7 +6340,8 @@ def _finish_attempt(
             return CheckResult("NOT_RUN", LOADING_NOTE, ())
         research_closed = memory.done and not memory.pending
         if not loading and _wait_done(state, start) and research_closed:
-            return _freeze_result(state, step, intent.target, memory.candidate)
+            missed = _lookup_miss_result(state, intent.target) if intent.kind == "fill" else None
+            return missed or _freeze_result(state, step, intent.target, memory.candidate)
         _report_wait(state, step, intent, start)
         _sleep(state, state.page_poll_s if state.page_poll_s > 0 else PAGE_POLL_S)
 
@@ -6394,6 +6539,7 @@ def walk_guide(
         state.popup_notes = []
         state.miss_full_wait = {}
         state.step_notes = []
+        state.lookup_miss = ()
         if skipped is None:
             _forget_closed_dialogs(state)
         state.step_deadline = t_start + step_cap_s

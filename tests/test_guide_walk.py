@@ -218,7 +218,15 @@ class Loc:
         return self.page
 
     def evaluate(self, script, arg=None):
-        """The data mark (page.locator("[data-wv-popup='<mark>']") finds this element) and the tag name."""
+        """The data mark (page.locator("[data-wv-popup='<mark>']") finds this element) and the tag name.
+
+        The fake has no screen-reader-only parts: its visible lines are its text lines, and
+        focus moves into it unless page.focus_inside is False.
+        """
+        if script is guide_walk._VISIBLE_LINES_JS:
+            return str(self.inner_text() or "").splitlines()
+        if script is guide_walk._FOCUS_INSIDE_JS:
+            return getattr(self.page, "focus_inside", True)
         if "tagName" in script:
             return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
         if "data-wv-popup" not in script:
