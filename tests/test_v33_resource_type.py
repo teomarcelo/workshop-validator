@@ -159,6 +159,12 @@ class _TextsLoc:
     def inner_text(self, timeout=None):
         return self.texts[0]
 
+    def evaluate(self, script, arg=None):
+        """Visible lines: the fake has no screen-reader-only parts."""
+        if script is guide_walk._VISIBLE_LINES_JS:
+            return self.inner_text().splitlines()
+        raise NotImplementedError(script)
+
 
 class _OptionLoc(Loc):
     """A Flow Builder option: a label line, then a description line, both in its text."""

@@ -166,7 +166,7 @@ class TestV38PromoOtherTab(unittest.TestCase):
             page2 = context.new_page()
             page2.set_content("""
                 <html><body>
-                    <div role="dialog" id="promo" aria-modal="true" style="position: fixed; z-index: 999;">
+                    <div role="dialog" id="promo" aria-modal="true" tabindex="-1" style="position: fixed; z-index: 999;">
                         <p>Go Mobile with Salesforce</p>
                     </div>
                 </body></html>
@@ -312,7 +312,7 @@ class TestV38PromoOtherTab(unittest.TestCase):
             page2 = context.new_page()
             page2.set_content("""
                 <html><body>
-                    <div role="dialog" id="promo" aria-modal="true" style="position: fixed; z-index: 999;">
+                    <div role="dialog" id="promo" aria-modal="true" tabindex="-1" style="position: fixed; z-index: 999;">
                         <p>Go Mobile with Salesforce</p>
                     </div>
                     <script>
