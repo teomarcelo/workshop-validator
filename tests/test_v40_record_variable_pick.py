@@ -40,8 +40,11 @@ ASSISTIVE_CSS = """
 """
 
 
-def screen_html(option="varWidgetRec", controls="lb", backdrop=False):
+def screen_html(option="varWidgetRec", controls="lb", backdrop=False, option_html=None, option_style=""):
     """The guide's own Sample Screen dialog with a Record Variable lookup whose list is open."""
+    if option_html is None:
+        option_html = ('<span class="slds-assistive-text">Record</span><svg aria-hidden="true" '
+                       f'width="12" height="12"></svg><strong>{option}</strong>')
     empty = '<div id="lb-empty"></div>' if controls == "lb-empty" else ""
     behind = """
 <div class="slds-backdrop"></div>
@@ -61,8 +64,7 @@ def screen_html(option="varWidgetRec", controls="lb", backdrop=False):
       <div role="presentation"><span>All Resources</span></div>
       <ul role="group" aria-labelledby="g1">
         <li role="presentation" id="g1"><span>Record Variables</span></li>
-        <li role="option" id="opt1"><span class="slds-assistive-text">Record</span><svg aria-hidden="true"
-            width="12" height="12"></svg><strong>{option}</strong></li>
+        <li role="option" id="opt1" style="{option_style}">{option_html}</li>
       </ul>
       <a href="#">Expand Search</a>
       <div role="option" id="opt2"><span>+ New Resource</span></div>
@@ -86,6 +88,33 @@ def screen_html(option="varWidgetRec", controls="lb", backdrop=False):
   }});
   box.focus();
 </script>
+"""
+
+
+SOFT_WRAP = "width: min-content"
+LABEL_CASES_HTML = ASSISTIVE_CSS + """
+<div role="listbox">
+  <div role="option" id="mark-text" style="width: min-content"><mark>Account</mark> Name</div>
+  <div role="option" id="mark-span" style="width: min-content"><mark>Account</mark> <span>Name</span></div>
+  <div role="option" id="two-block"><span style="display:block">Account</span>
+    <span style="display:block">Sample description line</span></div>
+  <div role="option" id="br-line">Account<br>Sample description line</div>
+  <div role="option" id="clip-rect"><span style="position:absolute; width:1px; height:1px; overflow:hidden;
+    clip:rect(0 0 0 0)">Record</span><strong>Account</strong></div>
+  <div role="option" id="clip-path"><span style="position:absolute; width:1px; height:1px; overflow:hidden;
+    clip-path:inset(50%)">Record</span><strong>Account</strong></div>
+  <div role="option" id="hidden-part"><span style="display:none">Record</span>Account</div>
+</div>
+"""
+
+RESOURCE_TYPE_EMPTY_HTML = """
+<div role="dialog" aria-modal="true" aria-labelledby="nr-t">
+  <h2 id="nr-t">New Resource</h2>
+  <label for="rt">Resource Type</label>
+  <input id="rt" role="combobox" aria-expanded="true" aria-controls="rt-list" autocomplete="off">
+  <div id="rt-list" role="listbox"></div>
+  <div role="listbox" aria-label="Sample Other List"><div role="option" id="other-var">Variable</div></div>
+</div>
 """
 
 
@@ -296,6 +325,53 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
         self.assertEqual(page.locator("#f").input_value(), "keep")
         self.assertIn('closed "Sample Welcome" pop-up', " ".join(state.popup_notes))
 
+
+    def test_soft_wrap_never_splits_an_option_label(self):
+        page = self.open(LABEL_CASES_HTML)
+        for ident in ("mark-text", "mark-span"):
+            with self.subTest(ident):
+                # The fixture really wraps: the option is at least two mark-heights tall.
+                self.assertTrue(page.locator(f"#{ident}").evaluate(
+                    "el => el.getBoundingClientRect().height >= 1.8 * el.querySelector('mark').getBoundingClientRect().height"))
+                self.assertEqual(guide_walk._option_lines(page.locator(f"#{ident}")), ["Account Name"])
+                self.assertEqual(guide_walk._option_label(page.locator(f"#{ident}")), "Account Name")
+
+    def test_hard_boundaries_still_split_lines(self):
+        page = self.open(LABEL_CASES_HTML)
+        for ident in ("two-block", "br-line"):
+            with self.subTest(ident):
+                self.assertEqual(guide_walk._option_lines(page.locator(f"#{ident}")),
+                                 ["Account", "Sample description line"])
+
+    def test_clipped_and_hidden_screen_reader_text_is_skipped(self):
+        page = self.open(LABEL_CASES_HTML)
+        for ident in ("clip-rect", "clip-path", "hidden-part"):
+            with self.subTest(ident):
+                self.assertEqual(guide_walk._option_lines(page.locator(f"#{ident}")), ["Account"])
+
+    def test_soft_wrapped_longer_option_is_never_clicked_for_its_first_word(self):
+        for inner in ("<mark>varWidgetRec</mark> Copy", "<mark>varWidgetRec</mark> <span>Copy</span>"):
+            with self.subTest(inner):
+                result = self.fill(screen_html(option_html=inner, option_style=SOFT_WRAP))
+                self.assertEqual(result.status, "UI_MISMATCH", result.note)
+                self.assertTrue(result.freeze)
+                self.assertIn("options: typed-prefix (1 line), other (1 line).", result.note)
+                self.assertEqual(self.page.evaluate("window.chosen"), [])
+
+    def test_two_line_block_option_is_still_picked_by_its_first_line(self):
+        inner = ('<strong style="display:block">varWidgetRec</strong>'
+                 '<span style="display:block">Sample record row</span>')
+        result = self.fill(screen_html(option_html=inner))
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+        self.assertEqual(self.page.locator("#rv").input_value(), "varWidgetRec")
+
+    def test_empty_resource_type_list_is_not_replaced_by_another_list_in_the_dialog(self):
+        page = self.open(RESOURCE_TYPE_EMPTY_HTML)
+        root, _role, box = guide_walk._resource_type_box(page)
+        self.assertIsNotNone(box)
+        self.assertEqual(guide_walk._resource_listbox(root, box).get_attribute("id"), "rt-list")
+        self.assertEqual(guide_walk._variable_options(page), [])
 
 if __name__ == "__main__":
     unittest.main()

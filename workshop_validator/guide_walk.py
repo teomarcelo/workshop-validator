@@ -4190,36 +4190,41 @@ def _resource_is_variable(page) -> bool:
     return box is not None and _shown_value(box) == "Variable"
 
 
-# The option's visible lines: text nodes with a rendered box, outside screen-reader-only text
-# (.slds-assistive-text) and aria-hidden parts. Text on one visual row is one line.
-_VISIBLE_LINES_JS = """
+# The option's visible lines, read like innerText: a line ends only at a hard boundary
+# (a block-level element, <br>, or a newline in preformatted text), never at a soft wrap.
+# Screen-reader-only text (.slds-assistive-text, or a tiny clipped box), aria-hidden parts
+# and parts with no rendered box are skipped.
+_VISIBLE_LINES_JS = r"""
 (el) => {
-  const skip = (node) => {
-    for (let at = node; at && at !== el.parentNode; at = at.parentElement) {
-      if (at.classList && at.classList.contains("slds-assistive-text")) return true;
-      if (at.getAttribute("aria-hidden") === "true") return true;
-      if (at.getClientRects().length === 0) return true;
-    }
-    return false;
+  const clipped = (style) =>
+    /^rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)$/.test(style.clip) || style.clipPath === "inset(50%)";
+  const hidden = (at, style) => {
+    if (at.classList.contains("slds-assistive-text")) return true;
+    if (at.getAttribute("aria-hidden") === "true") return true;
+    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return true;
+    if (style.display !== "contents" && at.getClientRects().length === 0) return true;
+    const box = at.getBoundingClientRect();
+    return box.width <= 1 && box.height <= 1 && clipped(style);
   };
-  const lines = [];
-  let bottom = null;
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (!node.data || skip(node.parentElement)) continue;
-    const range = document.createRange();
-    range.selectNodeContents(node);
-    const box = range.getBoundingClientRect();
-    if (box.width === 0 && box.height === 0) continue;
-    if (bottom !== null && box.top < bottom - 1) {
-      lines[lines.length - 1] += node.data;
-      bottom = Math.max(bottom, box.bottom);
-    } else {
-      lines.push(node.data);
-      bottom = box.bottom;
+  const out = [];
+  const walk = (node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      const space = getComputedStyle(node.parentElement).whiteSpace;
+      const keep = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(space);
+      out.push(keep ? node.data : node.data.replace(/\s+/g, " "));
+      return;
     }
-  }
-  return lines;
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const style = getComputedStyle(node);
+    if (hidden(node, style)) return;
+    if (node.tagName === "BR") { out.push("\n"); return; }
+    const block = node !== el && !style.display.startsWith("inline") && style.display !== "contents";
+    if (block) out.push("\n");
+    for (const child of node.childNodes) walk(child);
+    if (block) out.push("\n");
+  };
+  walk(el);
+  return out.join("").split("\n");
 }
 """
 
@@ -4296,17 +4301,17 @@ def _owned_listbox(root, box, dialog_name: str = ""):
     return _owned_scope(root, box, dialog_name)[1]
 
 
-def _owned_scope(root, box, dialog_name: str = ""):
+def _owned_scope(root, box, dialog_name: str = "", empty_falls_back: bool = False):
     """(kind, element) of _owned_listbox: kind is "aria-controls", "dialog" or "none".
 
-    A named list that holds no option falls back to the dialog that holds the box,
-    never to the page.
+    With EMPTY_FALLS_BACK (the lookup pick only), a named list that holds no option falls
+    back to the dialog that holds the box, never to the page.
     """
     if root is None or box is None:
         return "none", None
     owned = _id_owned_list(root, box)
     dialog = _enclosing_dialog(box)
-    if owned is not None and (dialog is None or _holds_options(owned)):
+    if owned is not None and (not empty_falls_back or dialog is None or _holds_options(owned)):
         return "aria-controls", owned
     if dialog is not None:
         return "dialog", dialog
@@ -4349,13 +4354,14 @@ def _scoped_options(scope) -> list:
     return found
 
 
-def _matching_options(root, box, value: str, dialog_name: str = "") -> list:
+def _matching_options(root, box, value: str, dialog_name: str = "", empty_falls_back: bool = False) -> list:
     """Visible options whose first line is exactly VALUE, inside the list this box owns only."""
     want = _plain(value)
     if not want:
         return []
+    scope = _owned_scope(root, box, dialog_name, empty_falls_back)[1]
     return [
-        option for option, label, shown in _scoped_options(_owned_listbox(root, box, dialog_name))
+        option for option, label, shown in _scoped_options(scope)
         if shown and label == want
     ]
 
@@ -4469,7 +4475,7 @@ def _option_kind(first: str, want: str) -> str:
 def _lookup_miss_note(root, box, label: str, want: str) -> str:
     """Why no option was picked, with safe facts only: the scope, counts, and per option
     its first line's kind (match, typed-prefix, other) and line count. No option text is shown."""
-    kind, scope = _owned_scope(root, box)
+    kind, scope = _owned_scope(root, box, empty_falls_back=True)
     options = _scoped_options(scope)
     parts = []
     for option, first, shown in options[:8]:
@@ -4505,7 +4511,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
     if box is None or not want:
         return None
-    picks = _matching_options(root, box, want)
+    picks = _matching_options(root, box, want, empty_falls_back=True)
     if not picks:
         if _shown_value(box) != want:
             _fill_labeled(state, label, value)
@@ -4523,7 +4529,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
         if box is None:
             return None
-        picks = _matching_options(root, box, want)
+        picks = _matching_options(root, box, want, empty_falls_back=True)
     if not picks:
         # Not yet: the caller keeps polling. What was in scope is kept for the time limit.
         state.lookup_miss = (norm(label), _lookup_miss_note(root, box, label, want))
