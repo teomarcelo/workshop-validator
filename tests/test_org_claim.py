@@ -322,16 +322,15 @@ class ClaimGateTests(unittest.TestCase):
             self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
             claim.assert_called_once()
 
-    def test_w099_each_owner_code_is_claimed_only_once(self):
-        """A CLAIMED code is refused for every later run, not only the same run."""
+    def test_w104_a_claimed_code_can_be_claimed_again(self):
+        """Changed for W-104 (was once-per-code): a CLAIMED code is allowed again, in any run."""
         for run in ("run-1", "run-2"):
             with self.subTest(run=run), tempfile.TemporaryDirectory() as folder:
                 self._with_run(folder, run)
                 self._claimed_marker(folder, "SYNTH")
                 code, out, claim = self._claim(folder)
-                self.assertEqual((code, out.strip()),
-                                 (org_claim.REFUSED, "org-claim: REFUSED this event code was already claimed"))
-                claim.assert_not_called()
+                self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+                claim.assert_called_once()
 
     def test_the_marker_is_reserved_before_the_browser_opens(self):
         """The first claim reserves the marker; a reserved claim does not block the next."""
@@ -345,7 +344,7 @@ class ClaimGateTests(unittest.TestCase):
             # W-099: reserving counts no try; only the submit click does.
             self.assertEqual(json.loads(marker.read_text()),
                              {"last_run": "run-1", "result": "reserved", "code_sha256": digest,
-                              "code_attempts": {}, "claimed": []})
+                              "code_attempts": {}, "claimed": [], "pending": [], "org_baseline": 2})
             self.assertNotIn("SYNTH", marker.read_text().replace(digest, ""))
             self.assertEqual(stat.S_IMODE(marker.stat().st_mode), 0o600)
             second, out, again = self._claim(folder)
@@ -457,7 +456,7 @@ class ClaimGateTests(unittest.TestCase):
             self.assertEqual(json.loads(marker.read_text())["code_attempts"], {digest: 1})
 
     def test_claim_is_allowed_after_a_new_run_or_non_claimed_marker(self):
-        """W-097: allowed for a different run or a non-CLAIMED marker; a CLAIMED code is not."""
+        """W-097: allowed for a different run or a non-CLAIMED marker; W-104: a CLAIMED code too."""
         # Case 1: Different run with any status - allowed
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
@@ -465,13 +464,288 @@ class ClaimGateTests(unittest.TestCase):
             code, _, claim = self._claim(folder)
             self.assertEqual(code, 0)
             claim.assert_called_once()
-        # Case 2 (changed for W-099): this same code was CLAIMED - blocked
+        # Case 2 (changed for W-104): this same code was CLAIMED - allowed again
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
             self._claimed_marker(folder, "SYNTH")
             code, _, claim = self._claim(folder)
-            self.assertEqual(code, org_claim.REFUSED)
-            claim.assert_not_called()
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
+
+    def _details_page(self, username, password="Synth3tic!Pass"):
+        html = DETAILS.replace("learner.synthetic@example.test", username).replace("Synth3tic!Pass", password)
+
+        def hook(page):
+            page.url, page.html = "https://portal.example.test/done", html
+        return FakePage(_routes(), on_click=hook)
+
+    def _marker_data(self, folder):
+        return json.loads((Path(folder) / "team" / "claim-attempt").read_text())
+
+    def test_w104_the_same_code_claims_twice_with_two_new_usernames(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            first = self._submit(folder, self._details_page("first.new@example.test"))
+            second = self._submit(folder, self._details_page("second.new@example.test", "Second2!Pass"))
+            self.assertEqual([first, second], [(0, "org-claim: CLAIMED org 3\n"), (0, "org-claim: CLAIMED org 4\n")])
+            self.assertEqual([o["username"] for o in load_orgs(Path(folder))][2:],
+                             ["first.new@example.test", "second.new@example.test"])
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            self.assertEqual(self._marker_data(folder)["claimed"], [digest, digest])
+            text = (Path(folder) / "team" / "claim-attempt").read_text()
+            self.assertNotIn("SYNTH", text.replace(digest, ""))
+            self.assertEqual(stat.S_IMODE((Path(folder) / "team" / "claim-attempt").stat().st_mode), 0o600)
+
+    def test_w102_the_eleventh_claim_is_refused_and_nothing_is_submitted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            digests = [hashlib.sha256(f"SYNTH-{i % 3}".encode()).hexdigest() for i in range(10)]
+            path = Path(folder) / "team" / "claim-attempt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"last_run": "run-1", "result": "CLAIMED", "code_sha256": digests[-1],
+                                        "code_attempts": {}, "claimed": digests}))
+            before = path.read_bytes()
+            for event_code in ("SYNTH-0", "SYNTH-NEW"):
+                page = self._details_page("eleventh@example.test")
+                code, out = self._submit(folder, page, event_code=event_code)
+                self.assertEqual((code, out), (org_claim.REFUSED, "org-claim: REFUSED 10 new orgs already claimed "
+                                                                  "(W-102); the owner must verify before another\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(len(load_orgs(Path(folder))), 2)
+
+    def test_w102_an_old_marker_with_one_claimed_digest_counts_as_one(self):
+        """The marker from the first real claim (one CLAIMED digest) leaves 9 claims."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._claimed_marker(folder, "SYNTH")
+            for i in range(9):
+                code, out = self._submit(folder, self._details_page(f"new{i}@example.test"))
+                self.assertEqual((code, out.strip()), (0, f"org-claim: CLAIMED org {i + 3}"))
+            page = self._details_page("tenth@example.test")
+            code, out = self._submit(folder, page, event_code="SYNTH-OTHER")
+            self.assertEqual((code, out.strip()), (org_claim.REFUSED, "org-claim: REFUSED " + org_claim.TOTAL_CAP_REFUSED))
+            self.assertEqual(page.clicked, [])
+            self.assertEqual(len(self._marker_data(folder)["claimed"]), 10)
+
+    def _write_marker(self, folder, data):
+        path = Path(folder) / "team" / "claim-attempt"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data))
+        return path
+
+    def _nine_claimed(self, folder):
+        digest = hashlib.sha256(b"SYNTH").hexdigest()
+        self._write_marker(folder, {"last_run": "run-1", "result": "CLAIMED", "code_sha256": digest,
+                                    "code_attempts": {}, "claimed": [digest] * 9})
+
+    def _assert_capped(self, folder, event_code="SYNTH-LAST"):
+        page = self._details_page("capped@example.test")
+        self.assertEqual(self._submit(folder, page, event_code=event_code),
+                         (org_claim.REFUSED, "org-claim: REFUSED " + org_claim.TOTAL_CAP_REFUSED + "\n"))
+        self.assertEqual((page.filled, page.clicked), ([], []))
+
+    def _review_page(self):
+        def submit(page):
+            page.url, page.html = "https://portal.example.test/events", NEW_BLOCK + OTHER_NEW_BLOCK
+        return FakePage(_routes(), on_click=submit)
+
+    def test_w102_a_needs_review_submit_counts_toward_the_cap(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            self._with_run(folder, "run-1")
+            self._nine_claimed(folder)
+            self.assertEqual(self._submit(folder, self._review_page()),
+                             (org_claim.NEEDS_REVIEW_EXIT, "org-claim: NEEDS_REVIEW could not read credentials\n"))
+            self.assertEqual(self._marker_data(folder)["pending"], [hashlib.sha256(b"SYNTH").hexdigest()])
+            self._assert_capped(folder)
+
+    def test_w102_ten_mixed_results_then_the_next_claim_is_refused(self):
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
+            self._with_run(folder, "run-1")
+            n = itertools.count()
+            plan = [("A", "stop"), ("A", "stop"), ("A", "claim"), ("B", "review"), ("B", "claim"),
+                    ("A", "claim"), ("C", "stop"), ("C", "claim"), ("C", "claim"), ("C", "claim")]
+            for code, kind in plan:
+                page = {"stop": self._stop_after_submit, "review": self._review_page,
+                        "claim": lambda: self._details_page(f"mixed{next(n)}@example.test")}[kind]()
+                self._submit(folder, page, event_code=f"SYNTH-{code}")
+                self.assertEqual(page.clicked, ["Submit"])
+            marker = self._marker_data(folder)
+            self.assertEqual((len(marker["claimed"]), len(marker["pending"])), (6, 4))
+            self.assertEqual(len(load_orgs(Path(folder))), 2 + 6)
+            self._assert_capped(folder, event_code="SYNTH-D")
+            self._assert_capped(folder, event_code="SYNTH-A")
+
+    def test_w102_a_crash_after_the_org_is_saved_still_counts(self):
+        real = org_claim.append_org
+
+        def crash(*args):
+            real(*args)
+            raise RuntimeError("synthetic crash")
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._nine_claimed(folder)
+            with mock.patch.object(org_claim, "append_org", side_effect=crash):
+                code, out = self._submit(folder, self._details_page("crash@example.test"))
+            self.assertEqual((code, out.strip()), (org_claim.INCONCLUSIVE, "org-claim: ERROR RuntimeError"))
+            self.assertEqual(len(load_orgs(Path(folder))), 3)
+            self.assertEqual(len(self._marker_data(folder)["pending"]), 1)
+            self._assert_capped(folder)
+
+    def test_w102_a_deleted_or_emptied_marker_is_refused_when_orgs_grew(self):
+        for emptied in (False, True):
+            with self.subTest(emptied=emptied), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                self.assertEqual(self._submit(folder, self._details_page("one@example.test"))[0], 0)
+                self.assertEqual(json.loads((Path(folder) / "team" / "claim-baseline").read_text()),
+                                 {"org_baseline": 2})
+                self.assertEqual(stat.S_IMODE((Path(folder) / "team" / "claim-baseline").stat().st_mode), 0o600)
+                marker = Path(folder) / "team" / "claim-attempt"
+                if emptied:
+                    marker.write_text("{}")
+                else:
+                    marker.unlink()
+                page = self._details_page("two@example.test")
+                self.assertEqual(self._submit(folder, page),
+                                 (org_claim.REFUSED, "org-claim: REFUSED the claim marker is missing; "
+                                                     "the owner must verify (W-102)\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+                self.assertEqual(len(load_orgs(Path(folder))), 3)
+
+    def test_w102_an_old_marker_without_a_baseline_records_one(self):
+        """The old marker (one CLAIMED org on top of the others) gets baseline = orgs - claimed."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._claimed_marker(folder, "SYNTH")
+            self.assertEqual(self._submit(folder, self._stop_after_submit())[0], org_claim.INCONCLUSIVE)
+            self.assertEqual(self._marker_data(folder)["org_baseline"], 1)
+            (Path(folder) / "team" / "claim-attempt").unlink()
+            self.assertEqual(self._submit(folder, self._details_page("x@example.test"))[0], org_claim.REFUSED)
+
+    def test_w102_the_oldest_format_claimed_without_a_list_counts_as_one(self):
+        """result CLAIMED and no "claimed" key: 9 more claims, then refused."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._write_marker(folder, {"last_run": "run-1", "result": "CLAIMED",
+                                        "code_sha256": hashlib.sha256(b"SYNTH").hexdigest()})
+            for i in range(9):
+                self.assertEqual(self._submit(folder, self._details_page(f"old{i}@example.test"))[0], 0)
+            self._assert_capped(folder)
+
+    def test_w102_a_malformed_claimed_or_pending_list_is_refused(self):
+        digest = hashlib.sha256(b"SYNTH").hexdigest()
+        for key, value in (("claimed", digest), ("claimed", {"a": digest}), ("claimed", [digest, 1]),
+                           ("claimed", None), ("pending", digest), ("pending", [None])):
+            with self.subTest(key=key, value=value), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                path = self._write_marker(folder, {"last_run": "run-1", "result": "reserved",
+                                                   "code_sha256": digest, key: value})
+                before = path.read_bytes()
+                page = self._details_page("bad@example.test")
+                self.assertEqual(self._submit(folder, page),
+                                 (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MARKER_REFUSED}\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+                self.assertEqual(path.read_bytes(), before)
+
+    def _ten_claims(self, folder):
+        for i in range(10):
+            self.assertEqual(self._submit(folder, self._details_page(f"ten{i}@example.test"))[0], 0)
+        self._assert_capped(folder)
+
+    def _assert_missing(self, folder):
+        page = self._details_page("past.cap@example.test")
+        self.assertEqual(self._submit(folder, page),
+                         (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MISSING_REFUSED}\n"))
+        self.assertEqual((page.filled, page.clicked), ([], []))
+
+    def _assert_kept(self, folder, value):
+        path = Path(folder) / "team" / "claim-baseline"
+        self.assertEqual(json.loads(path.read_text()), {"org_baseline": value})
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_w102_a_rewritten_marker_is_refused_after_ten_claims(self):
+        for shape in ({"last_run": "x"}, {"result": "reserved", "claimed": [], "pending": []},
+                      {"result": "reserved", "claimed": [], "pending": [], "org_baseline": 99}):
+            with self.subTest(shape=shape), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                self._ten_claims(folder)
+                self._write_marker(folder, shape)
+                self._assert_missing(folder)
+                self.assertEqual(len(load_orgs(Path(folder))), 12)
+                self._assert_kept(folder, 2)
+
+    def test_w102_a_marker_with_another_baseline_is_refused(self):
+        """Counts intact, only org_baseline changed: the kept baseline is never replaced."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            for i in range(3):
+                self.assertEqual(self._submit(folder, self._details_page(f"three{i}@example.test"))[0], 0)
+            data = self._marker_data(folder)
+            data["org_baseline"] = 99
+            self._write_marker(folder, data)
+            self._assert_missing(folder)
+            self._assert_kept(folder, 2)
+
+    def test_w102_the_owner_lift_deletes_the_baseline_and_removes_digests(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._ten_claims(folder)
+            data = self._marker_data(folder)
+            data["claimed"] = data["claimed"][:7]  # the owner verified three orgs
+            self._write_marker(folder, data)
+            (Path(folder) / "team" / "claim-baseline").unlink()
+            for i in range(3):
+                code, out = self._submit(folder, self._details_page(f"lift{i}@example.test"))
+                self.assertEqual((code, out.strip()), (0, f"org-claim: CLAIMED org {13 + i}"))
+            self._assert_kept(folder, 5)
+            self._assert_capped(folder)
+
+    def test_w102_a_deleted_marker_with_no_new_org_goes_ahead(self):
+        """Boundary: the org count equals the kept baseline, so nothing was claimed unseen."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            path = Path(folder) / "team" / "claim-baseline"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"org_baseline": 2}))
+            path.chmod(0o600)
+            code, out = self._submit(folder, self._details_page("first@example.test"))
+            self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+            self.assertEqual(self._marker_data(folder)["org_baseline"], 2)
+            self._assert_kept(folder, 2)
+
+    def test_w102_an_unreadable_or_malformed_baseline_is_refused(self):
+        for text in ("not json", "[]", "{}", '{"org_baseline": -1}', '{"org_baseline": true}',
+                     '{"org_baseline": "2"}'):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as folder:
+                self._with_run(folder, "run-1")
+                path = Path(folder) / "team" / "claim-baseline"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text)
+                page = self._details_page("bad.base@example.test")
+                self.assertEqual(self._submit(folder, page),
+                                 (org_claim.REFUSED, f"org-claim: REFUSED {org_claim.MARKER_REFUSED}\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+                self.assertEqual(path.read_text(), text)
+
+    def test_w104_the_try_count_resets_after_a_successful_claim(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            for _ in range(2):
+                self.assertEqual(self._submit(folder, self._stop_after_submit())[0], org_claim.INCONCLUSIVE)
+            self.assertEqual(self._marker_data(folder)["code_attempts"], {digest: 2})
+            self.assertEqual(self._submit(folder, self._details_page("works@example.test"))[0], 0)
+            self.assertEqual(self._marker_data(folder)["code_attempts"].get(digest, 0), 0)
+            for _ in range(org_claim.MAX_ATTEMPTS):  # all three tries are back
+                page = self._stop_after_submit()
+                self.assertEqual(self._submit(folder, page)[0], org_claim.INCONCLUSIVE)
+                self.assertEqual(page.clicked, ["Submit"])
+            page = self._stop_after_submit()
+            self.assertEqual(self._submit(folder, page),
+                             (org_claim.REFUSED, "org-claim: REFUSED this event code was already tried 3 times\n"))
+            self.assertEqual(page.clicked, [])
 
     def test_w097_started_marker_does_not_block_next_claim(self):
         """W-097: a 'started' marker for the same run no longer blocks the next claim."""
@@ -703,8 +977,10 @@ class PortalBoundaryTests(unittest.TestCase):
             self.assertTrue(gate["frozen"])
             self.assertEqual(gate["org"], 5)
 
-    def test_a_gate_failure_after_the_org_is_saved_never_redeems_the_code_again(self):
-        with tempfile.TemporaryDirectory() as folder:
+    def test_a_gate_failure_after_the_org_is_saved_never_saves_that_org_again(self):
+        """Changed for W-104: the code may be redeemed again, but the saved username is never new."""
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
             root = Path(folder)
             save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-4"})
             page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
@@ -714,10 +990,10 @@ class PortalBoundaryTests(unittest.TestCase):
             self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
             marker = json.loads((root / "team" / "claim-attempt").read_text())
             self.assertEqual(marker["result"], "CLAIMED")
+            self.assertEqual(marker["claimed"], [hashlib.sha256(b"SYNTHETIC").hexdigest()])
             retry = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
-            with self.assertRaises(org_claim.ClaimRefused):
-                self._claim(root, retry)
-            self.assertEqual((retry.filled, retry.clicked), ([], []))
+            self.assertEqual(self._claim(root, retry), "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
 
     def _form_with_old_block(self):
         return {PORTAL_URL: (PORTAL_URL, PORTAL),

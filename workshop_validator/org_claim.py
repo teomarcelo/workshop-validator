@@ -14,12 +14,37 @@ Modes:
   the username and password by label, and append one org to
   ``verification-orgs.json``. W-097: allowed whenever the owner's code is set
   in org-claim.json. Only one claim runs at a time (a non-blocking lock held
-  for the whole claim). Each event code (kept as its SHA-256) is CLAIMED at
-  most once and submitted at most 3 times; a try counts only at the submit
-  click. Only a username that was not on the page before submit and is not in
-  the org file is saved. W-098, W-099: the org gate then points at the new org
-  and its floor, so the retired orgs below it are never used again (a freeze
-  stays).
+  for the whole claim). W-104: one event code can be redeemed again and
+  again; each redeem gives a new username. A code that fails is submitted at
+  most 3 times in a row (a try counts only at the submit click); a CLAIMED
+  result resets that code's count. Only a username that was not on the page
+  before submit and is not in the org file is saved. W-098, W-099: the org
+  gate then points at the new org and its floor, so the retired orgs below it
+  are never used again (a freeze stays).
+
+  W-102: at most 10 submits are spent in total during testing, across all
+  codes. The marker ``team/claim-attempt`` keeps SHA-256 digests only, never
+  the code. Just before each submit click the digest goes into ``pending``;
+  a CLAIMED result moves one entry from ``pending`` to ``claimed``; any other
+  end (NEEDS_REVIEW, an error, a crash, even after the org was saved) leaves
+  it in ``pending``. Nothing clears ``pending`` automatically. When
+  ``len(claimed) + len(pending)`` reaches 10, the next claim is refused with
+  exit 2 before the browser opens. No flag or environment variable lifts the
+  cap.
+
+  A deleted, emptied or rewritten marker does not reset the count. The org
+  count before the first claim is kept in a second private file,
+  ``team/claim-baseline`` (and copied into the marker as ``org_baseline``).
+  While that file exists it is never rebuilt, and a claim is refused ("the
+  claim marker is missing; the owner must verify (W-102)") when the marker
+  accounts for fewer submits than the orgs added since the baseline
+  (``len(claimed) + len(pending) < orgs - baseline``) or when the marker's
+  ``org_baseline`` differs from it.
+
+  The owner lifts the cap by hand, after verifying the orgs: remove digests
+  from ``claimed`` or ``pending`` in the marker and delete
+  ``team/claim-baseline``. The next claim then records a new baseline, the
+  current org count less the digests left in ``claimed``.
 * ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
   point the gate (and floor) at the last org in the org file. Refused unless
   the marker says CLAIMED and the gate floor is lower.
@@ -55,10 +80,13 @@ CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
 ATTEMPT = Path("team") / "claim-attempt"
 RUN_LOCK = Path("team") / ".claim-run.lock"
+BASELINE = Path("team") / "claim-baseline"
 MAX_ATTEMPTS = 3
 LEFT_PORTAL = "left the https portal"
 MARKER_REFUSED = "the claim marker could not be read"
-CLAIMED_REFUSED = "this event code was already claimed"
+MAX_CLAIMED = 10
+TOTAL_CAP_REFUSED = f"{MAX_CLAIMED} new orgs already claimed (W-102); the owner must verify before another"
+MISSING_REFUSED = "the claim marker is missing; the owner must verify (W-102)"
 RUNNING_REFUSED = "another claim is running"
 CAP_REFUSED = f"this event code was already tried {MAX_ATTEMPTS} times"
 
@@ -445,49 +473,106 @@ def _read_marker(root: Path) -> dict | None:
     return marker if isinstance(marker, dict) else None
 
 
-def _claimed_digests(marker: dict) -> set[str]:
-    claimed = marker.get("claimed")
-    digests = {d for d in claimed if isinstance(d, str)} if isinstance(claimed, list) else set()
-    if marker.get("result") == "CLAIMED" and isinstance(marker.get("code_sha256"), str):
-        digests.add(marker["code_sha256"])
-    return digests
+def _digest_list(value) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(d, str) for d in value):
+        return None
+    return list(value)
+
+
+def _claimed_list(marker: dict) -> list[str] | None:
+    """One digest per CLAIMED result (repeats allowed, W-104). None when the list is malformed.
+
+    A marker with no "claimed" key but result CLAIMED (an older format) counts as one."""
+    if "claimed" not in marker:
+        digest = marker.get("code_sha256")
+        return [digest] if marker.get("result") == "CLAIMED" and isinstance(digest, str) else []
+    return _digest_list(marker.get("claimed"))
+
+
+def _pending_list(marker: dict) -> list[str] | None:
+    """One digest per submit that has not ended CLAIMED. None when the list is malformed."""
+    return _digest_list(marker["pending"]) if "pending" in marker else []
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _read_baseline(root: Path) -> int | None:
+    """The org count kept in team/claim-baseline, None when there is none. Raises when unreadable."""
+    path = Path(root) / BASELINE
+    if not path.exists():
+        return None
+    try:
+        value = _count(json.loads(path.read_text(encoding="utf-8")).get("org_baseline"))
+    except (OSError, ValueError, AttributeError):
+        value = None
+    if value is None:
+        raise ClaimRefused(MARKER_REFUSED)
+    return value
 
 
 def reserve_attempt(root: Path, code: str) -> dict:
     """Check and record a new attempt before the browser opens. The caller holds claim_run_lock.
 
-    Refused (ClaimRefused) when the marker is unreadable, when this event code was
-    already CLAIMED, or when it was submitted MAX_ATTEMPTS times. A different code
-    can be claimed right away (W-099). No try is counted here: mark_attempt
-    ("started") counts it just before the submit click. Returns the marker written.
+    Refused (ClaimRefused) when the marker is unreadable, when it is missing or empty
+    but the org file grew past the baseline, when MAX_CLAIMED submits were spent in
+    total (claimed plus pending, W-102), or when this code failed MAX_ATTEMPTS times
+    since its last CLAIMED. A code that was CLAIMED can be claimed again (W-104). No
+    try is counted here: mark_attempt ("started") counts it just before the submit
+    click. Returns the marker written.
     """
     run, digest = last_run_id(root), code_digest(code)
     marker = _read_marker(root)
     if marker is None:
         raise ClaimRefused(MARKER_REFUSED)  # unreadable marker: assume a claim was tried
-    claimed = _claimed_digests(marker)
-    if digest in claimed:
-        raise ClaimRefused(CLAIMED_REFUSED)
+    claimed, pending = _claimed_list(marker), _pending_list(marker)
+    if claimed is None or pending is None:
+        raise ClaimRefused(MARKER_REFUSED)
+    orgs, kept = count_orgs(root), _read_baseline(root)
+    if kept is not None:  # the backstop: never rebuilt while it exists
+        if len(claimed) + len(pending) < orgs - kept:
+            raise ClaimRefused(MISSING_REFUSED)  # the marker lost or hid submits
+        if "org_baseline" in marker and _count(marker.get("org_baseline")) != kept:
+            raise ClaimRefused(MISSING_REFUSED)  # the marker carries another baseline
+        baseline = kept
+    else:  # first claim, an older marker, or the owner's lift: the orgs not claimed here
+        baseline = max(orgs - len(claimed), 0)
+    if len(claimed) + len(pending) >= MAX_CLAIMED:
+        raise ClaimRefused(TOTAL_CAP_REFUSED)
     counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
     tried = counts.get(digest, 0)
     if not isinstance(tried, int) or isinstance(tried, bool) or tried >= MAX_ATTEMPTS:
         raise ClaimRefused(CAP_REFUSED)
     marker = {"last_run": run, "result": "reserved", "code_sha256": digest,
-              "code_attempts": dict(counts), "claimed": sorted(claimed)}
+              "code_attempts": dict(counts), "claimed": claimed, "pending": pending,
+              "org_baseline": baseline}
+    if kept is None:  # kept outside the marker, so a deleted marker is still noticed
+        _atomic_write(Path(root) / BASELINE, json.dumps({"org_baseline": baseline}) + "\n")
     _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
     return marker
 
 
 def mark_attempt(root: Path, marker: dict, result: str) -> None:
-    """Record a result. "started" counts one try for this code; "CLAIMED" spends the code.
-    The marker dict is updated in place, so later results keep the counts."""
+    """Record a result. "started" counts one try for this code and puts its digest in
+    pending (W-102); "CLAIMED" moves one entry from pending to claimed and resets this
+    code's tries (W-104). Any other result leaves pending as it is. The marker dict is
+    updated in place, so later results keep the counts."""
     digest = marker.get("code_sha256")
     if result == "started" and isinstance(digest, str):
         counts = dict(marker.get("code_attempts") or {})
         counts[digest] = int(counts.get(digest, 0)) + 1
         marker["code_attempts"] = counts
+        marker["pending"] = [*(marker.get("pending") or ()), digest]
     elif result == "CLAIMED" and isinstance(digest, str):
-        marker["claimed"] = sorted(set(marker.get("claimed") or ()) | {digest})
+        pending = list(marker.get("pending") or ())
+        if digest in pending:
+            pending.remove(digest)
+        marker["pending"] = pending
+        marker["claimed"] = [*(marker.get("claimed") or ()), digest]
+        counts = dict(marker.get("code_attempts") or {})
+        counts.pop(digest, None)
+        marker["code_attempts"] = counts
     marker["result"] = result
     _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
 
@@ -788,7 +873,7 @@ def _claim_locked(root: Path, config: dict, code: str, marker: dict) -> str:
             return "org-claim: NEEDS_REVIEW could not read credentials"
         _require_portal(page, portal_url)
         number = append_org(root, *creds)
-        # CLAIMED before the gate step: a gate failure must never redeem the code again.
+        # CLAIMED before the gate step: the org counts toward the W-102 cap even if the gate fails.
         mark_attempt(root, marker, "CLAIMED")
         try:
             point_gate_at(root, number)
