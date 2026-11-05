@@ -255,13 +255,17 @@ def login_to_salesforce(
     The page may open on the classic username form or on the "Log In with
     Email" card, which has no username box. Sign-in first waits up to about
     30 s for either the username box or the exact "Log In with Username"
-    button. Only visible elements count: the email card may keep a hidden
-    username box ahead of the button. On the email card that one visible
-    button is clicked, then the username form must appear. More than one
-    visible such button is refused unclicked. login_url is for tests only.
+    button or link (the live card renders it as a link styled as a button).
+    Only visible elements count: the email card may keep a hidden username
+    box ahead of the control. On the email card that one visible control is
+    clicked, then the username form must appear. More than one visible such
+    control is refused unclicked. The Email box and Continue are never used.
+    login_url is for tests only.
     login.salesforce.com currently asks for the username first, then the
-    password on the next screen. Older combined forms still work: if the
-    password field is already visible, it is filled without an extra click.
+    password on the next screen: the visible Log In is clicked once after
+    the username, then the password box must appear. Older combined forms
+    still work: if the password field is already visible, it is filled
+    without an extra click.
     The promos.html iframe is cosmetic. A block on that frame is not a
     failed login. Sign-in fails only when the form never submits or
     Lightning never opens. The password Login control is clicked once.
@@ -295,7 +299,9 @@ def login_to_salesforce(
         # not be the element waited on or taken as the form being shown.
         username_box = page.locator("#username").filter(visible=True)
         username_button = page.get_by_role(
-            "button", name="Log In with Username", exact=True
+            "link", name="Log In with Username", exact=True
+        ).or_(
+            page.get_by_role("button", name="Log In with Username", exact=True)
         ).filter(visible=True)
         # A slow or script-built page is still loading, not a failure.
         try:
@@ -328,13 +334,23 @@ def login_to_salesforce(
                     "the username form did not appear after Log In with Username"
                 ) from None
         username_box.fill(username, timeout=left(15000))
-        password_box = page.locator("#password")
-        if password_box.count() == 0 or not password_box.is_visible():
-            page.locator("#Login").click(timeout=left(15000))
-            password_box.wait_for(state="visible", timeout=left(20000))
+        password_box = page.locator("#password").filter(visible=True)
+        login_button = page.locator("#Login").filter(visible=True)
+        if password_box.count() == 0:
+            # Username-first: submit the username once, then wait for the
+            # password screen. A spent budget stays a timeout (left raises).
+            login_button.click(timeout=left(15000))
+            password_wait = left(20000)
+            try:
+                password_box.wait_for(state="visible", timeout=password_wait)
+            except PlaywrightTimeout:
+                raise PrivateRunnerError(
+                    "Salesforce login page: the password box did not appear "
+                    "after the username step"
+                ) from None
         password_box.fill(password, timeout=left(15000))
         submitted = True
-        page.locator("#Login").click(timeout=left(15000))
+        login_button.click(timeout=left(15000))
         try:
             wall_end = _login_clock() + 45
             # The URL callback reads the URL only. A Playwright call made

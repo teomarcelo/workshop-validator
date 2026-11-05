@@ -374,8 +374,10 @@ class LoginAdapterTests(unittest.TestCase):
             ("click", "#Login"),
         ])
         self.assertTrue(page.role_queries)
+        # The live card renders the control as a link; a button still counts.
+        self.assertEqual({role for role, _, _ in page.role_queries},
+                         {"link", "button"})
         for role, name, exact in page.role_queries:
-            self.assertEqual(role, "button")
             self.assertEqual(name, "Log In with Username")
             self.assertIs(exact, True)
 
@@ -598,6 +600,111 @@ def _smoke_email_card(buttons=1, form_delay_ms=0, card_delay_ms=0):
     return _smoke_page(card, delay_card_ms=card_delay_ms)
 
 
+# Synthetic email card inside three nested open shadow roots, like the live
+# page. It leads to a username-first form: #username and #Login, with the
+# password box shown only after the username is submitted. The query string
+# reports control clicks, Login submits and anything typed into Email.
+_SHADOW_SCRIPT = """
+<script>
+window.__usernameClicks = 0;
+window.__continueClicks = 0;
+window.__loginSubmits = 0;
+function showForm() {
+  document.getElementById('username').style.display = '';
+  document.getElementById('Login').style.display = '';
+}
+function usernameControl() {
+  window.__usernameClicks += 1;
+  document.getElementById('shell').style.display = 'none';
+  showForm();
+}
+function emailValue() {
+  var root = document.getElementById('shell').shadowRoot
+    .querySelector('x-mid').shadowRoot
+    .querySelector('x-inner').shadowRoot;
+  return root.getElementById('email').value;
+}
+function submitLogin() {
+  window.__loginSubmits += 1;
+  var pw = document.getElementById('password');
+  if (pw.style.display === 'none') {
+    if (window.__passwordNever) { return; }
+    pw.style.display = '';
+    return;
+  }
+  var q = new URLSearchParams({
+    u: document.getElementById('username').value,
+    p: pw.value,
+    clicks: String(window.__usernameClicks),
+    submits: String(window.__loginSubmits),
+    cont: String(window.__continueClicks),
+    email: 'v:' + emailValue()
+  });
+  location.href = '%s?' + q.toString();
+}
+function nest(host, tag, html) {
+  var root = host.attachShadow({mode: 'open'});
+  if (tag) {
+    var child = document.createElement(tag);
+    root.appendChild(child);
+    return child;
+  }
+  root.innerHTML = html;
+  return null;
+}
+</script>
+""" % _SMOKE_HOME_URL
+
+_SHADOW_LINK = (
+    '<a class="slds-button" href="#" '
+    'onclick="usernameControl(); return false;">'
+    '<svg aria-hidden="true" width="1" height="1"></svg>'
+    'Log In with Username</a>'
+)
+_SHADOW_BUTTON = (
+    '<button type="button" onclick="usernameControl()">'
+    'Log In with Username</button>'
+)
+
+
+def _shadow_card_page(control=_SHADOW_LINK, controls=1, password_never=False,
+                      password_shown=False):
+    card = (
+        '<h2>Log In with Email</h2>'
+        '<label>Email <input id="email" type="email"></label>'
+        '<label><input type="checkbox"> Remember Me</label>'
+        '<button type="button" onclick="window.__continueClicks += 1">'
+        'Continue</button><span>or</span>' + control * controls
+    )
+    pw_style = "" if password_shown else "display:none"
+    form = (
+        '<input id="username" type="email" style="display:none">'
+        '<input id="password" type="password" style="%s">'
+        '<input id="Login" type="submit" value="Log In" style="display:none"'
+        ' onclick="submitLogin(); return false;">' % pw_style
+    )
+    build = (
+        "<script>window.__passwordNever = %s;"
+        "var mid = nest(document.getElementById('shell'), 'x-mid');"
+        "var inner = nest(mid, 'x-inner');"
+        "nest(inner, null, %s);</script>"
+        % ("true" if password_never else "false", json.dumps(card))
+    )
+    return "<html><head>%s</head><body><x-shell id=\"shell\"></x-shell>%s%s" \
+        "</body></html>" % (_SHADOW_SCRIPT, form, build)
+
+
+def _username_first_page(password_never=False, password_shown=False):
+    # Plain visit: the classic form is shown directly, no card.
+    page = _shadow_card_page(password_never=password_never,
+                             password_shown=password_shown)
+    return page.replace(
+        "</body>",
+        "<script>document.getElementById('shell').style.display='none';"
+        "showForm();</script></body>",
+    )
+
+
 @unittest.skipUnless(
     sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1",
     "Browser smoke only (requires Chromium)",
@@ -682,6 +789,64 @@ class LoginBrowserSmokeTests(unittest.TestCase):
         self.assertEqual(page.evaluate("window.__usernameClicks"), 0)
         self.assertFalse(page.locator("#username").is_visible())
         self.assertEqual(page.locator("#username").input_value(), "")
+
+    def _signs_in_through_shadow_card(self, control):
+        page = self.open(_shadow_card_page(control=control))
+        login_to_salesforce(page, "learner@example.com", "synthetic-pass",
+                            login_url=_SMOKE_LOGIN_URL)
+        # One control click, username submit then password submit, Email
+        # untouched and Continue never clicked.
+        self.assertEqual(self.signed_in(page), {
+            "u": "learner@example.com", "p": "synthetic-pass", "clicks": "1",
+            "submits": "2", "cont": "0", "email": "v:",
+        })
+
+    def test_shadow_card_username_link_leads_to_username_first_form(self):
+        self._signs_in_through_shadow_card(_SHADOW_LINK)
+
+    def test_shadow_card_username_button_leads_to_username_first_form(self):
+        self._signs_in_through_shadow_card(_SHADOW_BUTTON)
+
+    def test_two_visible_username_links_refuse_without_clicking(self):
+        page = self.open(_shadow_card_page(controls=2))
+        with self.assertRaises(PrivateRunnerError) as ctx:
+            login_to_salesforce(page, "learner@example.com", "synthetic-pass",
+                                login_url=_SMOKE_LOGIN_URL)
+        self.assertEqual(
+            str(ctx.exception),
+            "Salesforce login page showed more than one Log In with Username "
+            "button; nothing was clicked",
+        )
+        self.assertEqual(page.url, _SMOKE_LOGIN_URL)
+        self.assertEqual(page.evaluate("window.__usernameClicks"), 0)
+        self.assertEqual(page.evaluate("window.__continueClicks"), 0)
+        self.assertEqual(page.evaluate("window.__loginSubmits"), 0)
+        self.assertEqual(page.evaluate("emailValue()"), "")
+
+    def test_combined_form_with_password_visible_submits_once(self):
+        page = self.open(_username_first_page(password_shown=True))
+        login_to_salesforce(page, "learner@example.com", "synthetic-pass",
+                            login_url=_SMOKE_LOGIN_URL)
+        self.assertEqual(self.signed_in(page), {
+            "u": "learner@example.com", "p": "synthetic-pass", "clicks": "0",
+            "submits": "1", "cont": "0", "email": "v:",
+        })
+
+    def test_password_box_never_shown_names_the_username_step(self):
+        page = self.open(_username_first_page(password_never=True))
+        # A short shared budget keeps the test quick; the password wait
+        # itself must time out, not the budget check.
+        with patch("workshop_validator.private_runner.LOGIN_WAIT_SECONDS", 8):
+            with self.assertRaises(PrivateRunnerError) as ctx:
+                login_to_salesforce(page, "learner@example.com",
+                                    "synthetic-pass", login_url=_SMOKE_LOGIN_URL)
+        self.assertEqual(
+            str(ctx.exception),
+            "Salesforce login page: the password box did not appear after "
+            "the username step",
+        )
+        self.assertEqual(page.evaluate("window.__loginSubmits"), 1)
+        self.assertEqual(page.locator("#password").input_value(), "")
 
 
 def guide_step(step_id, number="1", text="Open the page"):
