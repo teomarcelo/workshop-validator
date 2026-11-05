@@ -303,8 +303,11 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assert_review(result)
 
     def test_pill_already_shown_before_click_is_not_evidence(self):
-        # M3: A pill already in a shadow root before the click must not count as evidence of this pick.
-        # Without the identity check, the pre-existing pill would incorrectly give NEEDS_REVIEW.
+        # A pill already in a shadow root before the click must not count as evidence of this pick.
+        # Fail-closed check only: the pill sits outside the innermost live container, so this stays
+        # UI_MISMATCH even with the identity check and the walk stop removed. The guards are proven
+        # by test_pill_moved_into_field_after_click_is_not_evidence (M3) and
+        # test_ancestor_with_pill_before_click_is_never_a_field_container (M14).
         preexisting_html = f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
@@ -368,11 +371,10 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assertIn("Record Variable did not show recThing", result.note)
 
     def test_pill_in_ancestor_stops_container_walk(self):
-        # M14: A pill inside a shadow root in an ancestor must stop the container walk (fail-closed).
-        # An outer wrapper has a pre-existing pill. After the click, a NEW pill appears in an inner
-        # wrapper (closer to the input). With the pill stop: walk stops at outer wrapper (has pre-pill),
-        # so containers doesn't include it or the inner wrapper -> UI_MISMATCH. Without the stop: walk
-        # continues past outer wrapper, includes inner wrapper, finds the new pill -> NEEDS_REVIEW (wrong).
+        # A pill inside a shadow root in an ancestor, and a NEW pill added to an inner wrapper after
+        # the click. Fail-closed check only: the innermost live container is the combobox wrapper,
+        # which never holds the new pill, so this stays UI_MISMATCH with or without the walk stop.
+        # The stop itself is proven by test_ancestor_with_pill_before_click_is_never_a_field_container.
         ancestor_pill_html = f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
@@ -420,10 +422,117 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
 </script>
 """
         result = self.fill(ancestor_pill_html)
-        # With the pill stop: walk stops at outer wrapper, doesn't include inner, so new pill not found.
-        # Without the pill stop: walk includes inner wrapper, finds new pill -> incorrect NEEDS_REVIEW.
         self.assertEqual(result.status, "UI_MISMATCH", result.note)
         self.assertIn("Record Variable did not show recThing", result.note)
+
+    def test_pill_moved_into_field_after_click_is_not_evidence(self):
+        # M3 only (W-108): the pill is on the page before the click, in another section, so the
+        # container walk never meets it (the section edge ends the walk first). After the click
+        # the page re-renders the field and MOVES that same pill node into it. The pill now sits
+        # in the field's recorded container with the wanted label, so only the identity check
+        # tells it was not shown by this pick.
+        moved_html = f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <sample-field id="host-rv">
+      <label for="rv">Record Variable</label>
+      <div class="slds-combobox_container">
+        <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing" autocomplete="off">
+      </div>
+      <div id="lb" role="listbox">
+        <div role="option" id="opt1"><strong>recThing</strong></div>
+      </div>
+    </sample-field>
+  </section>
+  <section aria-label="Parking">
+    <div id="parking">{pill()}</div>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const host = document.getElementById("host-rv");
+  const list = document.getElementById("lb");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    window.oldPill = document.querySelector("#parking .slds-pill");
+    setTimeout(() => {{
+      host.innerHTML = '<label>Record Variable</label><div class="slds-form-element__control"></div>';
+      host.querySelector(".slds-form-element__control").appendChild(window.oldPill);
+    }}, 50);
+  }});
+  document.getElementById("rv").focus();
+</script>
+"""
+        result = self.fill(moved_html)
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(result.note, "Record Variable did not show recThing after its option was clicked.")
+        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+        # The same pill node now sits inside the field, with the wanted label.
+        self.assertTrue(self.page.evaluate(
+            "document.querySelector('#host-rv .slds-pill') === window.oldPill"))
+        self.assertEqual(self.page.locator("#host-rv .slds-pill__label").inner_text(), "recThing")
+
+    def test_ancestor_with_pill_before_click_is_never_a_field_container(self):
+        # M14 only: an ancestor of the field already holds a visible pill (in an open shadow root)
+        # before the click, so the container walk must stop below it. After the click the page
+        # hides that old pill, removes the field's own elements and renders a NEW recThing pill
+        # with the field's label inside the ancestor. Had the ancestor been recorded, it would be
+        # the only live container, holding one visible new pill: a false NEEDS_REVIEW. The pill
+        # is new, so the identity check does not reject it; only the walk stop does.
+        ancestor_html = f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <div id="outer">
+      <div id="old-wrap"></div>
+      <sample-field id="host-rv">
+        <label for="rv">Record Variable</label>
+        <div class="slds-combobox_container">
+          <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing" autocomplete="off">
+        </div>
+        <div id="lb" role="listbox">
+          <div role="option" id="opt1"><strong>recThing</strong></div>
+        </div>
+      </sample-field>
+    </div>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const outer = document.getElementById("outer");
+  const oldWrap = document.getElementById("old-wrap");
+  oldWrap.attachShadow({{mode: "open"}});
+  oldWrap.shadowRoot.innerHTML = {pill("recOld")!r};
+  const list = document.getElementById("lb");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    setTimeout(() => {{
+      oldWrap.style.display = "none";
+      document.getElementById("host-rv").remove();
+      const field = document.createElement("div");
+      field.id = "new-field";
+      field.innerHTML = '<label>Record Variable</label>' + {pill()!r};
+      outer.appendChild(field);
+    }}, 50);
+  }});
+  document.getElementById("rv").focus();
+</script>
+"""
+        page = self.open(ancestor_html)
+        self.assertTrue(page.locator("#old-wrap .slds-pill").is_visible())
+        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        guide_walk._open_guide_dialog(state, "Sample Screen")
+        result = guide_walk.attempt_step(state, make_step("rv", STEP))
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(result.note, "Record Variable did not show recThing after its option was clicked.")
+        self.assertEqual(page.evaluate("window.chosen"), ["opt1"])
+        self.assertFalse(page.locator("#old-wrap .slds-pill").is_visible())
+        self.assertEqual(page.locator("#new-field .slds-pill__label").inner_text(), "recThing")
 
     def test_pill_inside_closed_shadow_root_is_not_readable(self):
         # A closed shadow root is not readable, so the pill is not found: UI_MISMATCH.
