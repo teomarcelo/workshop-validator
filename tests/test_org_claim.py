@@ -322,16 +322,15 @@ class ClaimGateTests(unittest.TestCase):
             self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
             claim.assert_called_once()
 
-    def test_w099_each_owner_code_is_claimed_only_once(self):
-        """A CLAIMED code is refused for every later run, not only the same run."""
+    def test_w104_a_claimed_code_can_be_claimed_again(self):
+        """Changed for W-104 (was once-per-code): a CLAIMED code is allowed again, in any run."""
         for run in ("run-1", "run-2"):
             with self.subTest(run=run), tempfile.TemporaryDirectory() as folder:
                 self._with_run(folder, run)
                 self._claimed_marker(folder, "SYNTH")
                 code, out, claim = self._claim(folder)
-                self.assertEqual((code, out.strip()),
-                                 (org_claim.REFUSED, "org-claim: REFUSED this event code was already claimed"))
-                claim.assert_not_called()
+                self.assertEqual((code, out.strip()), (0, "org-claim: CLAIMED org 3"))
+                claim.assert_called_once()
 
     def test_the_marker_is_reserved_before_the_browser_opens(self):
         """The first claim reserves the marker; a reserved claim does not block the next."""
@@ -457,7 +456,7 @@ class ClaimGateTests(unittest.TestCase):
             self.assertEqual(json.loads(marker.read_text())["code_attempts"], {digest: 1})
 
     def test_claim_is_allowed_after_a_new_run_or_non_claimed_marker(self):
-        """W-097: allowed for a different run or a non-CLAIMED marker; a CLAIMED code is not."""
+        """W-097: allowed for a different run or a non-CLAIMED marker; W-104: a CLAIMED code too."""
         # Case 1: Different run with any status - allowed
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
@@ -465,13 +464,87 @@ class ClaimGateTests(unittest.TestCase):
             code, _, claim = self._claim(folder)
             self.assertEqual(code, 0)
             claim.assert_called_once()
-        # Case 2 (changed for W-099): this same code was CLAIMED - blocked
+        # Case 2 (changed for W-104): this same code was CLAIMED - allowed again
         with tempfile.TemporaryDirectory() as folder:
             self._with_run(folder, "run-1")
             self._claimed_marker(folder, "SYNTH")
             code, _, claim = self._claim(folder)
-            self.assertEqual(code, org_claim.REFUSED)
-            claim.assert_not_called()
+            self.assertEqual(code, 0)
+            claim.assert_called_once()
+
+    def _details_page(self, username, password="Synth3tic!Pass"):
+        html = DETAILS.replace("learner.synthetic@example.test", username).replace("Synth3tic!Pass", password)
+
+        def hook(page):
+            page.url, page.html = "https://portal.example.test/done", html
+        return FakePage(_routes(), on_click=hook)
+
+    def _marker_data(self, folder):
+        return json.loads((Path(folder) / "team" / "claim-attempt").read_text())
+
+    def test_w104_the_same_code_claims_twice_with_two_new_usernames(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            first = self._submit(folder, self._details_page("first.new@example.test"))
+            second = self._submit(folder, self._details_page("second.new@example.test", "Second2!Pass"))
+            self.assertEqual([first, second], [(0, "org-claim: CLAIMED org 3\n"), (0, "org-claim: CLAIMED org 4\n")])
+            self.assertEqual([o["username"] for o in load_orgs(Path(folder))][2:],
+                             ["first.new@example.test", "second.new@example.test"])
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            self.assertEqual(self._marker_data(folder)["claimed"], [digest, digest])
+            text = (Path(folder) / "team" / "claim-attempt").read_text()
+            self.assertNotIn("SYNTH", text.replace(digest, ""))
+            self.assertEqual(stat.S_IMODE((Path(folder) / "team" / "claim-attempt").stat().st_mode), 0o600)
+
+    def test_w102_the_eleventh_claim_is_refused_and_nothing_is_submitted(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            digests = [hashlib.sha256(f"SYNTH-{i % 3}".encode()).hexdigest() for i in range(10)]
+            path = Path(folder) / "team" / "claim-attempt"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"last_run": "run-1", "result": "CLAIMED", "code_sha256": digests[-1],
+                                        "code_attempts": {}, "claimed": digests}))
+            before = path.read_bytes()
+            for event_code in ("SYNTH-0", "SYNTH-NEW"):
+                page = self._details_page("eleventh@example.test")
+                code, out = self._submit(folder, page, event_code=event_code)
+                self.assertEqual((code, out), (org_claim.REFUSED, "org-claim: REFUSED 10 new orgs already claimed "
+                                                                  "(W-102); the owner must verify before another\n"))
+                self.assertEqual((page.filled, page.clicked), ([], []))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertEqual(len(load_orgs(Path(folder))), 2)
+
+    def test_w102_an_old_marker_with_one_claimed_digest_counts_as_one(self):
+        """The marker from the first real claim (one CLAIMED digest) leaves 9 claims."""
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            self._claimed_marker(folder, "SYNTH")
+            for i in range(9):
+                code, out = self._submit(folder, self._details_page(f"new{i}@example.test"))
+                self.assertEqual((code, out.strip()), (0, f"org-claim: CLAIMED org {i + 3}"))
+            page = self._details_page("tenth@example.test")
+            code, out = self._submit(folder, page, event_code="SYNTH-OTHER")
+            self.assertEqual((code, out.strip()), (org_claim.REFUSED, "org-claim: REFUSED " + org_claim.TOTAL_CAP_REFUSED))
+            self.assertEqual(page.clicked, [])
+            self.assertEqual(len(self._marker_data(folder)["claimed"]), 10)
+
+    def test_w104_the_try_count_resets_after_a_successful_claim(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self._with_run(folder, "run-1")
+            digest = hashlib.sha256(b"SYNTH").hexdigest()
+            for _ in range(2):
+                self.assertEqual(self._submit(folder, self._stop_after_submit())[0], org_claim.INCONCLUSIVE)
+            self.assertEqual(self._marker_data(folder)["code_attempts"], {digest: 2})
+            self.assertEqual(self._submit(folder, self._details_page("works@example.test"))[0], 0)
+            self.assertEqual(self._marker_data(folder)["code_attempts"].get(digest, 0), 0)
+            for _ in range(org_claim.MAX_ATTEMPTS):  # all three tries are back
+                page = self._stop_after_submit()
+                self.assertEqual(self._submit(folder, page)[0], org_claim.INCONCLUSIVE)
+                self.assertEqual(page.clicked, ["Submit"])
+            page = self._stop_after_submit()
+            self.assertEqual(self._submit(folder, page),
+                             (org_claim.REFUSED, "org-claim: REFUSED this event code was already tried 3 times\n"))
+            self.assertEqual(page.clicked, [])
 
     def test_w097_started_marker_does_not_block_next_claim(self):
         """W-097: a 'started' marker for the same run no longer blocks the next claim."""
@@ -703,8 +776,10 @@ class PortalBoundaryTests(unittest.TestCase):
             self.assertTrue(gate["frozen"])
             self.assertEqual(gate["org"], 5)
 
-    def test_a_gate_failure_after_the_org_is_saved_never_redeems_the_code_again(self):
-        with tempfile.TemporaryDirectory() as folder:
+    def test_a_gate_failure_after_the_org_is_saved_never_saves_that_org_again(self):
+        """Changed for W-104: the code may be redeemed again, but the saved username is never new."""
+        with tempfile.TemporaryDirectory() as folder, \
+                mock.patch("workshop_validator.org_claim.time.monotonic", side_effect=itertools.count(0, 10)):
             root = Path(folder)
             save_gate(root, {"org": 0, "last_outcome": FAILED, "last_run": "run-4"})
             page = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
@@ -714,10 +789,10 @@ class PortalBoundaryTests(unittest.TestCase):
             self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
             marker = json.loads((root / "team" / "claim-attempt").read_text())
             self.assertEqual(marker["result"], "CLAIMED")
+            self.assertEqual(marker["claimed"], [hashlib.sha256(b"SYNTHETIC").hexdigest()])
             retry = FakePage(_routes(), on_click=_to_details("https://portal.example.test/done"))
-            with self.assertRaises(org_claim.ClaimRefused):
-                self._claim(root, retry)
-            self.assertEqual((retry.filled, retry.clicked), ([], []))
+            self.assertEqual(self._claim(root, retry), "org-claim: NEEDS_REVIEW could not read credentials")
+            self.assertEqual([o["username"] for o in load_orgs(root)], ["learner.synthetic@example.test"])
 
     def _form_with_old_block(self):
         return {PORTAL_URL: (PORTAL_URL, PORTAL),

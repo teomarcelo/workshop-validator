@@ -14,12 +14,21 @@ Modes:
   the username and password by label, and append one org to
   ``verification-orgs.json``. W-097: allowed whenever the owner's code is set
   in org-claim.json. Only one claim runs at a time (a non-blocking lock held
-  for the whole claim). Each event code (kept as its SHA-256) is CLAIMED at
-  most once and submitted at most 3 times; a try counts only at the submit
-  click. Only a username that was not on the page before submit and is not in
-  the org file is saved. W-098, W-099: the org gate then points at the new org
-  and its floor, so the retired orgs below it are never used again (a freeze
-  stays).
+  for the whole claim). W-104: one event code can be redeemed again and
+  again; each redeem gives a new username. A code that fails is submitted at
+  most 3 times in a row (a try counts only at the submit click); a CLAIMED
+  result resets that code's count. Only a username that was not on the page
+  before submit and is not in the org file is saved. W-098, W-099: the org
+  gate then points at the new org and its floor, so the retired orgs below it
+  are never used again (a freeze stays).
+
+  W-102: at most 10 orgs are claimed in total during testing, across all
+  codes. The marker ``team/claim-attempt`` keeps one SHA-256 digest per
+  CLAIMED result in its ``claimed`` list (never the code itself); with 10
+  there, the next claim is refused with exit 2 before the browser opens. No
+  flag or environment variable lifts the cap. The owner lifts it by hand,
+  after verifying the claimed orgs, by removing digests from ``claimed`` in
+  that private marker.
 * ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
   point the gate (and floor) at the last org in the org file. Refused unless
   the marker says CLAIMED and the gate floor is lower.
@@ -58,7 +67,8 @@ RUN_LOCK = Path("team") / ".claim-run.lock"
 MAX_ATTEMPTS = 3
 LEFT_PORTAL = "left the https portal"
 MARKER_REFUSED = "the claim marker could not be read"
-CLAIMED_REFUSED = "this event code was already claimed"
+MAX_CLAIMED = 10
+TOTAL_CAP_REFUSED = f"{MAX_CLAIMED} new orgs already claimed (W-102); the owner must verify before another"
 RUNNING_REFUSED = "another claim is running"
 CAP_REFUSED = f"this event code was already tried {MAX_ATTEMPTS} times"
 
@@ -445,49 +455,61 @@ def _read_marker(root: Path) -> dict | None:
     return marker if isinstance(marker, dict) else None
 
 
-def _claimed_digests(marker: dict) -> set[str]:
+def _claimed_list(marker: dict) -> list[str] | None:
+    """One digest per CLAIMED result (repeats allowed, W-104). None when the list is malformed.
+
+    A marker with no "claimed" key but result CLAIMED (an older format) counts as one."""
+    if "claimed" not in marker:
+        digest = marker.get("code_sha256")
+        return [digest] if marker.get("result") == "CLAIMED" and isinstance(digest, str) else []
     claimed = marker.get("claimed")
-    digests = {d for d in claimed if isinstance(d, str)} if isinstance(claimed, list) else set()
-    if marker.get("result") == "CLAIMED" and isinstance(marker.get("code_sha256"), str):
-        digests.add(marker["code_sha256"])
-    return digests
+    if not isinstance(claimed, list) or not all(isinstance(d, str) for d in claimed):
+        return None
+    return list(claimed)
 
 
 def reserve_attempt(root: Path, code: str) -> dict:
     """Check and record a new attempt before the browser opens. The caller holds claim_run_lock.
 
-    Refused (ClaimRefused) when the marker is unreadable, when this event code was
-    already CLAIMED, or when it was submitted MAX_ATTEMPTS times. A different code
-    can be claimed right away (W-099). No try is counted here: mark_attempt
-    ("started") counts it just before the submit click. Returns the marker written.
+    Refused (ClaimRefused) when the marker is unreadable, when MAX_CLAIMED orgs were
+    already claimed in total (W-102), or when this code failed MAX_ATTEMPTS times since
+    its last CLAIMED. A code that was CLAIMED can be claimed again (W-104). No try is
+    counted here: mark_attempt ("started") counts it just before the submit click.
+    Returns the marker written.
     """
     run, digest = last_run_id(root), code_digest(code)
     marker = _read_marker(root)
     if marker is None:
         raise ClaimRefused(MARKER_REFUSED)  # unreadable marker: assume a claim was tried
-    claimed = _claimed_digests(marker)
-    if digest in claimed:
-        raise ClaimRefused(CLAIMED_REFUSED)
+    claimed = _claimed_list(marker)
+    if claimed is None:
+        raise ClaimRefused(MARKER_REFUSED)
+    if len(claimed) >= MAX_CLAIMED:
+        raise ClaimRefused(TOTAL_CAP_REFUSED)
     counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
     tried = counts.get(digest, 0)
     if not isinstance(tried, int) or isinstance(tried, bool) or tried >= MAX_ATTEMPTS:
         raise ClaimRefused(CAP_REFUSED)
     marker = {"last_run": run, "result": "reserved", "code_sha256": digest,
-              "code_attempts": dict(counts), "claimed": sorted(claimed)}
+              "code_attempts": dict(counts), "claimed": claimed}
     _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
     return marker
 
 
 def mark_attempt(root: Path, marker: dict, result: str) -> None:
-    """Record a result. "started" counts one try for this code; "CLAIMED" spends the code.
-    The marker dict is updated in place, so later results keep the counts."""
+    """Record a result. "started" counts one try for this code; "CLAIMED" adds one digest
+    to the total (W-102) and resets this code's tries (W-104). The marker dict is updated
+    in place, so later results keep the counts."""
     digest = marker.get("code_sha256")
     if result == "started" and isinstance(digest, str):
         counts = dict(marker.get("code_attempts") or {})
         counts[digest] = int(counts.get(digest, 0)) + 1
         marker["code_attempts"] = counts
     elif result == "CLAIMED" and isinstance(digest, str):
-        marker["claimed"] = sorted(set(marker.get("claimed") or ()) | {digest})
+        marker["claimed"] = [*(marker.get("claimed") or ()), digest]
+        counts = dict(marker.get("code_attempts") or {})
+        counts.pop(digest, None)
+        marker["code_attempts"] = counts
     marker["result"] = result
     _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
 
@@ -788,7 +810,7 @@ def _claim_locked(root: Path, config: dict, code: str, marker: dict) -> str:
             return "org-claim: NEEDS_REVIEW could not read credentials"
         _require_portal(page, portal_url)
         number = append_org(root, *creds)
-        # CLAIMED before the gate step: a gate failure must never redeem the code again.
+        # CLAIMED before the gate step: the org counts toward the W-102 cap even if the gate fails.
         mark_attempt(root, marker, "CLAIMED")
         try:
             point_gate_at(root, number)
