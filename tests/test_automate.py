@@ -109,6 +109,53 @@ class GateOutcomeTests(unittest.TestCase):
         self.assertEqual(gate_outcome_of(result), FAILED)
         self.assertEqual(outcome_of(result)[0], FAILED)
 
+    def _out_of_time_walk(self):
+        """A real walk: s1, s2 pass, s3's miss is decided after its time was spent, s4 never runs."""
+        from workshop_validator import guide_walk
+        from workshop_validator.guide_inventory import GuideStep
+
+        now = [0.0]
+
+        def run(state, step):
+            if step.step_id != "s3":
+                return guide_walk.passed(step, "sample", "Sample.")
+            now[0] += 500
+            missed = guide_walk.require(state, lambda: False, "Sample control was not found.",
+                                        limit=min(10, guide_walk._time_left(state)))
+            return guide_walk._stop_here(missed)
+
+        steps = tuple(GuideStep(f"s{i}", 1, "Exercise 9: Sample", "Task 1: Sample.", "1",
+                                f"Sample step {i}.", (90.0, 10.0, 400.0, 24.0), None, ())
+                      for i in range(1, 5))
+        check = guide_walk.GuideCheck("sample", lambda step: True, run)
+        page = SimpleNamespace(url="https://example.my.salesforce.com", frames=[])
+        outcome = guide_walk.walk_guide(page, SimpleNamespace(steps=steps), checks=[check],
+                                        clock=lambda: now[0], sleeper=lambda s: None, page_wait_s=60)
+        report = tuple(ReportStep(s.step_id, 1, s.text, outcome.statuses[s.step_id],
+                                  note=outcome.notes.get(s.step_id, "")) for s in steps)
+        return SimpleNamespace(signed_in=True, message="", report_steps=report)
+
+    def test_out_of_time_stop_is_inconclusive_and_the_org_is_kept(self):
+        from workshop_validator.automate import stopping_step_of
+
+        result = self._out_of_time_walk()
+        self.assertEqual([s.status for s in result.report_steps], ["PASS", "PASS", "NOT_RUN", "NOT_RUN"])
+        outcome = outcome_of(result)[0]
+        gate_outcome = gate_outcome_of(result)
+        self.assertEqual((outcome, gate_outcome), (INCONCLUSIVE, INCONCLUSIVE))
+        self.assertEqual(stopping_step_of(result.report_steps).step_id, "s3")
+        # automate's gate rule: an inconclusive run does not use the org, and it freezes the gate.
+        self.assertNotIn(gate_outcome, {SUCCESS, FAILED})
+        self.assertNotEqual(outcome, SUCCESS)
+
+    def test_old_time_limit_note_on_the_stop_step_is_still_inconclusive(self):
+        from workshop_validator.automate import stopping_step_of
+
+        result = _run("PASS", "PASS", "NOT_RUN", notes={2: "The step exceeded its time limit."})
+        self.assertEqual(stopping_step_of(result.report_steps).step_id, "s1")
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+        self.assertEqual(outcome_of(result)[0], INCONCLUSIVE)
+
     def test_time_limit_not_run_gives_inconclusive(self):
         # A NOT_RUN step with time limit note
         result = _run("PASS", "PASS", "NOT_RUN", notes={2: "exceeded its time limit"})

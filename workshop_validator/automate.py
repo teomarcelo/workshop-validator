@@ -24,6 +24,7 @@ import time
 import webbrowser
 
 from .guide_inventory import extract_inventory
+from .guide_walk import OUT_OF_TIME_NOTE
 from .lessons import record_lessons
 from .private_runner import run_uploaded_guide
 from .step_board import (
@@ -167,6 +168,20 @@ def next_org_index(gate: dict) -> int | None:
     return max(int(gate.get("org") or 0), gate_floor(gate))
 
 
+# A NOT_RUN for lack of time is inconclusive. OUT_OF_TIME_NOTE marks the walk's frozen NOT_RUN
+# (a miss decided after the step's time was spent); the walk stopped there.
+_OVERRUN_MARK = "exceeded its time limit"
+
+
+def _frozen_not_run(step) -> bool:
+    return step.status == "NOT_RUN" and (getattr(step, "note", "") or "").startswith(OUT_OF_TIME_NOTE)
+
+
+def _timed_out(step) -> bool:
+    note = getattr(step, "note", "") or ""
+    return step.status == "NOT_RUN" and (_OVERRUN_MARK in note or OUT_OF_TIME_NOTE in note)
+
+
 def outcome_of(result) -> tuple[str, str]:
     """Classify a finished run as success, a real failure, or inconclusive, with the reason."""
     if not result.signed_in:
@@ -179,7 +194,7 @@ def outcome_of(result) -> tuple[str, str]:
             return FAILED, step.note or step.title
         if step.status in _INCONCLUSIVE:
             return INCONCLUSIVE, step.note or step.title
-        if step.status == "NOT_RUN" and "exceeded its time limit" in (step.note or ""):
+        if _timed_out(step):
             return INCONCLUSIVE, step.note or step.title
     if any(step.status != "PASS" and "loading" in (step.note or "").lower() for step in steps):
         return INCONCLUSIVE, "A page was still loading when the wait ended."
@@ -187,7 +202,13 @@ def outcome_of(result) -> tuple[str, str]:
 
 
 def stopping_step_of(steps):
-    """The last non-NOT_RUN step before a NOT_RUN tail, or None when nothing ran."""
+    """The last non-NOT_RUN step before a NOT_RUN tail, or None when nothing ran.
+
+    A frozen NOT_RUN (the walk stopped on it) with only NOT_RUN after it is the stop step.
+    """
+    for i, step in enumerate(steps):
+        if _frozen_not_run(step) and all(s.status == "NOT_RUN" for s in steps[i + 1:]):
+            return step
     for i, step in enumerate(steps):
         if step.status != "NOT_RUN":
             # Check if all remaining steps are NOT_RUN
@@ -217,7 +238,7 @@ def gate_outcome_of(result) -> str:
         return FAILED
     if stopping_step.status in _INCONCLUSIVE:
         return INCONCLUSIVE
-    if stopping_step.status == "NOT_RUN" and "exceeded its time limit" in (stopping_step.note or ""):
+    if _timed_out(stopping_step):
         return INCONCLUSIVE
 
     # For other statuses (e.g., PASS at the end), use the overall outcome

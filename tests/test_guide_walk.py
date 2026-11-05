@@ -446,6 +446,23 @@ def new_resource_dialog(page):
     page.children.setdefault(("dialog", "New Resource"), []).append(("option", "Variable"))
 
 
+def owned_option(page, box, dialog, option):
+    """OPTION listed inside DIALOG, the dialog that holds the combobox BOX.
+
+    Clicking the option makes BOX show it and closes the list, as a real combobox does.
+    """
+    page.roles.add(("dialog", dialog))
+    page.item_of = {**getattr(page, "item_of", {}), box: ("dialog", dialog)}
+    page.children.setdefault(("dialog", dialog), []).append(("option", option))
+
+    def chosen(kind, name):
+        if (kind, name) == ("option", option):
+            page.values[box[1]] = option
+            page.roles.discard(("option", option))
+
+    return chosen
+
+
 def inventory_of(*items):
     return GuideInventory(1, tuple(items), (), ())
 
@@ -1511,10 +1528,12 @@ class WalkTests(unittest.TestCase):
     def test_data_type_record_is_chosen_from_the_dropdown(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
         page.roles.add(("combobox", "Data Type"))
+        chosen = owned_option(page, ("combobox", "Data Type"), "New Resource", "Record")
 
         def reveal(kind, name):
             if name == "Data Type":
                 page.roles.add(("option", "Record"))
+            chosen(kind, name)
 
         page.on_click = reveal
         item = step(
@@ -1574,11 +1593,13 @@ class WalkTests(unittest.TestCase):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
         page.body = "New Screen"
         page.roles.add(("tab", "Fields"))
+        chosen = owned_option(page, ("combobox", "Record Variable"), "Sample Panel", "varWidgetRec")
 
         def reveal(kind, name):
             if name == "Fields":
                 page.roles.add(("combobox", "Record Variable"))
                 page.roles.add(("option", "varWidgetRec"))
+            chosen(kind, name)
 
         page.on_click = reveal
         item = step(
@@ -1642,6 +1663,7 @@ class WalkTests(unittest.TestCase):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
         page.roles.add(("combobox", "Object"))
         page.values["Object"] = ""
+        page.on_click = owned_option(page, ("combobox", "Object"), "New Resource", "Opportunity")
 
         def filled(name, value):
             if name == "Object" and value == "Opportunity":
