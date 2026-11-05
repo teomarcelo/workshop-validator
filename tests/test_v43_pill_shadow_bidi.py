@@ -564,9 +564,10 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
 
 
-def race_html(after_html, expanded_after_click="true"):
-    """The Record Variable lookup. The option click hides the list, but the box keeps recThing and
-    aria-expanded EXPANDED_AFTER_CLICK until window.swap() runs; swap() replaces the field with AFTER_HTML."""
+def race_html(after_html, expanded_after_click="true", hide_list=True):
+    """The Record Variable lookup. The option click hides the list (HIDE_LIST), but the box keeps recThing
+    and aria-expanded EXPANDED_AFTER_CLICK until window.swap() runs; swap() replaces the field with
+    AFTER_HTML."""
     return f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
@@ -592,7 +593,7 @@ def race_html(after_html, expanded_after_click="true"):
     const picked = event.target.closest("[role=option]");
     if (!picked) return;
     window.chosen.push(picked.id);
-    document.getElementById("lb").hidden = true;
+    document.getElementById("lb").hidden = {"true" if hide_list else "false"};
     document.getElementById("rv").setAttribute("aria-expanded", {expanded_after_click!r});
   }});
   document.getElementById("rv").focus();
@@ -750,6 +751,16 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
         result = self.fill(race_html(fresh, expanded_after_click="false"), swap_after_read=True, at_handle=True)
         self.assertTrue(self.page.evaluate("window.swapped"))
         self.assertEqual(self.page.evaluate("document.getElementById('rv2').value"), "")
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(result.note, MISS_NOTE)
+        self.assertTrue(result.freeze)
+
+    def test_box_that_says_closed_while_its_own_list_still_shows_the_option_is_not_pass(self):
+        # The box shows recThing and aria-expanded="false", but its own list still shows the option.
+        result = self.fill(race_html("", expanded_after_click="false", hide_list=False))
+        self.assertFalse(self.page.evaluate("window.swapped"))
+        self.assertTrue(self.page.locator("#opt1").is_visible())
+        self.assertEqual(self.page.evaluate("document.getElementById('rv').value"), "recThing")
         self.assertEqual(result.status, "UI_MISMATCH", result.note)
         self.assertEqual(result.note, MISS_NOTE)
         self.assertTrue(result.freeze)
