@@ -262,7 +262,19 @@ def login_to_salesforce(page, username: str, password: str) -> None:
         except Exception as exc:
             if not _promo_failure(exc):
                 raise
-        page.locator("#username").fill(username, timeout=15000)
+        username_box = page.locator("#username")
+        if not username_box.is_visible():
+            login_with_username_button = page.get_by_role(
+                "button", name="Log In with Username", exact=True
+            )
+            if login_with_username_button.count() == 1 and login_with_username_button.is_visible():
+                login_with_username_button.click(timeout=15000)
+                username_box.wait_for(state="visible", timeout=20000)
+            else:
+                raise PrivateRunnerError(
+                    "Salesforce login page showed the Log In with Email screen and no username form"
+                )
+        username_box.fill(username, timeout=15000)
         password_box = page.locator("#password")
         if password_box.count() == 0 or not password_box.is_visible():
             page.locator("#Login").click(timeout=15000)

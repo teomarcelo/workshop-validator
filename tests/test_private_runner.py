@@ -96,44 +96,66 @@ class PrivatePlanTests(unittest.TestCase):
             load_plan(self.path,pdf_digest="a"*64,page_count=4)
 
 class _Loc:
-    def __init__(self, page, selector):
+    def __init__(self, page, selector, role=None, name=None):
         self.page = page
         self.selector = selector
+        self.role = role
+        self.name = name
 
     def fill(self, value, timeout=None):
         self.page.events.append(("fill", self.selector))
         if self.selector == "#password" and not self.is_visible():
             raise AssertionError("filled a hidden password field")
+        if self.selector == "#username" and not self.is_visible():
+            raise TimeoutError("username field not visible")
 
     def click(self, timeout=None):
-        self.page.events.append(("click", self.selector))
-        if self.selector == "#Login" and not self.page.password_visible:
-            self.page.password_visible = True
+        if self.role == "button" and self.name == "Log In with Username":
+            self.page.events.append(("click", "button:Log In with Username"))
+            if self.page.email_screen:
+                self.page.username_visible = True
+        else:
+            self.page.events.append(("click", self.selector))
+            if self.selector == "#Login" and not self.page.password_visible:
+                self.page.password_visible = True
 
     def count(self):
         if self.selector == "#password":
             return 1 if self.page.password_visible or self.page.combined_form else 0
         if self.selector == "#username":
             return 0
+        if self.role == "button" and self.name == "Log In with Username":
+            return 1 if self.page.email_screen and self.page.has_username_button else 0
         return 1
 
     def is_visible(self):
         if self.selector == "#password":
             return self.page.password_visible or self.page.combined_form
+        if self.selector == "#username":
+            if self.page.email_screen:
+                return self.page.username_visible
+            return True
+        if self.role == "button" and self.name == "Log In with Username":
+            return self.page.email_screen and self.page.has_username_button
         return True
 
     def wait_for(self, state=None, timeout=None):
         if self.selector == "#password" and not self.is_visible():
             raise TimeoutError("password field did not appear")
+        if self.selector == "#username" and not self.is_visible():
+            raise TimeoutError("username field did not appear")
 
 
 class _Page:
-    def __init__(self, combined_form=False, promo_blocked=False):
+    def __init__(self, combined_form=False, promo_blocked=False, email_screen=False, has_username_button=True):
         self.events = []
         self.password_visible = False
         self.combined_form = combined_form
         self.promo_blocked = promo_blocked
         self.promo_ignored = False
+        self.email_screen = email_screen
+        self.has_username_button = has_username_button
+        self.username_visible = not email_screen
         self.url = "https://example.lightning.force.com/lightning/page/home"
 
     def route(self, pattern, handler=None, **kwargs):
@@ -150,6 +172,9 @@ class _Page:
 
     def locator(self, selector):
         return _Loc(self, selector)
+
+    def get_by_role(self, role, name=None, exact=False):
+        return _Loc(self, None, role=role, name=name)
 
     def wait_for_url(self, predicate, timeout=None):
         if not predicate(self.url):
@@ -216,6 +241,40 @@ class LoginAdapterTests(unittest.TestCase):
             ("click", "#Login"),
         ])
         self.assertEqual(self._password_submits(combined), [("click", "#Login")])
+
+    def test_email_screen_clicks_username_button_first(self):
+        page = _Page(email_screen=True, has_username_button=True)
+        login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+            ("click", "button:Log In with Username"),
+            ("fill", "#username"),
+            ("click", "#Login"),
+            ("fill", "#password"),
+            ("click", "#Login"),
+        ])
+
+    def test_classic_screen_skips_username_button(self):
+        page = _Page(combined_form=False, email_screen=False)
+        login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+            ("fill", "#username"),
+            ("click", "#Login"),
+            ("fill", "#password"),
+            ("click", "#Login"),
+        ])
+        self.assertNotIn(("click", "button:Log In with Username"), page.events)
+
+    def test_email_screen_without_username_button_fails(self):
+        page = _Page(email_screen=True, has_username_button=False)
+        with self.assertRaises(PrivateRunnerError) as ctx:
+            login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertIn("Log In with Email screen", str(ctx.exception))
+        self.assertIn("no username form", str(ctx.exception))
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+        ])
 
     @staticmethod
     def _password_submits(page):
