@@ -6340,8 +6340,11 @@ def _finish_attempt(
             return CheckResult("NOT_RUN", LOADING_NOTE, ())
         research_closed = memory.done and not memory.pending
         if not loading and _wait_done(state, start) and research_closed:
-            missed = _lookup_miss_result(state, intent.target) if intent.kind == "fill" else None
-            return missed or _freeze_result(state, step, intent.target, memory.candidate)
+            frozen = _freeze_result(state, step, intent.target, memory.candidate)
+            # The lookup's own facts replace only the generic miss; a covering pop-up keeps W-080.
+            own = frozen.status == "UI_MISMATCH" and intent.kind == "fill"
+            missed = _lookup_miss_result(state, intent.target) if own else None
+            return missed or frozen
         _report_wait(state, step, intent, start)
         _sleep(state, state.page_poll_s if state.page_poll_s > 0 else PAGE_POLL_S)
 

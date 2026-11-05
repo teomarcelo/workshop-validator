@@ -190,7 +190,17 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
     def fill(self, html, text=STEP):
         page = self.open(html)
         state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        # An earlier guide step opened Sample Screen; it is the guide's own dialog.
+        guide_walk._open_guide_dialog(state, "Sample Screen")
         return guide_walk.attempt_step(state, make_step("rv", text))
+
+    def test_lookup_miss_under_a_covering_modal_pop_up_keeps_the_pop_up_rule(self):
+        cover = ('<div id="cover" role="dialog" aria-modal="true" aria-label="Sample Welcome">'
+                 '<p>Welcome to the sample page.</p></div>')
+        result = self.fill(screen_html(option="varOtherRec").replace("<script>", cover + "<script>", 1))
+        self.assertEqual(result.status, "ENV_BLOCKED", result.note)
+        self.assertIn('"Sample Welcome"', result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
 
     def walk(self, html, second, snapshot_dir=None):
         page = self.open(html)
