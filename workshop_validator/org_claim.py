@@ -22,13 +22,23 @@ Modes:
   gate then points at the new org and its floor, so the retired orgs below it
   are never used again (a freeze stays).
 
-  W-102: at most 10 orgs are claimed in total during testing, across all
-  codes. The marker ``team/claim-attempt`` keeps one SHA-256 digest per
-  CLAIMED result in its ``claimed`` list (never the code itself); with 10
-  there, the next claim is refused with exit 2 before the browser opens. No
-  flag or environment variable lifts the cap. The owner lifts it by hand,
-  after verifying the claimed orgs, by removing digests from ``claimed`` in
-  that private marker.
+  W-102: at most 10 submits are spent in total during testing, across all
+  codes. The marker ``team/claim-attempt`` keeps SHA-256 digests only, never
+  the code. Just before each submit click the digest goes into ``pending``;
+  a CLAIMED result moves one entry from ``pending`` to ``claimed``; any other
+  end (NEEDS_REVIEW, an error, a crash, even after the org was saved) leaves
+  it in ``pending``. Nothing clears ``pending`` automatically. When
+  ``len(claimed) + len(pending)`` reaches 10, the next claim is refused with
+  exit 2 before the browser opens. No flag or environment variable lifts the
+  cap. The owner lifts it by hand, after verifying the orgs, by removing
+  digests from ``claimed`` or ``pending`` in that private marker.
+
+  A deleted or emptied marker does not reset the count. The org count before
+  any claim is kept as ``org_baseline`` in the marker and in a second private
+  file, ``team/claim-baseline``. When the marker is missing or empty but the
+  org file holds more orgs than that baseline, the claim is refused ("the
+  claim marker is missing; the owner must verify (W-102)"). After verifying,
+  the owner restores the marker or deletes ``team/claim-baseline`` by hand.
 * ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
   point the gate (and floor) at the last org in the org file. Refused unless
   the marker says CLAIMED and the gate floor is lower.
@@ -64,11 +74,13 @@ CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
 ATTEMPT = Path("team") / "claim-attempt"
 RUN_LOCK = Path("team") / ".claim-run.lock"
+BASELINE = Path("team") / "claim-baseline"
 MAX_ATTEMPTS = 3
 LEFT_PORTAL = "left the https portal"
 MARKER_REFUSED = "the claim marker could not be read"
 MAX_CLAIMED = 10
 TOTAL_CAP_REFUSED = f"{MAX_CLAIMED} new orgs already claimed (W-102); the owner must verify before another"
+MISSING_REFUSED = "the claim marker is missing; the owner must verify (W-102)"
 RUNNING_REFUSED = "another claim is running"
 CAP_REFUSED = f"this event code was already tried {MAX_ATTEMPTS} times"
 
@@ -455,6 +467,12 @@ def _read_marker(root: Path) -> dict | None:
     return marker if isinstance(marker, dict) else None
 
 
+def _digest_list(value) -> list[str] | None:
+    if not isinstance(value, list) or not all(isinstance(d, str) for d in value):
+        return None
+    return list(value)
+
+
 def _claimed_list(marker: dict) -> list[str] | None:
     """One digest per CLAIMED result (repeats allowed, W-104). None when the list is malformed.
 
@@ -462,50 +480,89 @@ def _claimed_list(marker: dict) -> list[str] | None:
     if "claimed" not in marker:
         digest = marker.get("code_sha256")
         return [digest] if marker.get("result") == "CLAIMED" and isinstance(digest, str) else []
-    claimed = marker.get("claimed")
-    if not isinstance(claimed, list) or not all(isinstance(d, str) for d in claimed):
+    return _digest_list(marker.get("claimed"))
+
+
+def _pending_list(marker: dict) -> list[str] | None:
+    """One digest per submit that has not ended CLAIMED. None when the list is malformed."""
+    return _digest_list(marker["pending"]) if "pending" in marker else []
+
+
+def _count(value) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _read_baseline(root: Path) -> int | None:
+    """The org count kept in team/claim-baseline, None when there is none. Raises when unreadable."""
+    path = Path(root) / BASELINE
+    if not path.exists():
         return None
-    return list(claimed)
+    try:
+        value = _count(json.loads(path.read_text(encoding="utf-8")).get("org_baseline"))
+    except (OSError, ValueError, AttributeError):
+        value = None
+    if value is None:
+        raise ClaimRefused(MARKER_REFUSED)
+    return value
 
 
 def reserve_attempt(root: Path, code: str) -> dict:
     """Check and record a new attempt before the browser opens. The caller holds claim_run_lock.
 
-    Refused (ClaimRefused) when the marker is unreadable, when MAX_CLAIMED orgs were
-    already claimed in total (W-102), or when this code failed MAX_ATTEMPTS times since
-    its last CLAIMED. A code that was CLAIMED can be claimed again (W-104). No try is
-    counted here: mark_attempt ("started") counts it just before the submit click.
-    Returns the marker written.
+    Refused (ClaimRefused) when the marker is unreadable, when it is missing or empty
+    but the org file grew past the baseline, when MAX_CLAIMED submits were spent in
+    total (claimed plus pending, W-102), or when this code failed MAX_ATTEMPTS times
+    since its last CLAIMED. A code that was CLAIMED can be claimed again (W-104). No
+    try is counted here: mark_attempt ("started") counts it just before the submit
+    click. Returns the marker written.
     """
     run, digest = last_run_id(root), code_digest(code)
     marker = _read_marker(root)
     if marker is None:
         raise ClaimRefused(MARKER_REFUSED)  # unreadable marker: assume a claim was tried
-    claimed = _claimed_list(marker)
-    if claimed is None:
+    claimed, pending = _claimed_list(marker), _pending_list(marker)
+    if claimed is None or pending is None:
         raise ClaimRefused(MARKER_REFUSED)
-    if len(claimed) >= MAX_CLAIMED:
+    orgs, kept = count_orgs(root), _read_baseline(root)
+    if not marker:  # missing or empty: the count is gone, so the org file is the backstop
+        if kept is not None and orgs > kept:
+            raise ClaimRefused(MISSING_REFUSED)
+        baseline = orgs if kept is None else kept
+    else:  # an older marker has no baseline: the orgs it did not claim
+        baseline = _count(marker.get("org_baseline"))
+        if baseline is None:
+            baseline = max(orgs - len(claimed), 0)
+    if len(claimed) + len(pending) >= MAX_CLAIMED:
         raise ClaimRefused(TOTAL_CAP_REFUSED)
     counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
     tried = counts.get(digest, 0)
     if not isinstance(tried, int) or isinstance(tried, bool) or tried >= MAX_ATTEMPTS:
         raise ClaimRefused(CAP_REFUSED)
     marker = {"last_run": run, "result": "reserved", "code_sha256": digest,
-              "code_attempts": dict(counts), "claimed": claimed}
+              "code_attempts": dict(counts), "claimed": claimed, "pending": pending,
+              "org_baseline": baseline}
+    if kept is None:  # kept outside the marker, so a deleted marker is still noticed
+        _atomic_write(Path(root) / BASELINE, json.dumps({"org_baseline": baseline}) + "\n")
     _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
     return marker
 
 
 def mark_attempt(root: Path, marker: dict, result: str) -> None:
-    """Record a result. "started" counts one try for this code; "CLAIMED" adds one digest
-    to the total (W-102) and resets this code's tries (W-104). The marker dict is updated
-    in place, so later results keep the counts."""
+    """Record a result. "started" counts one try for this code and puts its digest in
+    pending (W-102); "CLAIMED" moves one entry from pending to claimed and resets this
+    code's tries (W-104). Any other result leaves pending as it is. The marker dict is
+    updated in place, so later results keep the counts."""
     digest = marker.get("code_sha256")
     if result == "started" and isinstance(digest, str):
         counts = dict(marker.get("code_attempts") or {})
         counts[digest] = int(counts.get(digest, 0)) + 1
         marker["code_attempts"] = counts
+        marker["pending"] = [*(marker.get("pending") or ()), digest]
     elif result == "CLAIMED" and isinstance(digest, str):
+        pending = list(marker.get("pending") or ())
+        if digest in pending:
+            pending.remove(digest)
+        marker["pending"] = pending
         marker["claimed"] = [*(marker.get("claimed") or ()), digest]
         counts = dict(marker.get("code_attempts") or {})
         counts.pop(digest, None)
