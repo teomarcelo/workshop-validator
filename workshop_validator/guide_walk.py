@@ -4591,12 +4591,6 @@ _FIELD_HELPERS_JS = r"""
   const edge = (el) => el === document.body || el === document.documentElement || el.tagName === "SECTION"
     || ["dialog", "alertdialog", "tabpanel"].includes(el.getAttribute("role") || "")
     || el.getAttribute("aria-modal") === "true" || el.classList.contains("slds-modal__content");
-  const kind = (el) => {
-    const tag = el.tagName.toLowerCase();
-    return String(el.getAttribute("class") || "").includes("form-element")
-      || [...el.children].some((kid) => kid.classList.contains("slds-combobox_container"))
-      || (tag.includes("-") && (tag.endsWith("combobox") || tag.endsWith("lookup")));
-  };
   const named = '.slds-pill, lightning-pill, .slds-listbox_selection > *, '
     + '.slds-listbox_selection [role="option"][aria-selected="true"], '
     + '.slds-listbox_horizontal [role="option"][aria-selected="true"]';
@@ -4606,13 +4600,16 @@ _FIELD_HELPERS_JS = r"""
     const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
     return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
   };
+  const marksIn = (root) => [...root.querySelectorAll("label, legend, .slds-form-element__label")];
 """
-# The lookup's field containers, nearest first: each ancestor of the box that holds the box's own
-# label and is a form element, a combobox container's parent, or a combobox / lookup custom
-# element host. The walk stops before a dialog, section, tab panel or modal body (never the
-# dialog), and before any ancestor that holds another input, another field's label (a label or
-# legend that is not this box's, or an element another input or combobox is labelled by), or a pill that
-# is already shown before the click. So a pill found in one of them later was not there before.
+# The lookup's field containers, nearest first: every ancestor of the box, up to but never
+# including a dialog, section, tab panel or modal body, and stopping BEFORE the first ancestor
+# that holds any other field: another input, textarea or select (hidden ones too), an element
+# with role combobox / searchbox / textbox / spinbutton or aria-haspopup that is not the box or
+# around it, a -combobox / -lookup / -input / -picklist / -textarea custom element that does not
+# hold the box, a label / legend / .slds-form-element__label that is not this box's, an element
+# another control is labelled by (that control already stops it), or a pill already shown. These are the field's own elements,
+# recorded by identity before the click; a pill shown in one of them later was not there before.
 _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
   const home = box.getRootNode();
   const byId = (id) => (home.getElementById ? home.getElementById(id) : document.getElementById(id));
@@ -4623,30 +4620,32 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
     if (el) labels.push(el);
   }
   if (!labels.length) return [];
-  const others = (el) => [...el.querySelectorAll("input:not([type=hidden]), textarea, select")]
-    .some((kid) => kid !== box);
-  // Only a control's labelledby counts: a list group's heading inside the lookup is not a field label.
-  const controls = 'input[aria-labelledby], textarea[aria-labelledby], select[aria-labelledby], '
-    + '[role="combobox"][aria-labelledby], [role="searchbox"][aria-labelledby], [role="textbox"][aria-labelledby]';
-  const foreign = (el) => [...el.querySelectorAll("label, legend")].some((mark) => !labels.includes(mark))
-    || [...el.querySelectorAll(controls)].some((kid) => kid !== box && ids(kid)
-      .map(byId).some((mark) => mark && within(mark, el) && !labels.includes(mark)));
+  const around = (el) => el === box || within(box, el);
+  const fields = 'input, textarea, select, [role="combobox"], [role="searchbox"], [role="textbox"], '
+    + '[role="spinbutton"], [aria-haspopup]';
+  const hosts = /-(combobox|lookup|input|picklist|textarea)$/;
+  const others = (el) => [...el.querySelectorAll(fields)].some((kid) => !around(kid));
+  const otherHosts = (el) => [...el.querySelectorAll("*")]
+    .some((kid) => hosts.test(kid.tagName.toLowerCase()) && !around(kid));
+  // A control labelled by aria-labelledby is itself an input or field role, so others() stops there.
+  const foreign = (el) => marksIn(el).some((mark) => !labels.includes(mark));
   const out = [];
   for (let el = up(box); el && !edge(el); el = up(el)) {
-    if (others(el) || foreign(el) || pillsIn(el).length) break;
-    if (kind(el) && labels.some((label) => within(label, el))) out.push(el);
+    if (others(el) || otherHosts(el) || foreign(el) || pillsIn(el).length) break;
+    out.push(el);
   }
   return out;
 }
 """
 # Selected pills inside one field container, outermost only (a pill's own parts are not pills).
 _PILLS_JS = "(root) => {" + _FIELD_HELPERS_JS + "  return pillsIn(root);\n}"
-# The pill's own field: the nearest form element / combobox host above it that holds a label or
-# legend. True only when it holds exactly one, and its text is exactly NAME (the box's label).
-# A required marker is not part of the field's name: an element (abbr.slds-required,
-# .slds-required, a class containing "required") whose text is "*", and assistive text
-# "required" (any case), are dropped before the text is read, then whitespace is collapsed.
-_PILL_FIELD_JS = "(pill, name) => {" + _FIELD_HELPERS_JS + r"""
+# After the click, the field's own container must still read as one field named NAME: every
+# label, legend or .slds-form-element__label in it reads exactly NAME, and at most one does (a
+# second one is another field, or two fields alike: ambiguous). A required marker is not part of
+# the field's name: an element (abbr.slds-required, .slds-required, a class containing
+# "required") whose text is "*", and assistive text "required" (any case), are dropped before the
+# text is read, then whitespace is collapsed.
+_ONE_FIELD_JS = "(root, name) => {" + _FIELD_HELPERS_JS + r"""
   const fieldName = (mark) => {
     const copy = mark.cloneNode(true);
     const text = (el) => String(el.textContent || "").replace(/\s+/g, " ").trim();
@@ -4658,13 +4657,8 @@ _PILL_FIELD_JS = "(pill, name) => {" + _FIELD_HELPERS_JS + r"""
     }
     return text(copy);
   };
-  for (let el = up(pill); el && !edge(el); el = up(el)) {
-    if (!kind(el)) continue;
-    const marks = [...el.querySelectorAll("label, legend")];
-    if (!marks.length) continue;
-    return marks.length === 1 && fieldName(marks[0]) === name;
-  }
-  return false;
+  const marks = marksIn(root).filter((mark) => !marksIn(root).some((o) => o !== mark && o.contains(mark)));
+  return marks.length <= 1 && marks.every((mark) => fieldName(mark) === name);
 }
 """
 # Titles on a pill and its parts that must agree with its visible label. Icon parts and the remove
@@ -4696,19 +4690,24 @@ def _handles(target, script) -> list:
 
 
 def _field_container(box):
-    """The box's field containers, nearest first, as handles that outlive the box ([] if none)."""
+    """The box's own field elements, nearest first, as handles that outlive the box ([] if none)."""
     return _handles(box, _FIELD_CONTAINERS_JS) if box is not None else []
 
 
 def _live_container(containers):
-    """The nearest field container still on the page (a re-render can replace an inner one)."""
+    """The outermost recorded field element still on the page, or None (no pill evidence).
+
+    Every recorded element held only this field before the click, and the outermost attached
+    one holds all attached inner ones, so its pills are this field's pills.
+    """
+    live = None
     for container in containers or ():
         try:
             if container.evaluate("(el) => el.isConnected"):
-                return container
+                live = container
         except Exception:
             continue
-    return None
+    return live
 
 
 def _pill_label(pill) -> str:
@@ -4732,17 +4731,17 @@ def _pill_label(pill) -> str:
     return lines[0]
 
 
-def _pill_in_own_field(pill, name: str) -> bool:
-    """The pill's own nearest labelled field is labelled exactly NAME (one label, read from the page)."""
+def _one_field(container, name: str) -> bool:
+    """The container still reads as one field named NAME (labels read from the page)."""
     try:
-        return bool(name) and pill.evaluate(_PILL_FIELD_JS, name) is True
+        return bool(name) and container.evaluate(_ONE_FIELD_JS, name) is True
     except Exception:
         return False
 
 
 def _pill_shows(containers, want: str, name: str = "") -> bool:
-    """Exactly one visible selected pill in this field's container, its label exactly WANT, and its
-    own nearest labelled field labelled exactly NAME (the lookup's label)."""
+    """Exactly one visible selected pill inside the field's own recorded elements, its label
+    exactly WANT, and those elements still one field named NAME (the lookup's label)."""
     container = _live_container(containers)
     if container is None or not want:
         return False
@@ -4753,7 +4752,7 @@ def _pill_shows(containers, want: str, name: str = "") -> bool:
                 shown.append(pill)
         except Exception:
             return False
-    return len(shown) == 1 and _pill_label(shown[0]) == want and _pill_in_own_field(shown[0], name)
+    return len(shown) == 1 and _pill_label(shown[0]) == want and _one_field(container, name)
 
 
 def _named_lists(box) -> list:

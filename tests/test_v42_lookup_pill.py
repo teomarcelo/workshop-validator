@@ -53,19 +53,21 @@ def pill(label="varWidgetRec", title=None, label_html=None, icon_title=None):
 
 
 def screen_html(shown=None, home="rv", form_element=True, compound=False, sibling=True,
-                other_label="Sample Other Field", other_input=True, other_pill="", other_extra="", required=False):
+                other_label="Sample Other Field", other_input=True, other_pill="", other_extra="", required=False,
+                other_html=None, other_tag="sample-field", new_label="Sample Other Field"):
     """The guide's own Sample Screen dialog, Fields section, with a Record Variable lookup host.
 
     Clicking the option re-renders the Record Variable host with SHOWN (pill markup, default one
     pill labelled varWidgetRec) in place of the input. With HOME "ot" SHOWN goes into the other
-    field's host instead (HOME "none": nowhere); with HOME "new" a new field labelled Sample Other Field holding SHOWN
+    field's host instead (HOME "none": nowhere; "ot-replace": SHOWN replaces it); with HOME "new" a new field labelled Sample Other Field holding SHOWN
     is added next to it. FORM_ELEMENT wraps each field in an .slds-form-element inside its host.
     COMPOUND puts the fields in one .slds-form-element_compound wrapper, and the pick then
     replaces the whole Record Variable host. SIBLING adds the other field: with OTHER_LABEL (None
     for no label), OTHER_INPUT, OTHER_PILL already shown before the pick, and OTHER_EXTRA markup.
     REQUIRED puts an SLDS required marker (*) before every field label: aria-hidden before the
     pick (so the lookup is still found by its name, as on the real page), plain after it. A
-    string REQUIRED is the marker markup shown after the pick instead.
+    string REQUIRED is the marker markup shown after the pick instead. OTHER_HTML replaces the
+    other field with that markup inside an OTHER_TAG host. NEW_LABEL names the HOME "new" field.
     """
     shown = pill() if shown is None else shown
     mark = '<abbr class="slds-required" title="required" aria-hidden="true">*</abbr>' if required else ""
@@ -92,6 +94,8 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
       </div>""")
     other_box = '<div class="slds-combobox_container"><input id="ot" autocomplete="off"></div>'
     other = field("ot", other_label, (other_box if other_input else "") + other_pill + other_extra) if sibling else ""
+    if other_html is not None:
+        other = f'<{other_tag} id="host-ot">{other_html}</{other_tag}>'
     opening = '<div class="slds-form-element_compound">' if compound else ""
     closing = "</div>" if compound else ""
     return f"""{CSS}
@@ -127,9 +131,12 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
     else host.innerHTML = wrap("Record Variable", "");
     if (home === "new") {{
       parent.insertAdjacentHTML("beforeend", '<sample-grouped-combobox id="host-new">' +
-        wrap("Sample Other Field", {shown!r}) + "</sample-grouped-combobox>");
+        wrap({new_label!r}, {shown!r}) + "</sample-grouped-combobox>");
+    }} else if (home === "ot-replace") {{
+      document.getElementById("host-ot").innerHTML = {shown!r};
     }} else if (home === "ot") {{
-      document.querySelector("#host-ot .slds-form-element__control").insertAdjacentHTML("beforeend", {shown!r});
+      const slot = document.querySelector("#host-ot .slds-form-element__control") || document.getElementById("host-ot");
+      slot.insertAdjacentHTML("beforeend", {shown!r});
     }}
   }});
   document.getElementById("rv").focus();
@@ -260,6 +267,40 @@ class LookupPillBrowserTests(unittest.TestCase):
                                        other_extra=named))
         self.assert_not_pass(result)
         self.assertEqual(self.page.locator("#host-ot .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_pill_in_a_sibling_field_the_capture_must_stop_at_is_not_pass(self):
+        # Reviewer probes: a sibling field in the shared wrapper, each named a different way. The
+        # pick replaces the Record Variable host and the pill shows in the sibling (G: it was
+        # already there; H: the sibling's label is replaced by the pill).
+        probes = {
+            "A": dict(other_html='<div role="combobox" aria-label="Sample Other Field" aria-expanded="false"></div>'),
+            "A2": dict(other_html='<div role="combobox" aria-label="Sample Other Field" aria-expanded="false"></div>',
+                       form_element=False),
+            "F": dict(other_html='<button role="combobox" aria-label="Sample Other Field">Sample</button>'),
+            "C": dict(other_html='<span class="slds-form-element__label">Sample Other Field</span>'),
+            "C2": dict(other_html="", other_tag="sample-grouped-combobox"),
+            "E": dict(other_html='<input type="hidden" value="sample">'),
+            "G": dict(other_html=pill(), home="none"),
+            "H": dict(other_html="<label>Sample Other Field</label>", home="ot-replace"),
+        }
+        for probe, options in probes.items():
+            with self.subTest(probe=probe):
+                result = self.fill(screen_html(**{"home": "ot", "compound": True, **options}))
+                self.assert_not_pass(result)
+                self.assertEqual(self.page.locator("#host-ot .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_pill_in_a_new_same_labelled_field_is_not_pass(self):
+        # Probe D: after the pick a second Record Variable field holds the pill: two fields alike.
+        result = self.fill(screen_html(home="new", compound=True, sibling=False, new_label="Record Variable"))
+        self.assert_not_pass(result)
+        self.assertEqual(self.page.locator("#host-new .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_pill_beside_a_rerendered_inner_form_element_is_pass(self):
+        # The inner .slds-form-element is replaced while its host stays attached.
+        result = self.fill(screen_html())
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.locator("#host-rv > .slds-form-element").count(), 1)
+        self.assertEqual(self.page.locator("#rv").count(), 0)
 
     def test_pill_in_a_field_rendered_after_the_pick_is_not_pass(self):
         # A new field appears in the wrapper with the pill; that pill's own field is not Record Variable.
