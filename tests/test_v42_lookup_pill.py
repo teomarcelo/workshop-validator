@@ -53,7 +53,7 @@ def pill(label="varWidgetRec", title=None, label_html=None, icon_title=None):
 
 
 def screen_html(shown=None, home="rv", form_element=True, compound=False, sibling=True,
-                other_label="Sample Other Field", other_input=True, other_pill="", other_extra=""):
+                other_label="Sample Other Field", other_input=True, other_pill="", other_extra="", required=False):
     """The guide's own Sample Screen dialog, Fields section, with a Record Variable lookup host.
 
     Clicking the option re-renders the Record Variable host with SHOWN (pill markup, default one
@@ -63,11 +63,16 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
     COMPOUND puts the fields in one .slds-form-element_compound wrapper, and the pick then
     replaces the whole Record Variable host. SIBLING adds the other field: with OTHER_LABEL (None
     for no label), OTHER_INPUT, OTHER_PILL already shown before the pick, and OTHER_EXTRA markup.
+    REQUIRED puts an SLDS required marker (*) before every field label: aria-hidden before the
+    pick (so the lookup is still found by its name, as on the real page), plain after it. A
+    string REQUIRED is the marker markup shown after the pick instead.
     """
     shown = pill() if shown is None else shown
+    mark = '<abbr class="slds-required" title="required" aria-hidden="true">*</abbr>' if required else ""
+    mark_after = '<abbr class="slds-required" title="required">*</abbr>' if required is True else (required or "")
 
     def field(key, name, inner):
-        body = ((f'<label class="slds-form-element__label" for="{key}">{name}</label>' if name else "")
+        body = ((f'<label class="slds-form-element__label" for="{key}">{mark}{name}</label>' if name else "")
                 + f'<div class="slds-form-element__control">{inner}</div>')
         if form_element:
             body = f'<div class="slds-form-element">{body}</div>'
@@ -109,7 +114,7 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
     const home = {home!r};
     const formed = {str(bool(form_element)).lower()};
     const wrap = (name, inner) => {{
-      const body = '<label class="slds-form-element__label">' + name + '</label>' +
+      const body = '<label class="slds-form-element__label">' + {mark_after!r} + name + '</label>' +
         '<div class="slds-form-element__control">' + inner + '</div>';
       return formed ? '<div class="slds-form-element">' + body + '</div>' : body;
     }};
@@ -261,6 +266,28 @@ class LookupPillBrowserTests(unittest.TestCase):
         result = self.fill(screen_html(home="new", compound=True, sibling=False))
         self.assert_not_pass(result)
         self.assertEqual(self.page.locator("#host-new .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_required_marker_is_not_part_of_the_field_name(self):
+        result = self.fill(screen_html(required=True))
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.evidence_ids, ("rv:pill",))
+        self.assertEqual(self.page.locator("#host-rv abbr.slds-required").count(), 1)
+        self.assertIsNone(self.page.locator("#host-rv abbr.slds-required").get_attribute("aria-hidden"))
+
+    def test_required_assistive_text_is_not_part_of_the_field_name(self):
+        result = self.fill(screen_html(required='<span class="slds-assistive-text">Required</span>'))
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.evidence_ids, ("rv:pill",))
+
+    def test_required_class_with_other_text_stays_in_the_field_name(self):
+        # Only a "*" marker is dropped; other text in a required-styled element is part of the name.
+        result = self.fill(screen_html(required='<span class="slds-required">Sample </span>'))
+        self.assert_not_pass(result)
+
+    def test_pill_in_another_required_field_is_not_pass(self):
+        result = self.fill(screen_html(home="new", compound=True, sibling=False, required=True))
+        self.assert_not_pass(result)
+        self.assertEqual(self.page.locator("#host-new abbr.slds-required").count(), 1)
 
     def test_icon_title_is_not_compared_with_the_label(self):
         result = self.fill(screen_html(shown=pill(icon_title="Record")))

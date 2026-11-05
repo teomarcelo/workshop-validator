@@ -4643,12 +4643,26 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
 _PILLS_JS = "(root) => {" + _FIELD_HELPERS_JS + "  return pillsIn(root);\n}"
 # The pill's own field: the nearest form element / combobox host above it that holds a label or
 # legend. True only when it holds exactly one, and its text is exactly NAME (the box's label).
+# A required marker is not part of the field's name: an element (abbr.slds-required,
+# .slds-required, a class containing "required") whose text is "*", and assistive text
+# "required" (any case), are dropped before the text is read, then whitespace is collapsed.
 _PILL_FIELD_JS = "(pill, name) => {" + _FIELD_HELPERS_JS + r"""
+  const fieldName = (mark) => {
+    const copy = mark.cloneNode(true);
+    const text = (el) => String(el.textContent || "").replace(/\s+/g, " ").trim();
+    for (const el of [...copy.querySelectorAll('abbr.slds-required, .slds-required, [class*="required"]')]) {
+      if (text(el) === "*") el.remove();
+    }
+    for (const el of [...copy.querySelectorAll(".slds-assistive-text")]) {
+      if (text(el).toLowerCase() === "required") el.remove();
+    }
+    return text(copy);
+  };
   for (let el = up(pill); el && !edge(el); el = up(el)) {
     if (!kind(el)) continue;
     const marks = [...el.querySelectorAll("label, legend")];
     if (!marks.length) continue;
-    return marks.length === 1 && String(marks[0].innerText || "").replace(/\s+/g, " ").trim() === name;
+    return marks.length === 1 && fieldName(marks[0]) === name;
   }
   return false;
 }
