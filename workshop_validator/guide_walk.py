@@ -4567,11 +4567,59 @@ def _matching_options(root, box, value: str, dialog_name: str = "", empty_falls_
     ]
 
 
-def _list_closed(root, box, dialog_name: str = "") -> bool:
-    """The box is not expanded and its own list shows no option."""
-    if box is None or _read_attr(box, "aria-expanded") == "true":
+# One read of one element, at one moment: is it still in the page, is it the element the box
+# locator resolves to now, the value it shows (a form field's value, else its own text, as
+# input_value then inner_text read it) and its aria-expanded (null when the attribute is missing).
+_BOX_STATE_JS = """(el, now) => {
+  const field = el.matches('input, textarea, select');
+  return {
+    connected: el.isConnected === true,
+    same: el === now,
+    value: String((field ? el.value : '') || el.innerText || ''),
+    expanded: el.getAttribute('aria-expanded'),
+  };
+}"""
+
+
+def _dispose(*handles) -> None:
+    for handle in handles:
+        try:
+            if handle is not None:
+                handle.dispose()
+        except Exception:
+            pass
+
+
+def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
+    """The box shows WANT, is not expanded, and its own list shows no option. Fails closed.
+
+    The box element is held first. After the options check on the box's own list, one evaluate
+    on that element reads that it is still in the page, that the box locator still resolves to
+    it, its shown value and its aria-expanded. A vanished or replaced box, an unreadable value,
+    or a missing or unreadable aria-expanded is never closed.
+    """
+    want = _plain(want)
+    if box is None or not want:
         return False
-    return not any(shown for _option, _label, shown in _scoped_options(_owned_listbox(root, box, dialog_name)))
+    held = now = None
+    try:
+        held = box.element_handle(timeout=1000)
+        if held is None:
+            return False
+        if any(shown for _option, _label, shown in _scoped_options(_owned_listbox(root, box, dialog_name))):
+            return False
+        now = box.element_handle(timeout=1000)
+        read = held.evaluate(_BOX_STATE_JS, now)
+    except Exception:
+        return False
+    finally:
+        _dispose(held, now)
+    if not isinstance(read, dict) or read.get("connected") is not True or read.get("same") is not True:
+        return False
+    expanded = read.get("expanded")
+    if not isinstance(expanded, str) or _plain(expanded) == "true":
+        return False
+    return _plain(read.get("value")) == want
 
 
 def _variable_options(page) -> list:
@@ -4967,7 +5015,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
 
     def chosen() -> bool:
         now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
-        if now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box):
+        if now_box is not None and _list_closed(now_root, now_box, want):
             return True
         if not _pill_shows(container, want, _plain(label), before):
             return False

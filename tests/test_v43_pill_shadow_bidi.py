@@ -302,7 +302,7 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         result = self.fill(nested_html)
         self.assert_review(result)
 
-    def test_pill_already_shown_before_click_is_not_evidence(self):
+    def test_preexisting_pill_outside_live_container_fails_closed(self):
         # A pill already in a shadow root before the click must not count as evidence of this pick.
         # Fail-closed check only: the pill sits outside the innermost live container, so this stays
         # UI_MISMATCH even with the identity check and the walk stop removed. The guards are proven
@@ -370,7 +370,7 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assertNotEqual(result.status, "PASS", result.note)
         self.assertIn("Record Variable did not show recThing", result.note)
 
-    def test_pill_in_ancestor_stops_container_walk(self):
+    def test_new_pill_outside_combobox_wrapper_fails_closed(self):
         # A pill inside a shadow root in an ancestor, and a NEW pill added to an inner wrapper after
         # the click. Fail-closed check only: the innermost live container is the combobox wrapper,
         # which never holds the new pill, so this stays UI_MISMATCH with or without the walk stop.
@@ -559,6 +559,212 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assertEqual(tuple(outcome.evidence.get("s2", ())), ())
         self.assertEqual(ran, ["s3"])
         self.assertEqual(outcome.statuses["s3"], "PASS")
+        result = SimpleNamespace(signed_in=True, message="", report_steps=report_steps(outcome, steps))
+        self.assertEqual(outcome_of(result), (INCONCLUSIVE, REVIEW_NOTE))
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+
+
+def race_html(after_html):
+    """The Record Variable lookup. The option click hides the list, but the box keeps recThing and
+    aria-expanded="true" until window.swap() runs; swap() replaces the whole field with AFTER_HTML."""
+    return f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <sample-field id="host-rv">
+      <label for="rv">Record Variable</label>
+      <div class="slds-combobox_container">
+        <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing"
+               autocomplete="off">
+      </div>
+      <div id="lb" role="listbox">
+        <div role="option" id="opt1"><strong>recThing</strong></div>
+      </div>
+    </sample-field>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  window.swapped = false;
+  const host = document.getElementById("host-rv");
+  window.swap = () => {{ window.swapped = true; host.innerHTML = {after_html!r}; }};
+  document.getElementById("lb").addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    document.getElementById("lb").hidden = true;
+  }});
+  document.getElementById("rv").focus();
+</script>
+"""
+
+
+def unreadable_expanded_html(how):
+    """The option click closes the list and keeps recThing in the box, but its aria-expanded cannot be
+    read: HOW is "missing" (the attribute is removed) or "throws" (reading it in the page throws)."""
+    if how == "missing":
+        spoil = 'box.removeAttribute("aria-expanded");'
+    else:
+        spoil = ('box.setAttribute("aria-expanded", "false"); '
+                 'box.getAttribute = () => { throw new Error("unreadable"); };')
+    return f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <sample-field id="host-rv">
+      <label for="rv">Record Variable</label>
+      <div class="slds-combobox_container">
+        <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing"
+               autocomplete="off">
+      </div>
+      <div id="lb" role="listbox">
+        <div role="option" id="opt1"><strong>recThing</strong></div>
+      </div>
+    </sample-field>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const box = document.getElementById("rv");
+  const list = document.getElementById("lb");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    list.hidden = true;
+    {spoil}
+  }});
+  box.focus();
+</script>
+"""
+
+
+MISS_NOTE = "Record Variable did not show recThing after its option was clicked."
+PILL_FIELD = '<label>Record Variable</label><div class="slds-form-element__control">' + pill() + '</div>'
+
+
+class _SwapAfterValueRead:
+    """The Record Variable box as the walk sees it after the option click. Right after the walk reads
+    the box's shown value (input_value or inner_text on the box, or an evaluate on a handle taken from
+    it), the page swaps the field (window.swap), once. The re-render lands between reads, no timing."""
+
+    def __init__(self, target, page):
+        self._target = target
+        self._page = page
+
+    def _swap(self):
+        if not self._page.evaluate("window.swapped"):
+            self._page.evaluate("window.swap()")
+
+    def __getattr__(self, name):
+        attr = getattr(self._target, name)
+        if name in ("input_value", "inner_text"):
+            def read(*args, **kwargs):
+                value = attr(*args, **kwargs)
+                self._swap()
+                return value
+            return read
+        if name == "element_handle":
+            def handle(*args, **kwargs):
+                held = attr(*args, **kwargs)
+                if held is not None:
+                    evaluate = held.evaluate
+
+                    def read(*e_args, **e_kwargs):
+                        value = evaluate(*e_args, **e_kwargs)
+                        self._swap()
+                        return value
+                    held.evaluate = read
+                return held
+            return handle
+        return attr
+
+
+@unittest.skipUnless(SMOKE, SMOKE_REASON)
+class ListClosedReadRaceBrowserTests(unittest.TestCase):
+    """A box that re-renders between the value read and the expanded read is never PASS."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(
+            headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def open(self, html, swap_after_read):
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        serve(page, html)
+        self.page = page
+        if swap_after_read:
+            real = guide_walk._labeled_box
+
+            def labeled_box(at, label, roles=("combobox", "searchbox")):
+                root, role, target = real(at, label, roles)
+                if target is not None and label == "Record Variable" and page.evaluate("window.chosen.length > 0"):
+                    target = _SwapAfterValueRead(target, page)
+                return root, role, target
+
+            guide_walk._labeled_box = labeled_box
+            self.addCleanup(setattr, guide_walk, "_labeled_box", real)
+        return page
+
+    def fill(self, html, swap_after_read=False):
+        page = self.open(html, swap_after_read)
+        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        guide_walk._open_guide_dialog(state, "Sample Screen")
+        return guide_walk.attempt_step(state, make_step("rv", STEP))
+
+    def test_box_swapped_for_a_pill_after_the_value_read_is_review_not_pass(self):
+        result = self.fill(race_html(PILL_FIELD), swap_after_read=True)
+        self.assertTrue(self.page.evaluate("window.swapped"))
+        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, REVIEW_NOTE)
+        self.assertFalse(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
+
+    def test_box_removed_after_the_value_read_without_a_pill_is_mismatch_not_pass(self):
+        result = self.fill(race_html("<label>Record Variable</label>"), swap_after_read=True)
+        self.assertTrue(self.page.evaluate("window.swapped"))
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(result.note, MISS_NOTE)
+        self.assertTrue(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
+
+    def test_box_whose_expanded_state_cannot_be_read_is_never_closed(self):
+        for how in ("missing", "throws"):
+            with self.subTest(how=how):
+                result = self.fill(unreadable_expanded_html(how))
+                self.assertEqual(self.page.evaluate("document.getElementById('rv').value"), "recThing")
+                self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+                self.assertEqual(result.status, "UI_MISMATCH", result.note)
+                self.assertEqual(result.note, MISS_NOTE)
+                self.assertTrue(result.freeze)
+
+    def test_walk_goes_on_after_a_swap_between_reads_and_run_is_inconclusive(self):
+        page = self.open(race_html(PILL_FIELD), swap_after_read=True)
+        ran = []
+
+        def next_step(state, item):
+            ran.append(item.step_id)
+            return CheckResult("PASS", "Sample next step read.", (f"{item.step_id}:read",))
+
+        steps = (make_step("s1", "Add a Sample Screen."), make_step("s2", STEP),
+                 make_step("s3", "Sample next step."))
+        checks = (GuideCheck("opened", lambda item: item.step_id == "s1", opened_screen),
+                  GuideCheck("next", lambda item: item.step_id == "s3", next_step))
+        outcome = walk_guide(page, SimpleNamespace(steps=steps), checks=checks, timeout_s=3, interval_s=0.2,
+                             page_wait_s=2, page_poll_s=0.2)
+        self.assertTrue(page.evaluate("window.swapped"))
+        self.assertEqual(outcome.statuses["s2"], "NEEDS_REVIEW", outcome.notes.get("s2"))
+        self.assertEqual(outcome.notes.get("s2"), REVIEW_NOTE)
+        self.assertEqual(ran, ["s3"])
         result = SimpleNamespace(signed_in=True, message="", report_steps=report_steps(outcome, steps))
         self.assertEqual(outcome_of(result), (INCONCLUSIVE, REVIEW_NOTE))
         self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
