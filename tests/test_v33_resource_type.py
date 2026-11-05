@@ -160,15 +160,44 @@ class _TextsLoc:
         return self.texts[0]
 
 
+class _OptionLoc(Loc):
+    """A Flow Builder option: a label line, then a description line, both in its text."""
+
+    def inner_text(self, timeout=None):
+        return f"{self.name}\nStore a sample value for this sample flow."
+
+
 class _OptionsLoc:
+    def __init__(self, options):
+        self.options = options
+
+    def count(self):
+        return len(self.options)
+
+    def nth(self, index):
+        return self.options[index]
+
+
+class _ListboxLoc:
+    """The listbox the Resource Type combobox controls (aria-controls)."""
+
     def __init__(self, page):
         self.page = page
 
     def count(self):
-        return len(self.page.options)
+        return 1
 
-    def nth(self, index):
-        return Loc(self.page, "option", self.page.options[index])
+    @property
+    def first(self):
+        return self
+
+    def get_by_role(self, role, name=None, exact=True):
+        if role != "option":
+            return _OptionsLoc([])
+        return _OptionsLoc([_OptionLoc(self.page, "option", text) for text in self.page.options])
+
+
+LISTBOX_ID = "sample-listbox"
 
 
 class ResourcePage(Page):
@@ -182,9 +211,10 @@ class ResourcePage(Page):
         self.box_role = "combobox"
         self.others = []  # _OtherBox controls ahead of the real one in document order
         self.box_value = "Select an Option"
-        self.box_attrs = {"aria-expanded": "false"}
+        self.box_attrs = {"aria-expanded": "false", "aria-controls": LISTBOX_ID}
         self.ids = {}
         self.options = list(options)
+        self.stray = []  # options elsewhere on the page, outside the Resource Type listbox
         for name in self.options:
             self.roles.add(("option", name))
         self.on_enter = None
@@ -197,7 +227,7 @@ class ResourcePage(Page):
 
     def highlight(self, text, copies=1, option_id="sample-option-2"):
         self.box_attrs["aria-activedescendant"] = option_id
-        self.ids[option_id] = [text] * copies
+        self.ids[option_id] = [f"{text}\nStore a sample value."] * copies
 
     def get_by_role(self, role, name=None, exact=True):
         if role == self.box_role and name and (name == "Resource Type" or not exact):
@@ -210,11 +240,15 @@ class ResourcePage(Page):
                 found.append(_BoxLoc(self))
             return _BoxesLoc(found)
         if role == "option" and not name:
-            return _OptionsLoc(self)
+            # Page-wide: the listbox options and any stray option outside it.
+            texts = self.options + self.stray
+            return _OptionsLoc([_OptionLoc(self, "option", text) for text in texts])
         return super().get_by_role(role, name, exact)
 
     def locator(self, selector):
         match = re.fullmatch(r'\[id="(.*)"\]', selector, re.S)
+        if match and _css_string(match.group(1)) == LISTBOX_ID:
+            return _ListboxLoc(self)
         if match:
             return _TextsLoc(self.ids.get(_css_string(match.group(1)), []))
         return super().locator(selector)
@@ -339,6 +373,53 @@ class ResourceTypeTests(unittest.TestCase):
         self.assertIn("7 options; labels: Variable, Constant, Formula, Text Template, Stage, Choice.",
                       result.note)
 
+
+    def test_option_whose_first_line_only_starts_with_variable_is_never_clicked(self):
+        page = ResourcePage(options=("Variable Collection", "Variable", "Constant"))
+        self.on_option(page, page.select_variable)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "PASS")
+        options = [name for kind, name in clicks(page) if kind == "option"]
+        self.assertEqual(options, ["Variable"])
+
+    def test_only_a_longer_variable_label_is_a_mismatch_with_nothing_clicked(self):
+        page = ResourcePage(options=("Variable Collection", "Constant"))
+        page.on_click = lambda kind, name: page.select_variable() if kind == "option" else None
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertEqual(
+            result.note,
+            UNSET + " Diagnostic: control role combobox; aria-expanded true; "
+            "option Variable present no, visible no; 2 options; labels: other, Constant.",
+        )
+        self.assertEqual([kind for kind, _name in clicks(page) if kind == "option"], [])
+
+    def test_two_variable_options_are_a_mismatch_with_nothing_clicked(self):
+        page = ResourcePage(options=("Variable", "Variable", "Constant"))
+        self.on_option(page, page.select_variable)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertNotIn(("option", "Variable"), clicks(page))
+
+    def test_variable_option_outside_the_listbox_is_never_clicked(self):
+        page = ResourcePage(options=("Constant", "Formula"))
+        page.stray = ["Variable"]
+        page.roles.add(("option", "Variable"))
+        self.on_option(page, page.select_variable)
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("option Variable present no, visible no; 2 options; labels: Constant, Formula.",
+                      result.note)
+        self.assertNotIn(("option", "Variable"), clicks(page))
+
+    def test_two_line_highlighted_variable_gets_one_enter(self):
+        page = ResourcePage()
+        self.open_on_variable(page)
+        self.assertEqual(page.ids["sample-option-2"], ["Variable\nStore a sample value."])
+        result = guide_walk.run_record_variable(state_for(page), variable_step())
+        self.assertEqual(result.status, "PASS")
+        self.assertEqual(page.keys, ["Enter"])
 
     def hide_api_name(self, page, textbox=False):
         page.values["API Name"] = ""
@@ -618,8 +699,10 @@ COMBOBOX_HTML = """
 <button id="box" role="combobox" aria-labelledby="lbl" aria-expanded="false"
         aria-controls="list">Select an Option</button>
 <div id="list" role="listbox" hidden>
-  <div role="option" id="opt-variable">Variable</div>
-  <div role="option" id="opt-constant">Constant</div>
+  <div role="option" id="opt-variable"><span class="label">Variable</span>
+    <span class="desc" style="display:block">Store a sample value that can change.</span></div>
+  <div role="option" id="opt-constant"><span class="label">Constant</span>
+    <span class="desc" style="display:block">Store a sample value that stays the same.</span></div>
 </div>
 <div id="stale" hidden><label for="api-stale">API Name</label><input id="api-stale"></div>
 <div id="fields"></div>
@@ -629,10 +712,11 @@ COMBOBOX_HTML = """
   window.clickSelects = false;
   window.enters = 0;
   function choose(option) {
-    box.textContent = option.textContent;
+    const label = option.querySelector(".label").textContent;
+    box.textContent = label;
     box.setAttribute("aria-expanded", "false");
     list.hidden = true;
-    if (option.textContent === "Variable") {
+    if (label === "Variable") {
       document.getElementById("fields").innerHTML = '<label for="api">API Name</label><input id="api">';
     }
   }
@@ -642,7 +726,7 @@ COMBOBOX_HTML = """
     box.setAttribute("aria-activedescendant", window.highlight);
   });
   list.addEventListener("click", (event) => {
-    if (window.clickSelects) choose(event.target);
+    if (window.clickSelects) choose(event.target.closest("[role=option]"));
   });
   box.addEventListener("keydown", (event) => {
     if (event.key !== "Enter") return;
@@ -735,6 +819,154 @@ class ResourceTypeBrowserTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertEqual(enters, 1)
         self.assertTrue(ready)
+
+
+def new_resource_html(options, controls=True, delay_ms=0, outside=""):
+    """A New Resource dialog whose Resource Type options each show a label and a description."""
+    items = "".join(
+        f'<div role="option" id="nr-{i}"><span class="label">{label}</span>'
+        f'<span class="desc" style="display:block">Sample description for {label}.</span></div>'
+        for i, label in enumerate(options)
+    )
+    owns = 'aria-controls="nr-list"' if controls else ""
+    return f"""
+{outside}
+<div role="dialog" aria-label="New Resource">
+  <span id="nr-lbl">Resource Type</span>
+  <button id="nr-box" role="combobox" aria-labelledby="nr-lbl" aria-expanded="false" {owns}>Select...</button>
+  <div id="nr-list" role="listbox" hidden></div>
+  <div id="nr-fields"></div>
+</div>
+<script>
+  window.chosen = [];
+  const box = document.getElementById("nr-box");
+  const list = document.getElementById("nr-list");
+  box.addEventListener("click", () => {{
+    list.hidden = false;
+    box.setAttribute("aria-expanded", "true");
+    setTimeout(() => {{ list.innerHTML = {items!r}; }}, {delay_ms});
+  }});
+  list.addEventListener("click", (event) => {{
+    const option = event.target.closest("[role=option]");
+    if (!option) return;
+    const label = option.querySelector(".label").textContent;
+    window.chosen.push(label);
+    box.textContent = label;
+    box.setAttribute("aria-expanded", "false");
+    list.hidden = true;
+    if (label === "Variable") {{
+      document.getElementById("nr-fields").innerHTML = '<label for="nr-api">API Name</label><input id="nr-api">';
+    }}
+  }});
+</script>
+"""
+
+
+STRAY_VARIABLE = """
+<div role="listbox" aria-label="Sample Other List">
+  <div role="option" id="stray"><span>Variable</span><span style="display:block">Sample.</span></div>
+</div>
+<script>
+  window.strayClicks = 0;
+  document.getElementById("stray").addEventListener("click", () => { window.strayClicks += 1; });
+</script>
+"""
+
+
+@unittest.skipUnless(
+    sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1",
+    "Set RUN_BROWSER_SMOKE=1 to run the real-browser Resource Type checks.",
+)
+class TwoLineOptionBrowserTests(unittest.TestCase):
+    """Real options carry a label line and a description line; only the label Variable is chosen."""
+
+    DECOY_FIRST = ("Variable Collection", "Variable", "Constant", "Formula")
+
+    @classmethod
+    def setUpClass(cls):
+        cls.pw = sync_playwright().start()
+        cls.browser = cls.pw.chromium.launch(
+            headless=True, executable_path=os.environ.get("CHROMIUM_PATH") or None,
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls.pw.stop()
+
+    def choose(self, html, page_wait_s=4):
+        page = self.browser.new_page()
+        self.addCleanup(page.close)
+        self.page = page
+        page.set_content(html)
+        state = guide_walk.WalkState(
+            page=page, timeout_s=6, interval_s=0.2, page_wait_s=page_wait_s, page_poll_s=0.2,
+        )
+        return guide_walk._choose_resource_variable(state)
+
+    def shown(self):
+        return self.page.locator("#nr-box").inner_text().strip()
+
+    def test_variable_is_chosen_past_a_decoy_listed_first(self):
+        result = self.choose(new_resource_html(self.DECOY_FIRST))
+        self.assertIsNone(result)
+        self.assertEqual(self.shown(), "Variable")
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Variable"])
+        self.assertTrue(guide_walk._api_name_ready(self.page))
+
+    def test_only_the_decoy_is_a_mismatch_with_nothing_clicked(self):
+        result = self.choose(new_resource_html(("Variable Collection", "Constant")), page_wait_s=1)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertTrue(result.freeze)
+        self.assertEqual(
+            result.note,
+            UNSET + " Diagnostic: control role combobox; aria-expanded true; "
+            "option Variable present no, visible no; 2 options; labels: other, Constant.",
+        )
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(self.shown(), "Select...")
+
+    def test_two_variable_options_in_the_list_are_a_mismatch_with_nothing_clicked(self):
+        result = self.choose(new_resource_html(("Variable", "Constant", "Variable")), page_wait_s=1)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(self.shown(), "Select...")
+
+    def test_listbox_that_renders_after_a_delay_still_works(self):
+        result = self.choose(new_resource_html(self.DECOY_FIRST, delay_ms=1500))
+        self.assertIsNone(result)
+        self.assertEqual(self.shown(), "Variable")
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Variable"])
+
+    def test_variable_option_outside_the_owned_listbox_is_never_clicked(self):
+        result = self.choose(new_resource_html(self.DECOY_FIRST, outside=STRAY_VARIABLE))
+        self.assertIsNone(result)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Variable"])
+        self.assertEqual(self.page.evaluate("window.strayClicks"), 0)
+
+    def test_without_aria_controls_only_the_dialog_is_searched(self):
+        html = new_resource_html(("Constant", "Formula"), controls=False, outside=STRAY_VARIABLE)
+        result = self.choose(html, page_wait_s=1)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("option Variable present no, visible no; 2 options; labels: Constant, Formula.",
+                      result.note)
+        self.assertEqual(self.page.evaluate("window.strayClicks"), 0)
+
+    def test_without_aria_controls_variable_in_the_dialog_is_chosen(self):
+        html = new_resource_html(self.DECOY_FIRST, controls=False, outside=STRAY_VARIABLE)
+        result = self.choose(html)
+        self.assertIsNone(result)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Variable"])
+        self.assertEqual(self.page.evaluate("window.strayClicks"), 0)
+
+    def test_click_that_does_not_set_the_value_is_a_mismatch(self):
+        html = new_resource_html(self.DECOY_FIRST).replace(
+            "window.chosen.push(label);", "window.chosen.push(label); return;"
+        )
+        result = self.choose(html, page_wait_s=1)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertEqual(self.page.evaluate("window.chosen"), ["Variable"])
+        self.assertEqual(self.shown(), "Select...")
 
 
 if __name__ == "__main__":

@@ -3990,6 +3990,7 @@ def _api_name_ready(page) -> bool:
 _RESOURCE_TYPES = frozenset({
     "Variable", "Constant", "Formula", "Text Template", "Stage", "Choice",
     "Record Choice Set", "Picklist Choice Set", "Collection Choice Set",
+    "Collection Filter Criteria",
 })
 _RESOURCE_PICK_WAIT_S = 10.0
 
@@ -4036,17 +4037,79 @@ def _resource_is_variable(page) -> bool:
     return box is not None and _shown_value(box) == "Variable"
 
 
+def _option_label(option) -> str:
+    """An option's label: its first non-empty line. Flow Builder adds a description line below it."""
+    try:
+        text = str(option.inner_text(timeout=1000) or "")
+    except Exception:
+        return ""
+    for line in text.splitlines():
+        label = _plain(line)
+        if label:
+            return label
+    return ""
+
+
+def _by_id(root, ident: str):
+    quoted = ident.replace("\\", "\\\\").replace('"', '\\"')
+    try:
+        return root.locator(f'[id="{quoted}"]')
+    except Exception:
+        return None
+
+
+def _resource_listbox(root, box):
+    """The listbox the Resource Type control owns (aria-controls), else the New Resource dialog."""
+    if root is None or box is None:
+        return None
+    controls = _read_attr(box, "aria-controls")
+    if controls:
+        loc = _by_id(root, controls)
+        if loc is not None and _count(loc) == 1:
+            return _first(loc)
+    dialog = _by_role(root, "dialog", "New Resource", exact=True)
+    return None if dialog is None else _visible_match(dialog)
+
+
+def _scoped_options(scope) -> list:
+    """(element, label, visible) for each option inside the scope, at most 40."""
+    found = []
+    if scope is None:
+        return found
+    try:
+        options = scope.get_by_role("option")
+        total = _count(options)
+    except Exception:
+        return found
+    for index in range(min(total, 40)):
+        option = options.nth(index)
+        try:
+            shown = bool(option.is_visible())
+        except Exception:
+            shown = False
+        found.append((option, _option_label(option), shown))
+    return found
+
+
+def _variable_options(page) -> list:
+    """Visible options labelled exactly Variable, inside the Resource Type listbox only."""
+    root, _role, box = _resource_type_box(page)
+    return [
+        option for option, label, shown in _scoped_options(_resource_listbox(root, box))
+        if shown and label == "Variable"
+    ]
+
+
 def _highlighted_option(root, box) -> str:
-    """Visible text of the one option the combobox highlights (aria-activedescendant)."""
+    """Label of the one option the combobox highlights (aria-activedescendant)."""
     active = _read_attr(box, "aria-activedescendant")
     if not active:
         return ""
-    quoted = active.replace("\\", "\\\\").replace('"', '\\"')
     try:
-        loc = root.locator(f'[id="{quoted}"]')
-        if _count(loc) != 1:
+        loc = _by_id(root, active)
+        if loc is None or _count(loc) != 1:
             return ""
-        return _plain(_first(loc).inner_text(timeout=1000))
+        return _option_label(_first(loc))
     except Exception:
         return ""
 
@@ -4056,27 +4119,13 @@ def _resource_type_diagnostic(page) -> str:
     root, role, box = _resource_type_box(page)
     expanded = _read_attr(box, "aria-expanded") if box is not None else ""
     expanded = expanded if expanded in ("true", "false") else "none"
-    scope = root if root is not None else page
-    named = _by_role(scope, "option", "Variable", exact=True)
-    has = named is not None and _count(named) > 0
-    shown = has and _visible(named)
-    labels = []
-    total = 0
-    try:
-        options = scope.get_by_role("option")
-        total = _count(options)
-        for index in range(min(total, 6)):
-            try:
-                text = _plain(options.nth(index).inner_text(timeout=1000))
-            except Exception:
-                text = ""
-            labels.append(text if text in _RESOURCE_TYPES else "other")
-    except Exception:
-        pass
+    options = _scoped_options(_resource_listbox(root, box))
+    named = [shown for _option, label, shown in options if label == "Variable"]
+    labels = [label if label in _RESOURCE_TYPES else "other" for _option, label, _shown in options[:6]]
     return (
         f"Diagnostic: control role {role or 'none'}; aria-expanded {expanded}; "
-        f"option Variable present {'yes' if has else 'no'}, visible {'yes' if shown else 'no'}; "
-        f"{total} options; labels: {', '.join(labels) or 'none'}."
+        f"option Variable present {'yes' if named else 'no'}, visible {'yes' if any(named) else 'no'}; "
+        f"{len(options)} options; labels: {', '.join(labels) or 'none'}."
     )
 
 
@@ -4085,11 +4134,27 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     page = state.page
     if _api_name_ready(page):
         return None
-    if not present(page, "option", "Variable"):
-        click_role(page, "combobox", "Resource Type") or click_role(page, "button", "Resource Type")
-    click_role(page, "option", "Variable")
-    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
     note = "Resource Type could not be set to Variable."
+    limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
+    if not _variable_options(page):
+        _root, _role, box = _resource_type_box(page)
+        if box is not None and _read_attr(box, "aria-expanded") != "true":
+            try:
+                box.click(timeout=8000)
+            except Exception:
+                pass
+        missed = require(state, lambda: bool(_variable_options(state.page)), note, limit=limit)
+        if missed is not None and missed.status != "UI_MISMATCH":
+            return missed
+    picked = _variable_options(page)
+    if len(picked) != 1:
+        # No option labelled Variable in the Resource Type list, or more than one: nothing is clicked.
+        return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
+    try:
+        picked[0].click(timeout=8000)
+    except Exception:
+        pass
+    limit = min(limit, _time_left(state))
     missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
     if missed is None or missed.status != "UI_MISMATCH":
         return missed
