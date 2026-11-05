@@ -4567,13 +4567,13 @@ def _matching_options(root, box, value: str, dialog_name: str = "", empty_falls_
     ]
 
 
-# One read of one element, at one moment: is it still in the page, is it the element the box
-# locator resolves to now, the value it shows (a form field's value, else its own text, as
-# input_value then inner_text read it) and its aria-expanded (null when the attribute is missing).
+# One read of one element, at one moment: is it the element the box locator resolves to now (a
+# locator only resolves elements in the page, so a detached box is never the same), the value it
+# shows (a form field's value, else its own text, as input_value then inner_text read it) and its
+# aria-expanded (null when the attribute is missing).
 _BOX_STATE_JS = """(el, now) => {
   const field = el.matches('input, textarea, select');
   return {
-    connected: el.isConnected === true,
     same: el === now,
     value: String((field ? el.value : '') || el.innerText || ''),
     expanded: el.getAttribute('aria-expanded'),
@@ -4594,8 +4594,7 @@ def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
     """The box shows WANT, is not expanded, and its own list shows no option. Fails closed.
 
     The box element is held first. After the options check on the box's own list, one evaluate
-    on that element reads that it is still in the page, that the box locator still resolves to
-    it, its shown value and its aria-expanded. A vanished or replaced box, an unreadable value,
+    on that element reads that the box locator still resolves to it, its shown value and its aria-expanded. A vanished or replaced box, an unreadable value,
     or a missing or unreadable aria-expanded is never closed.
     """
     want = _plain(want)
@@ -4614,7 +4613,7 @@ def _list_closed(root, box, want: str, dialog_name: str = "") -> bool:
         return False
     finally:
         _dispose(held, now)
-    if not isinstance(read, dict) or read.get("connected") is not True or read.get("same") is not True:
+    if not isinstance(read, dict) or read.get("same") is not True:
         return False
     expanded = read.get("expanded")
     if not isinstance(expanded, str) or _plain(expanded) == "true":

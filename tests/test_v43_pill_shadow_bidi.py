@@ -564,9 +564,9 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
 
 
-def race_html(after_html):
+def race_html(after_html, expanded_after_click="true"):
     """The Record Variable lookup. The option click hides the list, but the box keeps recThing and
-    aria-expanded="true" until window.swap() runs; swap() replaces the whole field with AFTER_HTML."""
+    aria-expanded EXPANDED_AFTER_CLICK until window.swap() runs; swap() replaces the field with AFTER_HTML."""
     return f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
@@ -593,6 +593,7 @@ def race_html(after_html):
     if (!picked) return;
     window.chosen.push(picked.id);
     document.getElementById("lb").hidden = true;
+    document.getElementById("rv").setAttribute("aria-expanded", {expanded_after_click!r});
   }});
   document.getElementById("rv").focus();
 </script>
@@ -646,11 +647,13 @@ PILL_FIELD = '<label>Record Variable</label><div class="slds-form-element__contr
 class _SwapAfterValueRead:
     """The Record Variable box as the walk sees it after the option click. Right after the walk reads
     the box's shown value (input_value or inner_text on the box, or an evaluate on a handle taken from
-    it), the page swaps the field (window.swap), once. The re-render lands between reads, no timing."""
+    it), the page swaps the field (window.swap), once. The re-render lands between reads, no timing.
+    With AT_HANDLE, the swap comes earlier: right after a handle is taken from the box, before any read."""
 
-    def __init__(self, target, page):
+    def __init__(self, target, page, at_handle=False):
         self._target = target
         self._page = page
+        self._at_handle = at_handle
 
     def _swap(self):
         if not self._page.evaluate("window.swapped"):
@@ -675,6 +678,8 @@ class _SwapAfterValueRead:
                         self._swap()
                         return value
                     held.evaluate = read
+                    if self._at_handle:
+                        self._swap()
                 return held
             return handle
         return attr
@@ -696,7 +701,7 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def open(self, html, swap_after_read):
+    def open(self, html, swap_after_read, at_handle=False):
         page = self.browser.new_page()
         self.addCleanup(page.close)
         serve(page, html)
@@ -707,15 +712,15 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
             def labeled_box(at, label, roles=("combobox", "searchbox")):
                 root, role, target = real(at, label, roles)
                 if target is not None and label == "Record Variable" and page.evaluate("window.chosen.length > 0"):
-                    target = _SwapAfterValueRead(target, page)
+                    target = _SwapAfterValueRead(target, page, at_handle)
                 return root, role, target
 
             guide_walk._labeled_box = labeled_box
             self.addCleanup(setattr, guide_walk, "_labeled_box", real)
         return page
 
-    def fill(self, html, swap_after_read=False):
-        page = self.open(html, swap_after_read)
+    def fill(self, html, swap_after_read=False, at_handle=False):
+        page = self.open(html, swap_after_read, at_handle)
         state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
         guide_walk._open_guide_dialog(state, "Sample Screen")
         return guide_walk.attempt_step(state, make_step("rv", STEP))
@@ -736,6 +741,18 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
         self.assertEqual(result.note, MISS_NOTE)
         self.assertTrue(result.freeze)
         self.assertEqual(result.evidence_ids, ())
+
+    def test_box_replaced_by_a_new_empty_box_after_it_was_held_is_mismatch_not_pass(self):
+        # Identity: the held box (recThing, closed) is detached and a new, empty box takes its place.
+        # The old element's value is never read as the field's value.
+        fresh = ('<label for="rv2">Record Variable</label><div class="slds-combobox_container">'
+                 '<input id="rv2" role="combobox" aria-expanded="false" value="" autocomplete="off"></div>')
+        result = self.fill(race_html(fresh, expanded_after_click="false"), swap_after_read=True, at_handle=True)
+        self.assertTrue(self.page.evaluate("window.swapped"))
+        self.assertEqual(self.page.evaluate("document.getElementById('rv2').value"), "")
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(result.note, MISS_NOTE)
+        self.assertTrue(result.freeze)
 
     def test_box_whose_expanded_state_cannot_be_read_is_never_closed(self):
         for how in ("missing", "throws"):
