@@ -381,9 +381,15 @@ class OwnedOptionBrowserTests(unittest.TestCase):
         self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
 
-    def test_selected_pill_with_the_value_is_pass_evidence(self):
+    def test_selected_pill_with_the_value_is_review_not_pass(self):
+        # W-110: a pill near the field is never PASS evidence; the walk goes on (not frozen).
         result = self.fill(page_lookup_html(OBJECTS), "Object: Opportunity")
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertFalse(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
+        self.assertEqual(result.note, "Object option Opportunity was clicked and a selected pill labelled "
+                                      "Opportunity appears near the field, but the validator cannot prove "
+                                      "the pill belongs to this field; please confirm.")
         self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
         self.assertEqual(self.page.locator("#pill-slot .slds-pill__label").inner_text(), "Opportunity")
