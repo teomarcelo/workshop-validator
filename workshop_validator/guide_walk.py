@@ -4603,7 +4603,7 @@ _FIELD_HELPERS_JS = r"""
     .some((t) => t.includes("pill") && !t.includes("__") && !t.endsWith("container"));
   const pillsIn = (root) => {
     const found = deep(root).filter(pillish);
-    return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
+    return found.filter((el) => !found.some((other) => other !== el && within(el, other)));
   };
   // Every element under EL, including inside the open shadow roots of EL and its descendants.
   const deep = (el) => {
@@ -4627,8 +4627,8 @@ _FIELD_HELPERS_JS = r"""
 # with role combobox / searchbox / textbox / spinbutton or aria-haspopup that is not the box or
 # around it, or a field custom element (-combobox, -combobox-*, -lookup, -input, -picklist,
 # -textarea, -field, -select, -datepicker, -radio-group, -checkbox-group) that does not hold the
-# box; or a label / legend / .slds-form-element__label that is not this box's, all also
-# searched inside open shadow roots; or a pill already shown (light DOM). A control named by aria-labelledby is itself
+# box; or a label / legend / .slds-form-element__label that is not this box's; or a pill
+# already shown, all also searched inside open shadow roots. A control named by aria-labelledby is itself
 # an input or field role, so it already stops the walk. These are the field's own elements,
 # recorded by identity before the click; a pill shown in one of them later was not there before.
 _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
@@ -4657,7 +4657,8 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
   return out;
 }
 """
-# Selected pills inside one field container, outermost only (a pill's own parts are not pills).
+# Selected pills inside one field container, outermost only (across shadow roots), so a pill's
+# own parts and any pill nested inside another pill are not counted.
 _PILLS_JS = "(root) => {" + _FIELD_HELPERS_JS + "  return pillsIn(root);\n}"
 # Every pill-like element in the box's document before the click, open shadow roots included.
 # A pill already on the page was not shown by this pick, even when the page moves it later.

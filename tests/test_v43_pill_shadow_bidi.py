@@ -259,6 +259,171 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
     def test_two_pills_inside_shadow_root_are_not_pass(self):
         result = self.fill(shadow_html(pill_markup=pill() + pill()))
         self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertIn("Record Variable did not show recThing", result.note)
+
+    def test_lightning_pill_host_with_nested_slds_pill_gives_review_not_mismatch(self):
+        # M1: A lightning-pill host with .slds-pill in its open shadow root must count as 1 pill (NEEDS_REVIEW),
+        # not 2 (UI_MISMATCH). The outermost-only filter must cross shadow boundaries.
+        nested_html = f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <sample-field id="host-rv">
+      <label for="rv">Record Variable</label>
+      <div class="slds-combobox_container">
+        <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing" autocomplete="off">
+      </div>
+      <div id="lb" role="listbox">
+        <div role="option" id="opt1"><strong>recThing</strong></div>
+      </div>
+    </sample-field>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const host = document.getElementById("host-rv");
+  const list = document.getElementById("lb");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    setTimeout(() => {{
+      const lightningPill = document.createElement("lightning-pill");
+      lightningPill.attachShadow({{mode: "open"}});
+      lightningPill.shadowRoot.innerHTML = {pill()!r};
+      host.innerHTML = '<label>Record Variable</label><div class="slds-form-element__control"></div>';
+      host.querySelector(".slds-form-element__control").appendChild(lightningPill);
+    }}, 50);
+  }});
+  document.getElementById("rv").focus();
+</script>
+"""
+        result = self.fill(nested_html)
+        self.assert_review(result)
+
+    def test_pill_already_shown_before_click_is_not_evidence(self):
+        # M3: A pill already in a shadow root before the click must not count as evidence of this pick.
+        # Without the identity check, the pre-existing pill would incorrectly give NEEDS_REVIEW.
+        preexisting_html = f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <sample-field id="host-rv">
+      <div class="slds-form-element">
+        <label class="slds-form-element__label" for="rv">Record Variable</label>
+        <div class="slds-form-element__control">
+          <div class="slds-combobox_container">
+            <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing" autocomplete="off">
+          </div>
+          <div id="lb" role="listbox">
+            <div role="option" id="opt1"><strong>recThing</strong></div>
+          </div>
+          <div id="shadow-wrap"></div>
+        </div>
+      </div>
+    </sample-field>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const host = document.getElementById("host-rv");
+  const wrap = document.getElementById("shadow-wrap");
+  wrap.attachShadow({{mode: "open"}});
+  wrap.shadowRoot.innerHTML = {pill()!r};
+  const list = document.getElementById("lb");
+  const input = document.getElementById("rv");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    // Click collapses the list but the pre-existing pill stays (no new pill added).
+    input.setAttribute("aria-expanded", "false");
+    input.value = "";
+    list.hidden = true;
+  }});
+  input.focus();
+</script>
+"""
+        result = self.fill(preexisting_html)
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertNotEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertIn("Record Variable did not show recThing", result.note)
+
+    def test_all_bidi_marks_trimmed_at_ends(self):
+        # M5, M6: All bidi control marks (U+200E, U+200F, U+2066-U+2069) must be trimmed at start and end.
+        marks = [("‎", "U+200E"), ("‏", "U+200F"), ("⁦", "U+2066"),
+                 ("⁧", "U+2067"), ("⁨", "U+2068"), ("⁩", "U+2069")]
+        for mark, name in marks:
+            with self.subTest(mark=name):
+                label = f"{mark}recThing{mark}"
+                result = self.fill(bidi_html(label_text=label, title_text=label))
+                self.assert_review(result)
+
+    def test_bidi_mark_in_middle_does_not_match(self):
+        # M9: Bidi marks are trimmed only at the start and end; a mark in the middle must not match.
+        label = "rec‎Thing"
+        result = self.fill(bidi_html(label_text=label, title_text=label))
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertIn("Record Variable did not show recThing", result.note)
+
+    def test_pill_in_ancestor_stops_container_walk(self):
+        # M14: A pill inside a shadow root in an ancestor must stop the container walk (fail-closed).
+        # An outer wrapper has a pre-existing pill. After the click, a NEW pill appears in an inner
+        # wrapper (closer to the input). With the pill stop: walk stops at outer wrapper (has pre-pill),
+        # so containers doesn't include it or the inner wrapper -> UI_MISMATCH. Without the stop: walk
+        # continues past outer wrapper, includes inner wrapper, finds the new pill -> NEEDS_REVIEW (wrong).
+        ancestor_pill_html = f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <div id="outer-wrapper">
+      <label for="rv">Record Variable</label>
+      <div id="inner-wrapper">
+        <div class="slds-combobox_container">
+          <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="recThing" autocomplete="off">
+        </div>
+        <div id="lb" role="listbox">
+          <div role="option" id="opt1"><strong>recThing</strong></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const outer = document.getElementById("outer-wrapper");
+  const inner = document.getElementById("inner-wrapper");
+  const prePillWrap = document.createElement("div");
+  prePillWrap.id = "pre-pill-wrap";
+  prePillWrap.attachShadow({{mode: "open"}});
+  prePillWrap.shadowRoot.innerHTML = {pill("otherField")!r};
+  outer.appendChild(prePillWrap);
+  const list = document.getElementById("lb");
+  const input = document.getElementById("rv");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    input.setAttribute("aria-expanded", "false");
+    input.value = "";
+    list.hidden = true;
+    setTimeout(() => {{
+      const newPillWrap = document.createElement("div");
+      newPillWrap.id = "new-pill-wrap";
+      newPillWrap.attachShadow({{mode: "open"}});
+      newPillWrap.shadowRoot.innerHTML = {pill()!r};
+      inner.appendChild(newPillWrap);
+    }}, 50);
+  }});
+  input.focus();
+</script>
+"""
+        result = self.fill(ancestor_pill_html)
+        # With the pill stop: walk stops at outer wrapper, doesn't include inner, so new pill not found.
+        # Without the pill stop: walk includes inner wrapper, finds new pill -> incorrect NEEDS_REVIEW.
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertIn("Record Variable did not show recThing", result.note)
 
     def test_pill_inside_closed_shadow_root_is_not_readable(self):
         # A closed shadow root is not readable, so the pill is not found: UI_MISMATCH.
