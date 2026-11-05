@@ -4581,21 +4581,13 @@ def _variable_options(page) -> list:
 
 
 _LOOKUP_ROLES = ("combobox", "searchbox")
-# The lookup's field containers, nearest first: each ancestor of the box that holds the box's own
-# label and is a form element, a combobox container's parent, or a combobox / lookup custom
-# element host. The walk stops before a dialog, section, tab panel or modal body (never the
-# dialog), and before any ancestor that holds another input (never another field).
-_FIELD_CONTAINERS_JS = r"""
-(box) => {
+# Shared page helpers for the field container and pill scripts below.
+# Known limits: querySelectorAll does not enter shadow roots, so inputs, labels and pills inside
+# a nested shadow root are not seen; and a lookup named only by aria-label has no label element,
+# so it gets no field container and a pill never proves its pick (fails closed).
+_FIELD_HELPERS_JS = r"""
   const up = (el) => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null);
   const within = (node, root) => { for (let n = node; n; n = up(n)) if (n === root) return true; return false; };
-  const home = box.getRootNode();
-  const labels = [...(box.labels || [])];
-  for (const id of String(box.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean)) {
-    const el = home.getElementById ? home.getElementById(id) : document.getElementById(id);
-    if (el) labels.push(el);
-  }
-  if (!labels.length) return [];
   const edge = (el) => el === document.body || el === document.documentElement || el.tagName === "SECTION"
     || ["dialog", "alertdialog", "tabpanel"].includes(el.getAttribute("role") || "")
     || el.getAttribute("aria-modal") === "true" || el.classList.contains("slds-modal__content");
@@ -4605,26 +4597,76 @@ _FIELD_CONTAINERS_JS = r"""
       || [...el.children].some((kid) => kid.classList.contains("slds-combobox_container"))
       || (tag.includes("-") && (tag.endsWith("combobox") || tag.endsWith("lookup")));
   };
+  const named = '.slds-pill, lightning-pill, .slds-listbox_selection > *, '
+    + '.slds-listbox_selection [role="option"][aria-selected="true"], '
+    + '.slds-listbox_horizontal [role="option"][aria-selected="true"]';
+  const pillish = (el) => el.matches(named) || String(el.getAttribute("class") || "").split(/\s+/)
+    .some((t) => t.includes("pill") && !t.includes("__") && !t.endsWith("container"));
+  const pillsIn = (root) => {
+    const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
+    return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
+  };
+"""
+# The lookup's field containers, nearest first: each ancestor of the box that holds the box's own
+# label and is a form element, a combobox container's parent, or a combobox / lookup custom
+# element host. The walk stops before a dialog, section, tab panel or modal body (never the
+# dialog), and before any ancestor that holds another input, another field's label (a label or
+# legend that is not this box's, or an element another input or combobox is labelled by), or a pill that
+# is already shown before the click. So a pill found in one of them later was not there before.
+_FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
+  const home = box.getRootNode();
+  const byId = (id) => (home.getElementById ? home.getElementById(id) : document.getElementById(id));
+  const ids = (el) => String(el.getAttribute("aria-labelledby") || "").split(/\s+/).filter(Boolean);
+  const labels = [...(box.labels || [])];
+  for (const id of ids(box)) {
+    const el = byId(id);
+    if (el) labels.push(el);
+  }
+  if (!labels.length) return [];
   const others = (el) => [...el.querySelectorAll("input:not([type=hidden]), textarea, select")]
     .some((kid) => kid !== box);
+  // Only a control's labelledby counts: a list group's heading inside the lookup is not a field label.
+  const controls = 'input[aria-labelledby], textarea[aria-labelledby], select[aria-labelledby], '
+    + '[role="combobox"][aria-labelledby], [role="searchbox"][aria-labelledby], [role="textbox"][aria-labelledby]';
+  const foreign = (el) => [...el.querySelectorAll("label, legend")].some((mark) => !labels.includes(mark))
+    || [...el.querySelectorAll(controls)].some((kid) => kid !== box && ids(kid)
+      .map(byId).some((mark) => mark && within(mark, el) && !labels.includes(mark)));
   const out = [];
   for (let el = up(box); el && !edge(el); el = up(el)) {
-    if (others(el)) break;
+    if (others(el) || foreign(el) || pillsIn(el).length) break;
     if (kind(el) && labels.some((label) => within(label, el))) out.push(el);
   }
   return out;
 }
 """
 # Selected pills inside one field container, outermost only (a pill's own parts are not pills).
-_PILLS_JS = r"""
-(root) => {
-  const named = '.slds-pill, lightning-pill, .slds-listbox_selection > *, '
-    + '.slds-listbox_selection [role="option"][aria-selected="true"], '
-    + '.slds-listbox_horizontal [role="option"][aria-selected="true"]';
-  const pillish = (el) => el.matches(named) || String(el.getAttribute("class") || "").split(/\s+/)
-    .some((t) => t.includes("pill") && !t.includes("__") && !t.endsWith("container"));
-  const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
-  return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
+_PILLS_JS = "(root) => {" + _FIELD_HELPERS_JS + "  return pillsIn(root);\n}"
+# The pill's own field: the nearest form element / combobox host above it that holds a label or
+# legend. True only when it holds exactly one, and its text is exactly NAME (the box's label).
+_PILL_FIELD_JS = "(pill, name) => {" + _FIELD_HELPERS_JS + r"""
+  for (let el = up(pill); el && !edge(el); el = up(el)) {
+    if (!kind(el)) continue;
+    const marks = [...el.querySelectorAll("label, legend")];
+    if (!marks.length) continue;
+    return marks.length === 1 && String(marks[0].innerText || "").replace(/\s+/g, " ").trim() === name;
+  }
+  return false;
+}
+"""
+# Titles on a pill and its parts that must agree with its visible label. Icon parts and the remove
+# button carry their own titles ("Record", "Remove"), so they are skipped.
+_PILL_TITLES_JS = r"""
+(pill) => {
+  const skip = 'button, .slds-pill__remove, .slds-pill__icon_container, lightning-icon, '
+    + 'lightning-primitive-icon, [class*="icon"], svg';
+  const out = [];
+  for (const el of [pill, ...pill.querySelectorAll("[title]")]) {
+    if (!el.hasAttribute("title")) continue;
+    let part = false;
+    for (let n = el; n && n !== pill; n = n.parentElement) if (n.matches(skip)) part = true;
+    if (!part) out.push(String(el.getAttribute("title")));
+  }
+  return out;
 }
 """
 
@@ -4668,9 +4710,7 @@ def _pill_label(pill) -> str:
     if len(lines) != 1:
         return ""
     try:
-        titled = pill.query_selector_all("[title]:not(button):not(.slds-pill__remove)")
-        titles = [_plain(item.get_attribute("title")) for item in [pill, label, *titled]
-                  if item.get_attribute("title") is not None]
+        titles = [_plain(title) for title in pill.evaluate(_PILL_TITLES_JS)]
     except Exception:
         return ""
     if any(title != lines[0] for title in titles):
@@ -4678,8 +4718,17 @@ def _pill_label(pill) -> str:
     return lines[0]
 
 
-def _pill_shows(containers, want: str) -> bool:
-    """Exactly one visible selected pill in this field's container, and its label is exactly WANT."""
+def _pill_in_own_field(pill, name: str) -> bool:
+    """The pill's own nearest labelled field is labelled exactly NAME (one label, read from the page)."""
+    try:
+        return bool(name) and pill.evaluate(_PILL_FIELD_JS, name) is True
+    except Exception:
+        return False
+
+
+def _pill_shows(containers, want: str, name: str = "") -> bool:
+    """Exactly one visible selected pill in this field's container, its label exactly WANT, and its
+    own nearest labelled field labelled exactly NAME (the lookup's label)."""
     container = _live_container(containers)
     if container is None or not want:
         return False
@@ -4690,7 +4739,7 @@ def _pill_shows(containers, want: str) -> bool:
                 shown.append(pill)
         except Exception:
             return False
-    return len(shown) == 1 and _pill_label(shown[0]) == want
+    return len(shown) == 1 and _pill_label(shown[0]) == want and _pill_in_own_field(shown[0], name)
 
 
 def _named_lists(box) -> list:
@@ -4830,7 +4879,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
         if now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box):
             return True
-        if not _pill_shows(container, want):
+        if not _pill_shows(container, want, _plain(label)):
             return False
         if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
             return False

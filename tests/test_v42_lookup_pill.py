@@ -36,14 +36,15 @@ CSS = """
 """
 
 
-def pill(label="varWidgetRec", title=None, label_html=None):
+def pill(label="varWidgetRec", title=None, label_html=None, icon_title=None):
     """SLDS-style pill markup: record icon with screen-reader text, the label link, a remove button.
 
-    TITLE is the link's title (default the label; False leaves it out)."""
+    TITLE is the link's title (default the label; False leaves it out). ICON_TITLE titles the icon."""
     title = label if title is None else title
     label_html = label if label_html is None else label_html
     titled = "" if title is False else f' title="{title}"'
-    return ('<span class="slds-pill slds-pill_link"><span class="slds-pill__icon_container">'
+    icon = "" if icon_title is None else f' title="{icon_title}"'
+    return (f'<span class="slds-pill slds-pill_link"><span class="slds-pill__icon_container"{icon}>'
             '<span class="slds-assistive-text">Record</span><svg aria-hidden="true" width="12" height="12">'
             f'</svg></span><a class="slds-pill__action"{titled}><span class="slds-pill__label">'
             f'{label_html}</span></a><button class="slds-button slds-pill__remove" title="Remove">'
@@ -51,20 +52,23 @@ def pill(label="varWidgetRec", title=None, label_html=None):
             '</span></button></span>')
 
 
-def screen_html(shown=None, home="rv", form_element=True, compound=False):
+def screen_html(shown=None, home="rv", form_element=True, compound=False, sibling=True,
+                other_label="Sample Other Field", other_input=True, other_pill="", other_extra=""):
     """The guide's own Sample Screen dialog, Fields section, with a Record Variable lookup host.
 
     Clicking the option re-renders the Record Variable host with SHOWN (pill markup, default one
-    pill labelled varWidgetRec) in place of the input; with HOME "ot" SHOWN goes into the other
-    field's host instead. FORM_ELEMENT wraps each field in an .slds-form-element inside its host.
-    COMPOUND puts both fields in one .slds-form-element_compound wrapper, and the pick then
-    replaces the whole Record Variable host.
+    pill labelled varWidgetRec) in place of the input. With HOME "ot" SHOWN goes into the other
+    field's host instead (HOME "none": nowhere); with HOME "new" a new field labelled Sample Other Field holding SHOWN
+    is added next to it. FORM_ELEMENT wraps each field in an .slds-form-element inside its host.
+    COMPOUND puts the fields in one .slds-form-element_compound wrapper, and the pick then
+    replaces the whole Record Variable host. SIBLING adds the other field: with OTHER_LABEL (None
+    for no label), OTHER_INPUT, OTHER_PILL already shown before the pick, and OTHER_EXTRA markup.
     """
     shown = pill() if shown is None else shown
 
     def field(key, name, inner):
-        body = (f'<label class="slds-form-element__label" for="{key}">{name}</label>'
-                f'<div class="slds-form-element__control">{inner}</div>')
+        body = ((f'<label class="slds-form-element__label" for="{key}">{name}</label>' if name else "")
+                + f'<div class="slds-form-element__control">{inner}</div>')
         if form_element:
             body = f'<div class="slds-form-element">{body}</div>'
         return f'<sample-grouped-combobox id="host-{key}">{body}</sample-grouped-combobox>'
@@ -81,8 +85,8 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False):
             <svg aria-hidden="true" width="12" height="12"></svg><strong>varWidgetRec</strong></li>
         </ul>
       </div>""")
-    other = field("ot", "Sample Other Field",
-                  '<div class="slds-combobox_container"><input id="ot" autocomplete="off"></div>')
+    other_box = '<div class="slds-combobox_container"><input id="ot" autocomplete="off"></div>'
+    other = field("ot", other_label, (other_box if other_input else "") + other_pill + other_extra) if sibling else ""
     opening = '<div class="slds-form-element_compound">' if compound else ""
     closing = "</div>" if compound else ""
     return f"""{CSS}
@@ -101,20 +105,26 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False):
     if (!picked) return;
     window.chosen.push(picked.id);
     const host = document.getElementById("host-rv");
-    const target = document.getElementById("host-{home}");
+    const parent = host.parentElement;
+    const home = {home!r};
     const formed = {str(bool(form_element)).lower()};
     const wrap = (name, inner) => {{
       const body = '<label class="slds-form-element__label">' + name + '</label>' +
         '<div class="slds-form-element__control">' + inner + '</div>';
       return formed ? '<div class="slds-form-element">' + body + '</div>' : body;
     }};
-    if (target === host) {{
+    if (home === "rv") {{
       host.innerHTML = wrap("Record Variable", {shown!r});
-    }} else {{
-      if ({str(bool(compound)).lower()}) host.outerHTML = '<sample-grouped-combobox id="host-rv">' +
-        wrap("Record Variable", "") + "</sample-grouped-combobox>";
-      else host.innerHTML = wrap("Record Variable", "");
-      target.querySelector(".slds-form-element__control").insertAdjacentHTML("beforeend", {shown!r});
+      return;
+    }}
+    if ({str(bool(compound)).lower()}) host.outerHTML = '<sample-grouped-combobox id="host-rv">' +
+      wrap("Record Variable", "") + "</sample-grouped-combobox>";
+    else host.innerHTML = wrap("Record Variable", "");
+    if (home === "new") {{
+      parent.insertAdjacentHTML("beforeend", '<sample-grouped-combobox id="host-new">' +
+        wrap("Sample Other Field", {shown!r}) + "</sample-grouped-combobox>");
+    }} else if (home === "ot") {{
+      document.querySelector("#host-ot .slds-form-element__control").insertAdjacentHTML("beforeend", {shown!r});
     }}
   }});
   document.getElementById("rv").focus();
@@ -210,9 +220,52 @@ class LookupPillBrowserTests(unittest.TestCase):
 
     def test_pill_in_another_field_of_a_shared_wrapper_is_not_pass(self):
         # The Record Variable host is replaced; the wrapper that holds both fields is never its container.
-        result = self.fill(screen_html(home="ot", compound=True))
+        cases = (("Sample Other Field", True), ("Sample Other Field", False), (None, True))
+        for other_label, other_input in cases:
+            with self.subTest(other_label=other_label, other_input=other_input):
+                result = self.fill(screen_html(home="ot", compound=True, other_label=other_label,
+                                               other_input=other_input))
+                self.assert_not_pass(result)
+                self.assertEqual(self.page.locator("#host-ot .slds-pill__label").inner_text(), "varWidgetRec")
+                self.assertEqual(self.page.locator("#rv").count(), 0)
+
+    def test_pill_another_field_already_showed_in_a_shared_wrapper_is_not_pass(self):
+        # The other lookup already shows the value as a pill, with no input; the pick shows nothing here.
+        result = self.fill(screen_html(home="none", compound=True, other_input=False, other_pill=pill()))
         self.assert_not_pass(result)
         self.assertEqual(self.page.locator("#host-ot .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_unlabelled_pill_already_in_a_shared_wrapper_is_not_pass(self):
+        # A pill shown before the pick is never this pick's evidence, even with no other label nearby.
+        result = self.fill(screen_html(home="none", compound=True, other_label=None, other_input=False,
+                                       other_pill=pill()))
+        self.assert_not_pass(result)
+
+    def test_pill_in_a_same_labelled_other_field_of_a_shared_wrapper_is_not_pass(self):
+        # Another field with the same label text: the wrapper that holds its label is never this field.
+        result = self.fill(screen_html(home="ot", compound=True, other_label="Record Variable",
+                                       other_input=False))
+        self.assert_not_pass(result)
+
+    def test_pill_in_a_wrapper_with_a_control_labelled_by_another_element_is_not_pass(self):
+        # The other field has no label element: its combobox is labelled by a span (aria-labelledby).
+        named = ('<span id="ot-name">Sample Other Field</span>'
+                 '<div role="combobox" aria-labelledby="ot-name" aria-expanded="false"></div>')
+        result = self.fill(screen_html(home="ot", compound=True, other_label=None, other_input=False,
+                                       other_extra=named))
+        self.assert_not_pass(result)
+        self.assertEqual(self.page.locator("#host-ot .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_pill_in_a_field_rendered_after_the_pick_is_not_pass(self):
+        # A new field appears in the wrapper with the pill; that pill's own field is not Record Variable.
+        result = self.fill(screen_html(home="new", compound=True, sibling=False))
+        self.assert_not_pass(result)
+        self.assertEqual(self.page.locator("#host-new .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_icon_title_is_not_compared_with_the_label(self):
+        result = self.fill(screen_html(shown=pill(icon_title="Record")))
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.evidence_ids, ("rv:pill",))
 
     def test_title_alone_never_stands_in_for_the_visible_label(self):
         result = self.fill(screen_html(shown=pill("varOtherRec", title="varWidgetRec")))
