@@ -60,6 +60,32 @@ class OutcomeTests(unittest.TestCase):
         loading = _run("PASS", "NOT_RUN", notes={1: "The page was still loading."})
         self.assertEqual(outcome_of(loading)[0], INCONCLUSIVE)
 
+    def test_a_later_real_failure_wins_over_an_earlier_review_step(self):
+        # W-110: a lookup pick flagged NEEDS_REVIEW (not frozen) lets the walk go on; a later
+        # step that fails is the run's result, with its own note, and the gate agrees.
+        result = _run("PASS", "NEEDS_REVIEW", "PASS", "UI_MISMATCH", "NOT_RUN",
+                      notes={1: "Sample pill review.", 3: "Sample real failure."})
+        self.assertEqual(outcome_of(result), (FAILED, "Sample real failure."))
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        functional = _run("PASS", "NEEDS_REVIEW", "FUNCTIONAL_FAIL", "NOT_RUN",
+                          notes={1: "Sample pill review.", 2: "Sample broken result."})
+        self.assertEqual(outcome_of(functional), (FAILED, "Sample broken result."))
+        self.assertEqual(gate_outcome_of(functional), FAILED)
+
+    def test_a_review_step_alone_is_inconclusive(self):
+        result = _run("PASS", "NEEDS_REVIEW", "PASS", notes={1: "Sample pill review."})
+        self.assertEqual(outcome_of(result), (INCONCLUSIVE, "Sample pill review."))
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+
+    def test_an_out_of_time_stop_after_a_review_step_is_inconclusive(self):
+        from workshop_validator.guide_walk import OUT_OF_TIME_NOTE
+
+        stop = f"{OUT_OF_TIME_NOTE} Sample miss."
+        result = _run("PASS", "NEEDS_REVIEW", "PASS", "NOT_RUN", "NOT_RUN",
+                      notes={1: "Sample pill review.", 3: stop})
+        self.assertEqual(outcome_of(result)[0], INCONCLUSIVE)
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+
 
 class PrivateFileTests(unittest.TestCase):
     def test_orgs_may_share_one_password(self):

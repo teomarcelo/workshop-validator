@@ -4585,10 +4585,11 @@ _LOOKUP_ROLES = ("combobox", "searchbox")
 # Shadow roots: deep() walks an element and every OPEN shadow root under it. The other-field
 # checks (inputs, field roles, field custom elements, labels / legends / form-element labels),
 # the one-field label check after the click and the page-wide pill set recorded before the click
-# all use it. The pills read as this pick's evidence are found in light DOM only, so a pill inside
-# a shadow root is not seen (fails closed). A CLOSED shadow root is invisible to every check: a
-# field hidden in one is not seen. A lookup named only by aria-label has no label element, so it
-# gets no field container and a pill never proves its pick (fails closed).
+# all use it. A pill never proves a pick (W-110); it only flags the step for review. The pills
+# read for that flag are found in light DOM only, so a pill inside a shadow root is not seen
+# (fails closed). A CLOSED shadow root is invisible to every check: a field hidden in one is not
+# seen. A lookup named only by aria-label has no label element, so it gets no field container and
+# a pill never flags its pick for review (fails closed to UI_MISMATCH).
 _FIELD_HELPERS_JS = r"""
   const up = (el) => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null);
   const within = (node, root) => { for (let n = node; n; n = up(n)) if (n === root) return true; return false; };
@@ -4749,7 +4750,7 @@ def _was_shown_before(pill, before) -> bool:
 
 
 def _live_container(containers):
-    """The innermost recorded field element still on the page, or None (no pill evidence).
+    """The innermost recorded field element still on the page, or None (no pill review flag).
 
     The pill must sit inside the nearest surviving ancestor of the box (never the box itself,
     which is not recorded). A combobox wrapper around the box is the control, not the field,

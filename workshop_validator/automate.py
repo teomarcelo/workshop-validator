@@ -189,9 +189,12 @@ def outcome_of(result) -> tuple[str, str]:
     steps = result.report_steps
     if not steps or not any(step.status == "PASS" for step in steps):
         return INCONCLUSIVE, result.message or "No guide step passed."
+    # A real failure anywhere wins over an earlier inconclusive step (W-110: a later step can
+    # catch a lookup pick that was only flagged for review).
     for step in steps:
         if step.status in _REAL_FAIL:
             return FAILED, step.note or step.title
+    for step in steps:
         if step.status in _INCONCLUSIVE:
             return INCONCLUSIVE, step.note or step.title
         if _timed_out(step):
