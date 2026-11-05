@@ -1051,17 +1051,94 @@ class WalkTests(unittest.TestCase):
             "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
             "Click Save at the bottom, then read the popup and click OK.",
         )
-        calls = {"n": 0}
+        # The page reads as loading exactly once, right after Save is located for the click.
+        armed = {"on": False}
+        real_locator = guide_walk._locator_for_name
+
+        def locator(pg, name):
+            found = real_locator(pg, name)
+            armed["on"] = found is not None and name == "Save"
+            return found
 
         def loading_once(_page):
-            calls["n"] += 1
-            return calls["n"] == 1
+            on, armed["on"] = armed["on"], False
+            return on
 
-        with patch.object(guide_walk, "page_is_loading", loading_once):
+        with patch.object(guide_walk, "page_is_loading", loading_once), \
+                patch.object(guide_walk, "_locator_for_name", locator):
             clock, outcome = self.attempt(page, (item,))
         self.assertIn(("click", "button", "Save"), page.events)
         self.assertNotEqual(outcome.statuses["save"], "PASS")
         self.assertEqual(outcome.guide_notes, {})
+
+    def test_click_path_that_did_not_read_the_before_state_is_not_pass(self):
+        """An unread before-state (None) never counts as new saved text."""
+        page = Page("https://example.lightning.force.com/lightning/setup/personalInformation")
+        page.roles.add(("button", "Save"))
+
+        def unread_click(state, item, name):
+            state.page.body = "Your settings have been successfully saved."
+            return guide_walk.passed(item, "clicked", f"Clicked {name}.")
+
+        item = step(
+            "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
+            "Click Save at the bottom, then read the popup and click OK.",
+        )
+        with patch.object(guide_walk, "_act_click", unread_click):
+            clock, outcome = self.attempt(page, (item,))
+        self.assertNotEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.guide_notes, {})
+
+    def test_old_banner_rendered_with_save_during_the_wait_is_not_pass(self):
+        """Empty setup frame first; the old banner and Save appear together while the walk waits."""
+        page = Page(
+            "https://example.lightning.force.com/lightning/setup/personalInformation/home",
+            body="Skip to Navigation",
+        )
+        frame = Page("https://example.lightning.force.com/setup/personalInformation")
+        page.frames = [frame]
+        clock = Clock()
+
+        def late_render(seconds):
+            clock.now += seconds
+            frame.body = "Personal Information\nYour settings have been successfully saved."
+            page.roles.add(("button", "Save"))
+
+        def reveal(kind, name):
+            if name == "Save":
+                page.url = "https://example.lightning.force.com/lightning/setup/personalInformation/save"
+
+        page.on_click = reveal
+        item = step(
+            "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
+            "Click Save at the bottom, then read the popup and click OK.",
+        )
+        outcome = walk_guide(
+            page, inventory_of(item), checks=(), timeout_s=10, interval_s=1,
+            clock=clock, sleeper=late_render, page_wait_s=10, page_poll_s=1,
+        )
+        self.assertIn(("click", "button", "Save"), page.events)
+        self.assertNotEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.guide_notes, {})
+
+    def test_inline_saved_note_quotes_the_successfully_saved_line(self):
+        page = Page("https://example.lightning.force.com/lightning/setup/personalInformation")
+        page.roles.add(("button", "Save"))
+
+        def reveal(kind, name):
+            if name == "Save":
+                page.body = "You have unsaved changes on another tab.\nYour settings have been successfully saved."
+
+        page.on_click = reveal
+        item = step(
+            "save", "Exercise 1: Get Started", "Task 1: Update your user.", "3",
+            "Click Save at the bottom, then read the popup and click OK.",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        self.assertEqual(outcome.statuses["save"], "PASS")
+        self.assertIn("Your settings have been successfully saved", outcome.notes["save"])
+        self.assertNotIn("unsaved", outcome.notes["save"])
+        self.assertTrue(all("unsaved" not in item.lower() for item in outcome.evidence["save"]))
 
     def test_ok_absent_without_banner_has_no_guide_note(self):
         page = Page("https://example.lightning.force.com/lightning/setup/personalInformation")

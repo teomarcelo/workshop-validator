@@ -20,6 +20,11 @@ import fitz
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
 from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.private_runner import _inventory_report, run_uploaded_guide
+from types import SimpleNamespace
+
+from workshop_validator import theme
+from workshop_validator.automate import _summary
+from workshop_validator.report import ReportStep
 from workshop_validator.step_board import (
     StepOutcome,
     build_board,
@@ -125,6 +130,26 @@ class ReportPassThroughTests(unittest.TestCase):
         self.assertTrue(notes["S2"])
 
 
+class SummaryCountTests(unittest.TestCase):
+    def result(self, *steps):
+        return SimpleNamespace(signed_in=True, message="", report_steps=steps)
+
+    def test_summary_counts_passes_with_a_guide_note(self):
+        result = self.result(
+            ReportStep("S1", 1, "Click Save.", "PASS", ("S1:read",), guide_note=NOTE),
+            ReportStep("S2", 1, "Click Next.", "PASS", ("S2:read",)),
+            ReportStep("S3", 1, "Click Done.", "UI_MISMATCH", (), "missed", guide_note=NOTE),
+        )
+        summary = _summary(result, 0, 1, "failed", "x", Path("run"))
+        self.assertEqual(summary["passes_with_guide_note"], 1)
+        self.assertEqual(summary["counts"]["PASS"], 2)
+
+    def test_summary_count_is_zero_without_notes(self):
+        result = self.result(ReportStep("S1", 1, "Click Next.", "PASS", ("S1:read",)))
+        summary = _summary(result, 0, 1, "success", "", Path("run"))
+        self.assertEqual(summary["passes_with_guide_note"], 0)
+
+
 class BoardRenderTests(unittest.TestCase):
     def board(self):
         inventory = GuideInventory(1, (
@@ -169,7 +194,9 @@ class BoardRenderTests(unittest.TestCase):
 
     def test_run_report_shows_note_and_separate_count(self):
         html = render_run_report(self.board(), summary={})
-        self.assertIn(f"<div class='step-reason guide-note'>{SHOWN}</div>", html)
+        # Its own informational box, never the failure-reason style.
+        self.assertIn(f"<div class='guide-note'>{SHOWN}</div>", html)
+        self.assertNotIn("step-reason guide-note", html)
         self.assertEqual(html.count(SHOWN), 1)
         self.assertIn("<span class='stat-value'>1</span><span class='stat-label'>pass with a guide note</span>", html)
         self.assertIn(".guide-note {", html)
@@ -211,6 +238,62 @@ class BoardRenderTests(unittest.TestCase):
             loaded = load_board(path)
         self.assertEqual(loaded.guide_noted, 0)
         self.assertEqual(self.views(loaded)["S1"].guide_note, "")
+
+
+def _luminance(hex_color: str) -> float:
+    value = hex_color.lstrip("#")
+    channels = [int(value[i:i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def contrast(a: str, b: str) -> float:
+    """WCAG 2 contrast ratio."""
+    high, low = sorted((_luminance(a), _luminance(b)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+class GuideNoteTokenTests(unittest.TestCase):
+    THEMES = (("light", theme.COLORS_LIGHT), ("dark", theme.COLORS_DARK))
+
+    def test_contrast_helper_matches_known_values(self):
+        self.assertAlmostEqual(contrast("#000000", "#ffffff"), 21.0, places=2)
+        self.assertAlmostEqual(contrast("#ffffff", "#ffffff"), 1.0, places=2)
+
+    def test_guide_note_text_on_its_background_is_at_least_4_5_in_both_themes(self):
+        for name, colors in self.THEMES:
+            with self.subTest(theme=name):
+                ratio = contrast(colors["guide_note"], colors["guide_note_bg"])
+                self.assertGreaterEqual(ratio, 4.5, f"{name}: {ratio:.2f}:1")
+
+    def test_guide_note_tile_text_on_the_surface_is_at_least_4_5_in_both_themes(self):
+        for name, colors in self.THEMES:
+            with self.subTest(theme=name):
+                self.assertGreaterEqual(contrast(colors["guide_note"], colors["surface"]), 4.5)
+
+    def test_guide_note_background_is_not_a_failure_or_warning_background(self):
+        for name, colors in self.THEMES:
+            with self.subTest(theme=name):
+                bg = colors["guide_note_bg"].lower()
+                self.assertNotEqual(bg, colors["fail_bg"].lower())
+                self.assertNotEqual(bg, colors["needs_review_bg"].lower())
+                self.assertNotEqual(bg, colors["banner_failed_bg"].lower())
+                self.assertNotEqual(colors["guide_note_border"].lower(), colors["fail"].lower())
+
+    def test_rendered_css_uses_the_tokens_in_both_themes(self):
+        inventory = GuideInventory(1, (step("S1", "Click Save, then OK."),), (), ())
+        board = build_board(
+            inventory,
+            outcomes={"S1": StepOutcome("PASS", evidence_ids=("S1:read",), guide_note=NOTE)},
+            notice="n", run_id="r1",
+        )
+        html = render_run_report(board, summary={})
+        for colors in (theme.COLORS_LIGHT, theme.COLORS_DARK):
+            self.assertIn(colors["guide_note_bg"], html)
+            self.assertIn(colors["guide_note"], html)
+        page = render_board(board)
+        self.assertIn(theme.COLORS_LIGHT["guide_note_bg"], page)
+        self.assertNotIn("@@GUIDE_NOTE", page)
 
 
 HOST = "example" + ".invalid"
@@ -279,6 +362,21 @@ class InlineSavedBrowserTests(unittest.TestCase):
     def test_old_saved_text_is_not_pass_even_when_save_changed_the_url(self):
         # Save itself passes on the URL change; the saved text was there before it.
         outcome, saves = self.walk(save_html(SAVED, SAVED, hash_after="save"))
+        self.assertEqual(saves, 1)
+        self.assertNotEqual(outcome.statuses["save"], "PASS")
+        self.assertEqual(outcome.guide_notes, {})
+
+    def test_old_saved_text_rendered_with_save_during_the_wait_is_not_pass(self):
+        # The page is empty at first; Save and the old saved text appear together later.
+        html = (
+            "<!doctype html><html><head><title>Personal Information</title></head><body>"
+            "<div id='root'></div><script>"
+            "setTimeout(function(){document.getElementById('root').innerHTML="
+            f"\"<div>{SAVED}</div><button onclick=\\\"window.saves=(window.saves||0)+1;"
+            "location.hash='save'\\\">Save</button>\";},1500);"
+            "</script></body></html>"
+        )
+        outcome, saves = self.walk(html)
         self.assertEqual(saves, 1)
         self.assertNotEqual(outcome.statuses["save"], "PASS")
         self.assertEqual(outcome.guide_notes, {})

@@ -117,6 +117,9 @@ class WalkState:
     # Per step (W-080): notes for closed pop-ups, and the step's time cap measured from its start.
     popup_notes: list[str] = field(default_factory=list)
     step_deadline: float | None = None
+    # W-105: "successfully saved" read at the last click, with the control found and
+    # visible. None means unread (no click, or a click path that does not read it).
+    saved_before_click: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -5246,6 +5249,11 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     loc = _locator_for_name(state.page, name)
     if loc is None:
         return None
+    # W-105: read the saved text at the click itself, with the control found and visible,
+    # so text that rendered while the walk waited for the control is never called new.
+    state.saved_before_click = page_is_loading(state.page) or _words_visible(
+        state.page, "successfully saved",
+    )
     # The clicked element's own tab, already selected before the click, is not evidence.
     before_tab = _clicked_tab_selected(loc)
     before_nav = _current_nav_item(state.page, frozenset(target_names))
@@ -5725,18 +5733,18 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     done: list[str] = []
     renamed: CheckResult | None = None
     opened = {"done": False, "error": False}
-    # Whether "successfully saved" was already visible before the last click.
-    saved_before_click = True
+    # "successfully saved" at the last click: True, False, or None when it was not read.
+    saved_before_click: bool | None = None
     for name in names:
         if norm(name) in {"ok", "okay"} and _locator_for_name(state.page, name) is None:
             if _words_visible(state.page, "successfully saved"):
                 page_text = _read_page_text(state.page)
-                lines = [ln.strip() for ln in page_text.split("\n") if "saved" in norm(ln)]
+                lines = [ln.strip() for ln in page_text.split("\n") if "successfully saved" in norm(ln)]
                 banner_text = lines[0] if lines else "successfully saved"
                 evidence_token = re.sub(r"[^A-Za-z0-9_.:-]+", "-", banner_text).strip("-")
                 evidence_ids = (f"{step.step_id}:{evidence_token}",)
                 prefix = "Clicked " + " then ".join(done) + ". " if done else ""
-                if done and not saved_before_click and renamed is None:
+                if done and saved_before_click is False and renamed is None:
                     # W-105: the saved message is new after the click, so the intent is met.
                     return CheckResult(
                         "PASS",
@@ -5749,10 +5757,7 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
                     f"saved message: {_snippet(banner_text)}"
                 )
                 return CheckResult("UI_MISMATCH", note, evidence_ids, freeze=False)
-        # A loading page is an unread before-state, so the saved text never counts as new.
-        saved_before_click = page_is_loading(state.page) or _words_visible(
-            state.page, "successfully saved",
-        )
+        state.saved_before_click = None
         result = _finish_attempt(state, step, _Intent("click", name), opened)
         if _modal_blocked(result):
             # W-080: resume at this name only; names already clicked are not clicked again.
@@ -5760,6 +5765,7 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
                 state, step, result,
                 lambda name=name: _finish_attempt(state, step, _Intent("click", name), opened),
             )
+        saved_before_click = state.saved_before_click
         if result.status == "UI_MISMATCH" and not result.freeze and result.evidence_ids:
             renamed = renamed or result
             done.append(name)

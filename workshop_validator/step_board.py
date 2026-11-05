@@ -150,8 +150,17 @@ li.fail {
 }
 .num { color: #5c665e; font-variant-numeric: tabular-nums; }
 .text { overflow-wrap: anywhere; }
-.guide-note { color: #6b4fa0; font-style: italic; border-left: 3px solid #6b4fa0; padding-left: 8px; margin: 6px 0 0 calc(2.25rem + 12px); }
-.metric.guide-note strong { color: #6b4fa0; }
+li > .guide-note {
+  margin: 6px 0 2px calc(2.25rem + 12px);
+  padding: 6px 10px;
+  background: @@GUIDE_NOTE_BG@@;
+  border-left: 4px solid @@GUIDE_NOTE_BORDER@@;
+  border-radius: 4px;
+  color: @@GUIDE_NOTE@@;
+  font-size: 0.92rem;
+}
+.metric.guide-note { background: @@GUIDE_NOTE_BG@@; border-left: 4px solid @@GUIDE_NOTE_BORDER@@; }
+.metric.guide-note strong, .metric.guide-note span { color: @@GUIDE_NOTE@@; }
 .reason {
   margin: 4px 0 2px calc(2.25rem + 12px);
   color: #7f1d1d;
@@ -340,6 +349,9 @@ if (form) {
     # Replace placeholders with theme colors
     template = template.replace("@@CHIP_SUSPECT_BG@@", theme.COLORS_LIGHT["chip_suspect_bg"])
     template = template.replace("@@CHIP_SUSPECT@@", theme.COLORS_LIGHT["chip_suspect"])
+    template = template.replace("@@GUIDE_NOTE_BG@@", theme.COLORS_LIGHT["guide_note_bg"])
+    template = template.replace("@@GUIDE_NOTE_BORDER@@", theme.COLORS_LIGHT["guide_note_border"])
+    template = template.replace("@@GUIDE_NOTE@@", theme.COLORS_LIGHT["guide_note"])
     return template
 
 
@@ -527,6 +539,7 @@ def results_pdf_section(href: str) -> str:
 
 def write_results_pdf(board: Board, path: Path) -> None:
     """Write the pass, fail, and not-run board to a private PDF."""
+    from reportlab.lib.colors import HexColor
     from reportlab.lib.pagesizes import letter
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
     from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
@@ -540,6 +553,14 @@ def write_results_pdf(board: Board, path: Path) -> None:
     )
     body = ParagraphStyle(
         "ResultsBody", parent=styles["Normal"], fontName="Times-Roman", fontSize=10, leading=13,
+    )
+    # W-105: an informational box with its own border; the "Guide differs:" label carries the meaning.
+    guide_style = ParagraphStyle(
+        "ResultsGuideNote", parent=body,
+        textColor=HexColor(theme.COLORS_LIGHT["guide_note"]),
+        backColor=HexColor(theme.COLORS_LIGHT["guide_note_bg"]),
+        borderColor=HexColor(theme.COLORS_LIGHT["guide_note_border"]),
+        borderWidth=1, borderPadding=4, leftIndent=8, spaceBefore=4, spaceAfter=4,
     )
     story = [
         Paragraph("Workshop Validator results", title),
@@ -564,7 +585,7 @@ def write_results_pdf(board: Board, path: Path) -> None:
                 if step.reason:
                     story.append(Paragraph(_pdf_text(step.reason), body))
                 if step.guide_note and step.label == "PASS":
-                    story.append(Paragraph(f"<i>{_pdf_text(guide_note_line(step.guide_note))}</i>", body))
+                    story.append(Paragraph(_pdf_text(guide_note_line(step.guide_note)), guide_style))
             story.append(Spacer(1, 8))
     path.parent.mkdir(mode=0o700, exist_ok=True)
     SimpleDocTemplate(
@@ -1229,7 +1250,8 @@ def render_run_report(
 
     if guide_note_count > 0:
         stats_parts.append(
-            f"<div class='stat guide-note'><span class='stat-value'>{guide_note_count}</span>"
+            f"<div class='stat guide-note' title='Passed; the page reached the outcome differently than the guide says'>"
+            f"<span class='stat-value'>{guide_note_count}</span>"
             f"<span class='stat-label'>{escape(_guide_noted_label(guide_note_count))}</span></div>"
         )
 
@@ -1370,7 +1392,7 @@ def render_run_report(
 
                 if step.guide_note and step.label == "PASS":
                     sections_html.append(
-                        f"<div class='step-reason guide-note'>{escape(guide_note_line(step.guide_note))}</div>"
+                        f"<div class='guide-note'>{escape(guide_note_line(step.guide_note))}</div>"
                     )
 
                 if step.snapshot and SNAPSHOT_HREF.fullmatch(step.snapshot):
@@ -1469,7 +1491,7 @@ def render_run_report(
         "<meta name='robots' content='noindex, nofollow'>\n"
         f"<title>{escape(guide_name or 'Workshop Validation Report')}</title>\n"
         "<style>\n"
-        + theme.get_shared_css() + SWITCHER_CSS + GUIDE_NOTE_CSS +
+        + theme.get_shared_css() + SWITCHER_CSS +
         "</style>\n"
         "</head>\n"
         "<body>\n"
@@ -1555,13 +1577,6 @@ SWITCHER_CSS = """
 .instances a.current, .instances button.current { opacity: 1; font-weight: 600; background: rgba(127,127,127,.18); }
 .live { padding: 12px 16px; border-radius: 8px; background: rgba(127,127,127,.12); margin: 16px 0; }
 .live ol { margin: 8px 0 0; padding-left: 20px; font-size: 14px; }
-"""
-
-
-# W-105: an instructor note on a PASS. Not green like PASS evidence, not red like FAIL.
-GUIDE_NOTE_CSS = """
-.guide-note { color: #6b4fa0; font-style: italic; border-left: 3px solid #6b4fa0; padding-left: 8px; }
-.stat.guide-note .stat-value { color: #6b4fa0; }
 """
 
 

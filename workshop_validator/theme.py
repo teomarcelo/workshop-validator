@@ -31,6 +31,10 @@ COLORS_LIGHT = {
     "not_run_bg": "#eaedef",
     "needs_review": "#9a6700",
     "needs_review_bg": "#fff4e0",
+    # W-105 guide note on a PASS: informational, never the fail or warning colors.
+    "guide_note": "#1f4e79",
+    "guide_note_bg": "#eef4fa",
+    "guide_note_border": "#3b6ea5",
     # Chip colors
     "chip_already_set": "#6639ba",
     "chip_already_set_bg": "#f3f0ff",
@@ -68,6 +72,10 @@ COLORS_DARK = {
     "not_run_bg": "#21262d",
     "needs_review": "#e09b13",
     "needs_review_bg": "#3d2d00",
+    # W-105 guide note on a PASS: informational, never the fail or warning colors.
+    "guide_note": "#cfe0f3",
+    "guide_note_bg": "#15283b",
+    "guide_note_border": "#6ea8e0",
     # Chip colors
     "chip_already_set": "#b083f0",
     "chip_already_set_bg": "#2e1f47",
@@ -196,6 +204,22 @@ main {{ padding: 32px 0 64px; }}
 .stat.pass .stat-value {{ color: {COLORS_LIGHT["pass"]}; }}
 .stat.fail .stat-value {{ color: {COLORS_LIGHT["fail"]}; }}
 .stat.needs-review .stat-value {{ color: {COLORS_LIGHT["needs_review"]}; }}
+.stat.guide-note {{
+  background: {COLORS_LIGHT["guide_note_bg"]};
+  border-left: 4px solid {COLORS_LIGHT["guide_note_border"]};
+}}
+.stat.guide-note .stat-value, .stat.guide-note .stat-label {{ color: {COLORS_LIGHT["guide_note"]}; }}
+
+.step-item > .guide-note {{
+  margin: 4px 0 0;
+  padding: 8px 12px;
+  background: {COLORS_LIGHT["guide_note_bg"]};
+  border-left: 4px solid {COLORS_LIGHT["guide_note_border"]};
+  border-radius: 4px;
+  font-size: 0.9375rem;
+  color: {COLORS_LIGHT["guide_note"]};
+  grid-column: 2 / -1;
+}}
 
 .progress-bar {{
   height: 32px;
@@ -486,6 +510,17 @@ th {{
   .stat.pass .stat-value {{ color: {COLORS_DARK["pass"]}; }}
   .stat.fail .stat-value {{ color: {COLORS_DARK["fail"]}; }}
   .stat.needs-review .stat-value {{ color: {COLORS_DARK["needs_review"]}; }}
+  .stat.guide-note {{
+    background: {COLORS_DARK["guide_note_bg"]};
+    border-left-color: {COLORS_DARK["guide_note_border"]};
+  }}
+  .stat.guide-note .stat-value, .stat.guide-note .stat-label {{ color: {COLORS_DARK["guide_note"]}; }}
+
+  .step-item > .guide-note {{
+    background: {COLORS_DARK["guide_note_bg"]};
+    border-left-color: {COLORS_DARK["guide_note_border"]};
+    color: {COLORS_DARK["guide_note"]};
+  }}
 
   .progress-bar {{
     background: {COLORS_DARK["surface"]};
