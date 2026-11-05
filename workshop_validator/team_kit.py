@@ -22,7 +22,7 @@ import subprocess
 import sys
 import unicodedata
 
-from .team_state import _write_private, is_open, load as load_job
+from .team_state import PRODUCER_LIVE_NAME, _write_private, is_open, is_stale, load as load_job
 
 STATES = ("next", "running", "waiting", "done")
 STALL_MINUTES = 30
@@ -47,7 +47,7 @@ def ledger_path(team: Path) -> Path:
 
 
 def producer_live_path(team: Path) -> Path:
-    return team / "producer-live"
+    return team / PRODUCER_LIVE_NAME
 
 
 def _utc(now=None) -> datetime:
@@ -280,14 +280,30 @@ def watchdog_action(state: str, live: dict | None, *, now: datetime, idle_since:
 
 
 def producer_active_at(repo: Path, live: dict | None) -> datetime | None:
-    """Last sign of the live producer: its transcript mtime once bound, else the claim time."""
+    """Last sign of the live producer: newest of its transcript mtime (once bound),
+    its `last_seen` (refreshed by `team_state heartbeat` / `advance`) and the claim time."""
     if not live:
         return None
+    times = [t for t in (_read_time_iso(live.get("last_seen")), _read_time_iso(live.get("claimed"))) if t]
     sid = live.get("session_id")
     transcript = transcripts_dir(repo) / f"{sid}.jsonl"
     if sid != "pending" and transcript.is_file():
-        return datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc)
-    return _read_time_iso(live.get("claimed"))
+        times.append(datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc))
+    return max(times) if times else None
+
+
+def masked_stall(job: dict | None, active: datetime | None, now: datetime) -> bool:
+    """WORKING that is really a stall: the open job's heartbeat and the producer are both
+    quiet for STALL_MINUTES. Other transcripts (the watchdog task itself, old agents) can
+    keep `status` at WORKING; they are not the producer (escape 2026-11-04)."""
+    if not (job and is_open(job) and job.get("heartbeat")):
+        return False
+    try:
+        job_stale = is_stale(job, now, minutes=STALL_MINUTES)
+    except ValueError:
+        job_stale = True
+    producer_stale = active is None or now - active >= timedelta(minutes=STALL_MINUTES)
+    return job_stale and producer_stale
 
 
 def producer_is_fresh(repo: Path, team: Path, now: datetime) -> bool:
@@ -320,6 +336,11 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
         state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
     else:
         state, reason = status(repo, team, now)
+    live = load_producer(team)
+    active = producer_active_at(repo, live)
+    if state == "WORKING" and masked_stall(load_job(team.parent), active, now):
+        state, reason = "STALLED", (f"job heartbeat and producer both quiet for {STALL_MINUTES}+ min"
+                                    f" ({reason})")
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
     if state not in {"IDLE", "STALLED"}:
@@ -331,8 +352,6 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     if not idle_file.is_file():
         _write_private(idle_file, now.isoformat())
         takeover_count_file.unlink(missing_ok=True)
-    live = load_producer(team)
-    active = producer_active_at(repo, live)
     takeover_count = 0
     if takeover_count_file.is_file():
         try:

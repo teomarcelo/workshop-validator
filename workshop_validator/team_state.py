@@ -18,6 +18,7 @@ PHASES = [
 
 STATE_NAME = "state.json"
 LOG_NAME = "team-log.json"
+PRODUCER_LIVE_NAME = "producer-live"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -100,9 +101,23 @@ def advance(root: Path, phase: str, run_dir: str = None, detail: str = "", *, no
     if phase == "run":
         state["iteration"] = state.get("iteration", 0) + 1
     _write_private(_state_path(root), json.dumps(state, indent=2) + "\n")
+    touch_producer_live(root, now)
     if detail:
         log(root, agent="system", action=f"advance-{phase}", detail=detail, now=now)
     return state
+
+
+def touch_producer_live(root: Path, now: str) -> None:
+    """Refresh `last_seen` in a held producer-live claim (atomic, 0600); no claim, no file."""
+    path = Path(root) / "team" / PRODUCER_LIVE_NAME
+    try:
+        live = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(live, dict):
+        return
+    live["last_seen"] = now
+    _write_private(path, json.dumps(live) + "\n")
 
 
 def heartbeat(root: Path, *, now=None) -> dict:
@@ -114,6 +129,7 @@ def heartbeat(root: Path, *, now=None) -> dict:
         now = _now_utc()
     state["heartbeat"] = now
     _write_private(_state_path(root), json.dumps(state, indent=2) + "\n")
+    touch_producer_live(root, now)
     return state
 
 
