@@ -4582,9 +4582,13 @@ def _variable_options(page) -> list:
 
 _LOOKUP_ROLES = ("combobox", "searchbox")
 # Shared page helpers for the field container and pill scripts below.
-# Known limits: querySelectorAll does not enter shadow roots, so inputs, labels and pills inside
-# a nested shadow root are not seen; and a lookup named only by aria-label has no label element,
-# so it gets no field container and a pill never proves its pick (fails closed).
+# Shadow roots: deep() walks an element and every OPEN shadow root under it. The other-field
+# checks (inputs, field roles, field custom elements, labels / legends / form-element labels),
+# the one-field label check after the click and the page-wide pill set recorded before the click
+# all use it. The pills read as this pick's evidence are found in light DOM only, so a pill inside
+# a shadow root is not seen (fails closed). A CLOSED shadow root is invisible to every check: a
+# field hidden in one is not seen. A lookup named only by aria-label has no label element, so it
+# gets no field container and a pill never proves its pick (fails closed).
 _FIELD_HELPERS_JS = r"""
   const up = (el) => el.parentElement || (el.getRootNode() instanceof ShadowRoot ? el.getRootNode().host : null);
   const within = (node, root) => { for (let n = node; n; n = up(n)) if (n === root) return true; return false; };
@@ -4600,7 +4604,21 @@ _FIELD_HELPERS_JS = r"""
     const found = [...root.querySelectorAll(named + ', [class*="pill"]')].filter(pillish);
     return found.filter((el) => !found.some((other) => other !== el && other.contains(el)));
   };
-  const marksIn = (root) => [...root.querySelectorAll("label, legend, .slds-form-element__label")];
+  // Every element under EL, including inside the open shadow roots of EL and its descendants.
+  const deep = (el) => {
+    const out = [];
+    const visit = (root) => {
+      for (const kid of root.querySelectorAll("*")) {
+        out.push(kid);
+        if (kid.shadowRoot) visit(kid.shadowRoot);
+      }
+    };
+    visit(el);
+    if (el.shadowRoot) visit(el.shadowRoot);
+    return out;
+  };
+  // Labels, legends and form-element labels under ROOT, open shadow roots included.
+  const marksIn = (root) => deep(root).filter((el) => el.matches("label, legend, .slds-form-element__label"));
 """
 # The lookup's field containers, nearest first: every ancestor of the box, up to but never
 # including a dialog, section, tab panel or modal body, and stopping BEFORE the first ancestor
@@ -4608,8 +4626,8 @@ _FIELD_HELPERS_JS = r"""
 # with role combobox / searchbox / textbox / spinbutton or aria-haspopup that is not the box or
 # around it, or a field custom element (-combobox, -combobox-*, -lookup, -input, -picklist,
 # -textarea, -field, -select, -datepicker, -radio-group, -checkbox-group) that does not hold the
-# box, all also searched inside open shadow roots; a label / legend / .slds-form-element__label
-# that is not this box's; or a pill already shown. A control named by aria-labelledby is itself
+# box; or a label / legend / .slds-form-element__label that is not this box's, all also
+# searched inside open shadow roots; or a pill already shown (light DOM). A control named by aria-labelledby is itself
 # an input or field role, so it already stops the walk. These are the field's own elements,
 # recorded by identity before the click; a pill shown in one of them later was not there before.
 _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
@@ -4626,19 +4644,6 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
   const fields = 'input, textarea, select, [role="combobox"], [role="searchbox"], [role="textbox"], '
     + '[role="spinbutton"], [aria-haspopup]';
   const hosts = /-(combobox|lookup|input|picklist|textarea|field|select|datepicker|radio-group|checkbox-group)$|-combobox-/;
-  // Every element under EL, including inside the open shadow roots of EL and its descendants.
-  const deep = (el) => {
-    const out = [];
-    const visit = (root) => {
-      for (const kid of root.querySelectorAll("*")) {
-        out.push(kid);
-        if (kid.shadowRoot) visit(kid.shadowRoot);
-      }
-    };
-    visit(el);
-    if (el.shadowRoot) visit(el.shadowRoot);
-    return out;
-  };
   const others = (el) => deep(el).some((kid) => kid.matches(fields) && !around(kid));
   const otherHosts = (el) => deep(el)
     .some((kid) => hosts.test(kid.tagName.toLowerCase()) && !around(kid));
@@ -4653,9 +4658,19 @@ _FIELD_CONTAINERS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
 """
 # Selected pills inside one field container, outermost only (a pill's own parts are not pills).
 _PILLS_JS = "(root) => {" + _FIELD_HELPERS_JS + "  return pillsIn(root);\n}"
-# After the click, the field's own container must still read as one field named NAME: every
-# label, legend or .slds-form-element__label in it reads exactly NAME, and at most one does (a
-# second one is another field, or two fields alike: ambiguous). A required marker is not part of
+# Every pill-like element in the box's document before the click, open shadow roots included.
+# A pill already on the page was not shown by this pick, even when the page moves it later.
+_PAGE_PILLS_JS = "(box) => {" + _FIELD_HELPERS_JS + r"""
+  const doc = box.ownerDocument;
+  return deep(doc.documentElement).concat([doc.documentElement]).filter(pillish);
+}
+"""
+# Whether an element is one of the handles passed in (identity, not look-alike).
+_ONE_OF_JS = "(el, olds) => olds.some((old) => old === el)"
+# After the click, the field's own container must still read as one field named NAME: it holds
+# exactly one label, legend or .slds-form-element__label (open shadow roots included) and that
+# one reads exactly NAME (none: no field name to read; two: another field, or two fields alike,
+# ambiguous). A required marker is not part of
 # the field's name: an element (abbr.slds-required, .slds-required, a class containing
 # "required") whose text is "*", and assistive text "required" (any case), are dropped before the
 # text is read, then whitespace is collapsed.
@@ -4672,7 +4687,7 @@ _ONE_FIELD_JS = "(root, name) => {" + _FIELD_HELPERS_JS + r"""
     return text(copy);
   };
   const marks = marksIn(root).filter((mark) => !marksIn(root).some((o) => o !== mark && o.contains(mark)));
-  return marks.length <= 1 && marks.every((mark) => fieldName(mark) === name);
+  return marks.length === 1 && fieldName(marks[0]) === name;
 }
 """
 # Titles on a pill and its parts that must agree with its visible label. Icon parts and the remove
@@ -4706,6 +4721,31 @@ def _handles(target, script) -> list:
 def _field_container(box):
     """The box's own field elements, nearest first, as handles that outlive the box ([] if none)."""
     return _handles(box, _FIELD_CONTAINERS_JS) if box is not None else []
+
+
+def _page_pills(box):
+    """Handles of every pill on the box's page before the click, or None when they cannot be read."""
+    if box is None:
+        return None
+    try:
+        array = box.evaluate_handle(_PAGE_PILLS_JS)
+        items = sorted((int(key), value) for key, value in array.get_properties().items() if key.isdigit())
+    except Exception:
+        return None
+    pills = [value.as_element() for _key, value in items]
+    return None if any(pill is None for pill in pills) else pills
+
+
+def _was_shown_before(pill, before) -> bool:
+    """True when PILL is one of the pills recorded before the click, or that cannot be told."""
+    if before is None:
+        return True
+    if not before:
+        return False
+    try:
+        return pill.evaluate(_ONE_OF_JS, before) is not False
+    except Exception:
+        return True
 
 
 def _live_container(containers):
@@ -4753,9 +4793,10 @@ def _one_field(container, name: str) -> bool:
         return False
 
 
-def _pill_shows(containers, want: str, name: str = "") -> bool:
+def _pill_shows(containers, want: str, name: str, before) -> bool:
     """Exactly one visible selected pill inside the field's own recorded elements, its label
-    exactly WANT, and those elements still one field named NAME (the lookup's label)."""
+    exactly WANT, not one of the pills BEFORE the click (None: unknown, so never), and those
+    elements still one field named NAME (the lookup's label)."""
     container = _live_container(containers)
     if container is None or not want:
         return False
@@ -4766,7 +4807,8 @@ def _pill_shows(containers, want: str, name: str = "") -> bool:
                 shown.append(pill)
         except Exception:
             return False
-    return len(shown) == 1 and _pill_label(shown[0]) == want and _one_field(container, name)
+    return (len(shown) == 1 and not _was_shown_before(shown[0], before)
+            and _pill_label(shown[0]) == want and _one_field(container, name))
 
 
 def _named_lists(box) -> list:
@@ -4896,6 +4938,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             freeze=True,
         )
     container = _field_container(box)
+    before = _page_pills(box)
     scope = _owned_listbox(root, box)
     try:
         picks[0].click(timeout=8000)
@@ -4906,7 +4949,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
         if now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box):
             return True
-        if not _pill_shows(container, want, _plain(label)):
+        if not _pill_shows(container, want, _plain(label), before):
             return False
         if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
             return False

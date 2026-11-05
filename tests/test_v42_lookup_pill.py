@@ -9,6 +9,7 @@ fail-closed equals the value, and any title agrees with that visible label.
 import os
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 try:
     from playwright.sync_api import sync_playwright
@@ -59,7 +60,8 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
 
     Clicking the option re-renders the Record Variable host with SHOWN (pill markup, default one
     pill labelled varWidgetRec) in place of the input. With HOME "ot" SHOWN goes into the other
-    field's host instead (HOME "none": nowhere; "ot-replace": SHOWN replaces it); with HOME "new" a new field labelled Sample Other Field holding SHOWN
+    field's host instead (HOME "none": nowhere; "ot-replace": SHOWN replaces it; "ot-unlabel": as
+    "ot", then every label in the other host's open shadow root is removed); with HOME "new" a new field labelled Sample Other Field holding SHOWN
     is added next to it. FORM_ELEMENT wraps each field in an .slds-form-element inside its host.
     COMPOUND puts the fields in one .slds-form-element_compound wrapper, and the pick then
     replaces the whole Record Variable host. SIBLING adds the other field: with OTHER_LABEL (None
@@ -134,9 +136,13 @@ def screen_html(shown=None, home="rv", form_element=True, compound=False, siblin
         wrap({new_label!r}, {shown!r}) + "</sample-grouped-combobox>");
     }} else if (home === "ot-replace") {{
       document.getElementById("host-ot").innerHTML = {shown!r};
-    }} else if (home === "ot") {{
+    }} else if (home === "ot" || home === "ot-unlabel") {{
       const slot = document.querySelector("#host-ot .slds-form-element__control") || document.getElementById("host-ot");
       slot.insertAdjacentHTML("beforeend", {shown!r});
+      const shadow = document.getElementById("host-ot").shadowRoot;
+      if (home === "ot-unlabel" && shadow) {{
+        for (const el of shadow.querySelectorAll("label, legend, .slds-form-element__label")) el.remove();
+      }}
     }}
   }});
   document.getElementById("rv").focus();
@@ -149,12 +155,23 @@ SHADOW_FIELD = ('<script>document.currentScript.parentElement.attachShadow({mode
                 '\'<label for="sx">Sample Other Field</label><input id="sx"><slot></slot>\';</script>')
 
 
+def shadow_only(markup):
+    """A sibling field whose only name is MARKUP in its open shadow root, with a slot; no input."""
+    return ('<script>document.currentScript.parentElement.attachShadow({mode: "open"}).innerHTML = '
+            f"'{markup}<slot></slot>';</script>")
+
+
+SHADOW_LABEL = shadow_only("<label>Sample Other Field</label>")
+SHADOW_SPAN = shadow_only('<span class="slds-form-element__label">Sample Other Field</span>')
+
+
 def beside_html(mode):
     """One Record Variable field inside a one-field wrapper, with a slot beside its form element.
 
     MODE "emptybox": the pick empties the box (it stays) and shows the pill in the slot.
     MODE "lone": the pick empties the field's control and adds the pill in a new unlabelled div
-    beside the form element.
+    beside the form element. MODE "lone2": the pick removes the whole form element, label included,
+    and adds the pill in a new unlabelled div, so the wrapper holds no field name at all.
     """
     return f"""{CSS}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
@@ -190,10 +207,57 @@ def beside_html(mode):
       box.setAttribute("aria-expanded", "false");
       list.hidden = true;
       document.getElementById("slot").innerHTML = {pill()!r};
+    }} else if ({mode!r} === "lone2") {{
+      document.querySelector("#wrap > .slds-form-element").remove();
+      document.getElementById("wrap").insertAdjacentHTML("beforeend", "<div>" + {pill()!r} + "</div>");
     }} else {{
       document.getElementById("control").innerHTML = "";
       document.getElementById("wrap").insertAdjacentHTML("beforeend", "<div>" + {pill()!r} + "</div>");
     }}
+  }});
+  document.getElementById("rv").focus();
+</script>
+"""
+
+
+def moved_html():
+    """A Record Variable field whose box sits in a role=combobox wrapper, and another field that
+    already shows a varWidgetRec pill. The pick empties the box, closes its list and moves that
+    same pill element (same identity) into the Record Variable field, beside the wrapper."""
+    return f"""{CSS}
+<div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
+  <h2 id="t">Sample Screen</h2>
+  <section aria-label="Fields">
+    <div class="slds-form-element" id="fe-rv">
+      <label class="slds-form-element__label" for="rv">Record Variable</label>
+      <div class="slds-combobox" role="combobox" id="cb">
+        <input id="rv" role="combobox" aria-expanded="true" aria-controls="lb" value="varWidgetRec"
+               autocomplete="off">
+        <div id="lb" role="listbox">
+          <div role="option" id="opt1"><strong>varWidgetRec</strong></div>
+        </div>
+      </div>
+    </div>
+  </section>
+  <section aria-label="Other">
+    <div class="slds-form-element" id="fe-ot">
+      <span class="slds-form-element__label">Sample Other Field</span>
+      <div class="slds-form-element__control" id="ot-control">{pill()}</div>
+    </div>
+  </section>
+</div>
+<script>
+  window.chosen = [];
+  const list = document.getElementById("lb");
+  list.addEventListener("click", (event) => {{
+    const picked = event.target.closest("[role=option]");
+    if (!picked) return;
+    window.chosen.push(picked.id);
+    const box = document.getElementById("rv");
+    box.value = "";
+    box.setAttribute("aria-expanded", "false");
+    list.hidden = true;
+    document.getElementById("fe-rv").appendChild(document.querySelector("#ot-control .slds-pill"));
   }});
   document.getElementById("rv").focus();
 </script>
@@ -339,6 +403,11 @@ class LookupPillBrowserTests(unittest.TestCase):
             "G": dict(other_html=pill(), home="none"),
             "H": dict(other_html="<label>Sample Other Field</label>", home="ot-replace"),
             "shadowsib": dict(other_html=SHADOW_FIELD, other_tag="sample-sibling"),
+            "shadowlabel": dict(other_html=SHADOW_LABEL, other_tag="sample-sibling"),
+            "shadowspan": dict(other_html=SHADOW_SPAN, other_tag="sample-sibling"),
+            # The sibling's shadow label is gone after the pick: only the capture can stop here.
+            "shadowlabel-gone": dict(other_html=SHADOW_LABEL, other_tag="sample-sibling", home="ot-unlabel"),
+            "shadowspan-gone": dict(other_html=SHADOW_SPAN, other_tag="sample-sibling", home="ot-unlabel"),
             "field": dict(other_html="", other_tag="sample-other-field"),
             "select": dict(other_html="", other_tag="sample-other-select"),
             "datepicker": dict(other_html="", other_tag="sample-other-datepicker"),
@@ -355,11 +424,24 @@ class LookupPillBrowserTests(unittest.TestCase):
     def test_pill_outside_the_nearest_surviving_ancestor_of_the_box_is_not_pass(self):
         # emptybox: the box stays, empty; lone: the control is emptied. The pill shows beside
         # the form element, in the one-field wrapper, not inside what is left of the field.
-        for mode in ("emptybox", "lone"):
+        for mode in ("emptybox", "lone", "lone2"):
             with self.subTest(mode=mode):
                 result = self.fill(beside_html(mode))
                 self.assert_not_pass(result)
                 self.assertEqual(self.page.locator("#wrap .slds-pill__label").inner_text(), "varWidgetRec")
+
+    def test_pill_another_field_showed_before_the_pick_moved_into_this_field_is_not_pass(self):
+        # The same pill element was on the page before the click; moving it is not this pick.
+        result = self.fill(moved_html())
+        self.assert_not_pass(result)
+        self.assertEqual(self.page.locator("#fe-rv > .slds-pill .slds-pill__label").inner_text(), "varWidgetRec")
+        self.assertEqual(self.page.locator("#ot-control .slds-pill").count(), 0)
+
+    def test_unreadable_pre_click_pills_never_let_a_pill_prove_the_pick(self):
+        # When the pills already on the page cannot be read, no pill proves the pick.
+        with mock.patch.object(guide_walk, "_page_pills", return_value=None):
+            result = self.fill(screen_html())
+        self.assert_not_pass(result)
 
     def test_pill_in_a_new_same_labelled_field_is_not_pass(self):
         # Probe D: after the pick a second Record Variable field holds the pill: two fields alike.
@@ -431,6 +513,26 @@ class LookupPillBrowserTests(unittest.TestCase):
         result = SimpleNamespace(signed_in=True, message="", report_steps=report_steps(outcome, steps))
         self.assertEqual(outcome_of(result), (SUCCESS, ""))
         self.assertEqual(gate_outcome_of(result), SUCCESS)
+
+
+class PagePillsTests(unittest.TestCase):
+    def test_page_pills_that_cannot_be_read_are_unknown_not_empty(self):
+        class BrokenBox:
+            def evaluate_handle(self, script):
+                raise RuntimeError("sample page error")
+
+        self.assertIsNone(guide_walk._page_pills(BrokenBox()))
+        self.assertIsNone(guide_walk._page_pills(None))
+
+    def test_unknown_pre_click_pills_mean_shown_before(self):
+        self.assertTrue(guide_walk._was_shown_before(object(), None))
+
+    def test_a_pill_that_cannot_be_compared_counts_as_shown_before(self):
+        class BrokenPill:
+            def evaluate(self, script, arg=None):
+                raise RuntimeError("sample page error")
+
+        self.assertTrue(guide_walk._was_shown_before(BrokenPill(), [object()]))
 
 
 if __name__ == "__main__":
