@@ -106,24 +106,25 @@ class ProducerLastSeenTests(unittest.TestCase):
             root = Path(tmp)
             team = root / "team"
             team_state.start_job(root, "guide.pdf", "quick", now=STALE.isoformat())
-            team_kit.claim_producer(team, now=STALE)
-            team_state.heartbeat(root, now=NOW.isoformat())
+            team_kit.claim_producer(team, session_id="prod", now=STALE)
+            team_state.heartbeat(root, now=NOW.isoformat(), session_id="prod")
             live = team_kit.load_producer(team)
             self.assertEqual(live["last_seen"], NOW.isoformat())
             self.assertEqual(live["claimed"], STALE.isoformat())
             later = (NOW + timedelta(minutes=1)).isoformat()
-            team_state.advance(root, "fix", now=later)
+            team_state.advance(root, "fix", now=later, session_id="prod")
             self.assertEqual(team_kit.load_producer(team)["last_seen"], later)
             mode = stat.S_IMODE(team_kit.producer_live_path(team).stat().st_mode)
             self.assertEqual(mode, 0o600)
-            self.assertEqual(team_kit.producer_active_at(root, team_kit.load_producer(team)),
+            self.assertEqual(team_kit.producer_active_at(root, team_kit.load_producer(team),
+                                                         NOW + timedelta(minutes=2)),
                              datetime.fromisoformat(later))
 
     def test_heartbeat_without_claim_creates_no_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             team_state.start_job(root, "guide.pdf", "quick", now=STALE.isoformat())
-            team_state.heartbeat(root, now=NOW.isoformat())
+            team_state.heartbeat(root, now=NOW.isoformat(), session_id="prod")
             self.assertFalse(team_kit.producer_live_path(root / "team").exists())
 
 
