@@ -120,8 +120,14 @@ class WalkState:
     # W-105: "successfully saved" read at the last click, with the control found and
     # visible. None means unread (no click, or a click path that does not read it).
     saved_before_click: bool | None = None
-    # Titles (normalized) of open dialogs a passing guide step opened: never closed as pop-ups.
+    # Titles (normalized) of open dialogs a check opened by name (New Resource, New Screen):
+    # never closed as pop-ups. Forgotten when they close.
     guide_dialogs: set = field(default_factory=set)
+    # Per step: whether the last require() miss was decided with step time still left.
+    # False means the step's time was spent, so the miss is not a result. None means no miss.
+    miss_full_wait: bool | None = None
+    # Per step: triage notes added to the step result (never PASS evidence).
+    step_notes: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -422,6 +428,7 @@ def require(
             )
         return CheckResult("NOT_RUN", note, ())
     except BrowserActionError:
+        state.miss_full_wait = _time_left(state) > 0
         return CheckResult("UI_MISMATCH", failure_note, ())
     return None
 
@@ -3281,18 +3288,32 @@ def _open_dialog_titles(page) -> set:
     return {norm(title) for _item, title, _text in _visible_dialogs(page) if title}
 
 
-def _track_guide_dialogs(state: WalkState, before: set | None, result) -> set:
-    """Forget closed dialogs; record those that appeared while a step passed. Returns the open titles."""
-    now = _open_dialog_titles(state.page)
-    kept = {title for title in state.guide_dialogs if title in now}
-    if before is not None and isinstance(result, CheckResult) and result.status == "PASS":
-        kept |= {title for title in now - before if not any(p in title for p in _PROMO_PHRASES)}
-    state.guide_dialogs = kept
+def _mirror_guide_dialogs(state: WalkState) -> None:
     try:
-        state.page._guide_dialogs = frozenset(kept)
+        state.page._guide_dialogs = frozenset(state.guide_dialogs)
     except Exception:
         pass
-    return now
+
+
+def _open_guide_dialog(state: WalkState, name: str) -> None:
+    """A check that opens the guide's own dialog records it by name, so it is never closed as a pop-up."""
+    try:
+        state.guide_dialogs = set(state.guide_dialogs) | {norm(name)}
+        _mirror_guide_dialogs(state)
+    except Exception:
+        pass
+
+
+def _forget_closed_dialogs(state: WalkState) -> None:
+    """Forget recorded guide dialogs that are no longer open. Bookkeeping never stops the walk."""
+    if not state.guide_dialogs:
+        return
+    try:
+        now = _open_dialog_titles(state.page)
+        state.guide_dialogs = {title for title in state.guide_dialogs if title in now}
+    except Exception:
+        return
+    _mirror_guide_dialogs(state)
 
 
 def _unnamed_modal(page, step_text: str, state=None):
@@ -4121,19 +4142,43 @@ def _enclosing_dialog(box):
     return _first(loc) if _count(loc) == 1 else None
 
 
+def _combobox_ancestor(box):
+    """The nearest combobox element that holds this input, or None."""
+    try:
+        loc = box.locator("xpath=ancestor::*[@role='combobox'][1]")
+    except Exception:
+        return None
+    return _first(loc) if _count(loc) == 1 else None
+
+
+def _id_owned_list(root, box):
+    """The one element named by aria-controls or aria-owns on the box, else on its combobox ancestor."""
+    holders = [box]
+    ancestor = _combobox_ancestor(box)
+    if ancestor is not None:
+        holders.append(ancestor)
+    for holder in holders:
+        for attr in ("aria-controls", "aria-owns"):
+            ident = _read_attr(holder, attr)
+            if not ident or " " in ident:
+                continue
+            loc = _by_id(root, ident)
+            if loc is not None and _count(loc) == 1:
+                return _first(loc)
+    return None
+
+
 def _owned_listbox(root, box, dialog_name: str = ""):
-    """The list a combobox or lookup owns (aria-controls), else the dialog that holds it.
+    """The list a combobox or lookup owns (aria-controls or aria-owns), else the dialog that holds it.
 
     DIALOG_NAME is a last fallback for a control whose own dialog cannot be read.
     Nothing outside that scope is ever searched.
     """
     if root is None or box is None:
         return None
-    controls = _read_attr(box, "aria-controls")
-    if controls:
-        loc = _by_id(root, controls)
-        if loc is not None and _count(loc) == 1:
-            return _first(loc)
+    owned = _id_owned_list(root, box)
+    if owned is not None:
+        return owned
     dialog = _enclosing_dialog(box)
     if dialog is not None:
         return dialog
@@ -4193,13 +4238,63 @@ def _variable_options(page) -> list:
 
 
 _LOOKUP_ROLES = ("combobox", "searchbox")
+# A Lightning lookup can show the chosen record as a pill instead of an input value.
+_PILL_SELECTOR = ".slds-pill, lightning-pill"
+_FIELD_CONTAINER_XPATH = (
+    "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' slds-form-element ')][1]"
+)
+
+
+def _field_container(box):
+    """The form element that holds this box, as a handle that outlives the box, or None."""
+    try:
+        loc = box.locator(_FIELD_CONTAINER_XPATH)
+        if _count(loc) != 1:
+            return None
+        return _first(loc).element_handle(timeout=1000)
+    except Exception:
+        return None
+
+
+def _pill_shows(container, want: str) -> bool:
+    """A visible selected pill inside this field container whose label is exactly WANT."""
+    if container is None or not want:
+        return False
+    try:
+        pills = container.query_selector_all(_PILL_SELECTOR)
+    except Exception:
+        return False
+    for pill in pills[:8]:
+        try:
+            if not pill.is_visible():
+                continue
+            label = pill.query_selector(".slds-pill__label") or pill
+            lines = [_plain(line) for line in str(label.inner_text() or "").splitlines()]
+        except Exception:
+            continue
+        if next((line for line in lines if line), "") == want:
+            return True
+    return False
+
+
+def _no_lookup_scope(label: str) -> CheckResult:
+    return CheckResult(
+        "NEEDS_REVIEW",
+        f"The {label} lookup names no list of its own (no aria-controls or aria-owns, not in a dialog), "
+        "so no option was clicked and the page was not searched.",
+        (),
+        freeze=True,
+    )
 
 
 def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: str) -> CheckResult | None:
     """Fill a lookup and click the one option whose first line is VALUE, inside the lookup's own list.
 
+    The list is the one the box (or its combobox ancestor) names by aria-controls or aria-owns,
+    else the dialog that holds the box. With neither, nothing is clicked (NEEDS_REVIEW).
     None means no such option is shown yet (the caller keeps waiting). Two or more matches
-    are never clicked. PASS only when the box then shows VALUE and its list closed.
+    are never clicked. PASS only when the box then shows VALUE, or a selected pill in the same
+    field shows exactly VALUE, and the list closed.
     """
     want = _plain(value)
     root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
@@ -4217,6 +4312,8 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
                 box.click(timeout=8000)
             except Exception:
                 pass
+        if _owned_listbox(root, box) is None:
+            return _no_lookup_scope(label)
         picks = _matching_options(root, box, want)
     if not picks:
         return None
@@ -4227,6 +4324,8 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             (),
             freeze=True,
         )
+    container = _field_container(box)
+    scope = _owned_listbox(root, box)
     try:
         picks[0].click(timeout=8000)
     except Exception:
@@ -4234,12 +4333,18 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
 
     def chosen() -> bool:
         now_root, _now_role, now_box = _labeled_box(state.page, label, _LOOKUP_ROLES)
-        return now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box)
+        if now_box is not None and _shown_value(now_box) == want and _list_closed(now_root, now_box):
+            return True
+        if not _pill_shows(container, want):
+            return False
+        if now_box is not None and _read_attr(now_box, "aria-expanded") == "true":
+            return False
+        return not any(shown for _option, _label, shown in _scoped_options(scope))
 
     limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
     missed = require(state, chosen, f"{label} did not show {want} after its option was clicked.", limit=limit)
     if missed is None:
-        return passed(step, "filled", f"{label} is {want}. The box shows it and its list closed.")
+        return passed(step, "filled", f"{label} is {want}. The field shows it and its list closed.")
     return _stop_here(missed)
 
 
@@ -4337,6 +4442,7 @@ def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
         return _stop_here(missed)
     if not (click_role(state.page, "button", "New Resource") or click_role(state.page, "link", "New Resource")):
         return CheckResult("UI_MISMATCH", "New Resource did not open.", (), freeze=True)
+    _open_guide_dialog(state, "New Resource")
     unset = _choose_resource_variable(state)
     if unset is not None:
         return _stop_here(unset)
@@ -5015,6 +5121,7 @@ def run_add_screen(state: WalkState, step: GuideStep) -> CheckResult:
         )
     if not _click_screen_item(state.page):
         return CheckResult("UI_MISMATCH", "Screen was not added.", (), freeze=True)
+    _open_guide_dialog(state, "New Screen")
     label = _screen_label(step.text or "")
     if not label:
         # A click is not a result. Without a label to read back, nothing on the page proves the add.
@@ -5803,22 +5910,32 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
     return passed(step, "opened-url", f"Opened {url}. The page showed {_snippet(snapshot)}.")
 
 
-def _select_labeled(page, label: str, value: str) -> bool:
-    """Lightning dropdowns such as Data Type are choices, not text fields."""
+TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
+
+
+def _select_labeled(page, label: str, value: str, notes: list | None = None) -> bool:
+    """Lightning dropdowns such as Data Type are choices, not text fields.
+
+    A dropdown found only by its visible text (LABEL is not its accessible name) owns no
+    list the walk can read, so no option is clicked; a note for triage is added to NOTES.
+    """
     opened = (
         click_role(page, "combobox", label)
         or click_role(page, "button", label)
         or click_role(page, "listbox", label)
     )
+    by_text = False
     if not opened:
         loc = _text_choice(page, label)
         if loc is not None and _visible(loc):
-            opened = _click_locator(loc)
+            opened = by_text = _click_locator(loc)
     if not opened and not present(page, "option", value):
         return False
     # Only an option in the list this control owns, matched by its first line, is clicked.
     root, role, box = _labeled_box(page, label, ("combobox", "button", "listbox"))
     if box is None:
+        if by_text and notes is not None and TEXT_ONLY_DROPDOWN_NOTE not in notes:
+            notes.append(TEXT_ONLY_DROPDOWN_NOTE)
         return False
     if role == "listbox":
         picks = [option for option, text, shown in _scoped_options(box) if shown and text == _plain(value)]
@@ -5847,7 +5964,7 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         return _pick_lookup_option(state, step, label, value)
     if _field_value(state, label) == value:
         return passed(step, "filled", f"{label} is {value}.")
-    if _select_labeled(state.page, label, value):
+    if _select_labeled(state.page, label, value, state.step_notes):
         return passed(step, "filled", f"{label} is {value}.")
     if not _fill_labeled(state, label, value):
         return None
@@ -6069,10 +6186,28 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
 
 OVERRUN_NOTE = "The step exceeded its time limit."
 _RAN_PAST_NOTE = "The step ran past its time limit."
+OUT_OF_TIME_NOTE = "The step ran out of time before it could be checked."
+_FAILING = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
 
 
-def _overrun_result(result) -> CheckResult:
-    """A step past its time limit keeps a failing or frozen result; only a non-result becomes NOT_RUN."""
+def _miss_without_time(result, state: WalkState) -> bool:
+    """A failure whose last miss was decided after the step's time was spent."""
+    return (
+        isinstance(result, CheckResult)
+        and result.status in _FAILING
+        and state.miss_full_wait is False
+    )
+
+
+def _overrun_result(result, state: WalkState) -> CheckResult:
+    """A step past its time limit, or a miss decided with no time left.
+
+    A miss decided with no time left is NOT_RUN (inconclusive) and keeps its freeze, so the walk
+    stops on the same org. A failure decided with time still left, or a frozen result, is kept
+    with a note. A PASS or NOT_RUN past the limit becomes NOT_RUN.
+    """
+    if _miss_without_time(result, state):
+        return CheckResult("NOT_RUN", f"{OUT_OF_TIME_NOTE} {result.note or ''}".strip(), (), freeze=True)
     if isinstance(result, CheckResult) and (result.freeze or result.status not in ("PASS", "NOT_RUN")):
         return replace(result, note=f"{result.note or ''} {_RAN_PAST_NOTE}".strip())
     return CheckResult("NOT_RUN", OVERRUN_NOTE, ())
@@ -6187,14 +6322,17 @@ def walk_guide(
             password_form = None
             check = find_check(step, catalog)
         state.popup_notes = []
-        dialogs_before = _track_guide_dialogs(state, None, None)
+        state.miss_full_wait = None
+        state.step_notes = []
+        if skipped is None:
+            _forget_closed_dialogs(state)
         state.step_deadline = t_start + step_cap_s
         try:
             if skipped is None:
                 result = check.run(state, step) if check is not None else attempt_step(state, step)
                 t_elapsed = _clock() - t_start
-                if t_elapsed > step_cap_s:
-                    result = _overrun_result(result)
+                if t_elapsed > step_cap_s or _miss_without_time(result, state):
+                    result = _overrun_result(result, state)
         except StillLoading:
             result = CheckResult("NOT_RUN", LOADING_NOTE, ())
         except Exception as exc:
@@ -6217,13 +6355,16 @@ def walk_guide(
             )
         popup_notes = list(state.popup_notes)
         state.step_deadline = None
+        if state.step_notes and result.status != "PASS":
+            # A triage note only; it never changes the status.
+            result = replace(result, note=" ".join([result.note or "", *state.step_notes]).strip())
         if popup_notes:
             # Closing is never evidence: the status comes from the resumed action only.
             result = replace(
                 result, note=" ".join([*popup_notes, result.note or ""]).strip(),
             )
         if skipped is None:
-            _track_guide_dialogs(state, dialogs_before, result)
+            _forget_closed_dialogs(state)
         t_end = _clock()
         if snapshot_dir is not None and result.status in SNAPSHOT_STATUSES:
             # A snapshot never changes the status and never stops the walk.
