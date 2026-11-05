@@ -224,7 +224,8 @@ class Loc:
         focus moves into it unless page.focus_inside is False.
         """
         if script is guide_walk._VISIBLE_LINES_JS:
-            return {"text": str(self.inner_text() or ""), "parts": []}
+            text = str(self.inner_text() or "")
+            return {"text": text, "total": len("".join(text.split())), "parts": []}
         if script is guide_walk._FOCUS_INSIDE_JS:
             return getattr(self.page, "focus_inside", True)
         if "tagName" in script:

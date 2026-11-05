@@ -4194,11 +4194,15 @@ def _resource_is_variable(page) -> bool:
 
 
 # The option's text as the browser renders it (element.innerText: layout-aware, a soft wrap never
-# splits a line, and text Lightning's custom elements render is included), plus its screen-reader-only
-# or hidden parts (.slds-assistive-text, aria-hidden="true", a 1px clipped box) that innerText really
-# holds. A text node counts only when it is rendered: it has a box and its parent is visible. Each
-# part carries its place: "start" is the count of non-space characters of rendered text before it,
-# and "size" its own; "total" is the count for the whole option, to check against innerText.
+# splits a line, and text Lightning's custom elements render is included), plus its truly invisible
+# parts that innerText still holds: .slds-assistive-text, or a box of 1px or less clipped with
+# clip: rect(0 0 0 0) or clip-path: inset(50%). aria-hidden="true" text is seen by the eye, so it is
+# ordinary text. A text node counts only when it is rendered: it has a box and its parent is visible.
+# Each part carries its place: "start" is the count of non-space characters of rendered text before
+# it, and "size" its own; "total" is the count for the whole option, to check against innerText.
+# "unclear" is set when the option holds text the reader cannot classify: text of its own inside a
+# shadow root (innerText never shows it), or rendered text outside a part that is off-screen, at
+# opacity 0, at font size 0, or in a fully transparent colour.
 _VISIBLE_LINES_JS = r"""
 (el) => {
   const clipped = (style) =>
@@ -4215,6 +4219,18 @@ _VISIBLE_LINES_JS = r"""
     range.selectNodeContents(node);
     return range.getClientRects().length > 0;
   };
+  let unclear = false;
+  const shadowText = (host) => {
+    try {
+      const walk = document.createTreeWalker(host.shadowRoot, NodeFilter.SHOW_TEXT);
+      for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+        if (node.data.trim()) return true;
+      }
+      return false;
+    } catch (error) {
+      return true;
+    }
+  };
   const runs = [];
   let total = 0;
   const texts = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
@@ -4226,9 +4242,10 @@ _VISIBLE_LINES_JS = r"""
   }
   const parts = [];
   const elements = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+  if (el.shadowRoot && shadowText(el)) unclear = true;
   for (let at = elements.nextNode(); at; at = elements.nextNode()) {
-    const quiet = at.classList.contains("slds-assistive-text") || at.getAttribute("aria-hidden") === "true";
-    if (!quiet && !tiny(at)) continue;
+    if (at.shadowRoot && shadowText(at)) unclear = true;
+    if (!at.classList.contains("slds-assistive-text") && !tiny(at)) continue;
     const own = runs.filter((run) => at.contains(run.node));
     if (!own.length) continue;  // not rendered: innerText does not hold it
     const nested = parts.some((part) => part.node.contains(at));
@@ -4236,9 +4253,29 @@ _VISIBLE_LINES_JS = r"""
     if (!text && !nested) continue;
     parts.push({ node: at, text, nested, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
   }
+  const box = el.getBoundingClientRect();
+  const onScreen = box.right > 0 && box.bottom > 0 && box.left < innerWidth && box.top < innerHeight;
+  const faint = (at) => {
+    const style = getComputedStyle(at);
+    if (parseFloat(style.fontSize) === 0) return true;
+    return style.color === "transparent" || /^rgba\([^)]*,\s*0(\.0+)?\)$/.test(style.color);
+  };
+  for (const run of runs) {
+    if (parts.some((part) => part.node.contains(run.node))) continue;
+    const range = document.createRange();
+    range.selectNodeContents(run.node);
+    const at = range.getBoundingClientRect();
+    if (at.left + scrollX < -1000 || at.top + scrollY < -1000) unclear = true;
+    if (onScreen && (at.right <= 0 || at.bottom <= 0 || at.left >= innerWidth || at.top >= innerHeight)) unclear = true;
+    if (faint(run.node.parentElement)) unclear = true;
+    for (let up = run.node.parentElement; up; up = up === el ? null : up.parentElement) {
+      if (getComputedStyle(up).opacity === "0") unclear = true;
+    }
+  }
   return {
     text: String(el.innerText || ""),
     total,
+    unclear,
     parts: parts.map(({ text, nested, start, size }) => ({ text, nested, start, size })),
   };
 }
@@ -4252,14 +4289,15 @@ def _squeezed(value: str) -> int:
 def _option_lines(option) -> list[str]:
     """The option's visible, non-empty lines, from the browser's own innerText. Fails closed.
 
-    A rendered screen-reader-only or hidden part is removed only when it is the option's leading
-    content (it starts where earlier removed leading parts end) or its trailing content (it ends
-    at the option's end), and its text exactly fills, prefixes or suffixes the first or last line
-    there ("Record varSample" reads "varSample"). Any other rendered hidden part (in the middle,
-    nested in another, holding a line break, or not lining up, or places that do not add up to
-    innerText) makes the option unreadable: no lines, so it never matches and nothing is clicked.
-    Hidden text is never kept. A part that is not rendered is not in innerText and is ignored.
-    Nothing is invented: with no line left there is no label.
+    A truly invisible part (.slds-assistive-text, or a clipped 1px box) is removed only when it is
+    the option's leading content (it starts where earlier removed leading parts end) or its
+    trailing content (it ends at the option's end), and its text exactly fills, prefixes or
+    suffixes the first or last line there ("Record varSample" reads "varSample"). aria-hidden text
+    is seen, so it stays. Any other invisible part (in the middle, nested in another, holding a
+    line break, or not lining up), text the page script could not classify (shadow root text,
+    off-screen, opacity 0, font size 0, transparent), or places that do not add up to innerText
+    make the option unreadable: no lines, so it never matches and nothing is clicked. A part that
+    is not rendered is not in innerText and is ignored. Nothing is invented.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
@@ -4280,10 +4318,10 @@ def _option_lines(option) -> list[str]:
         ):
             return []
         parts.append((_plain(own), start, size))
+    if raw.get("unclear") or raw.get("total") != _squeezed(text):
+        return []  # text the reader cannot classify, or places that do not add up to innerText
     if not parts:
         return lines
-    if raw.get("total") != _squeezed(text):
-        return []  # the places do not add up to innerText
     front, back = 0, raw["total"]
     parts.sort(key=lambda part: part[1])
     while parts and parts[0][1] == front and lines:

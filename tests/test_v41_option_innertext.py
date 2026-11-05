@@ -102,9 +102,9 @@ def new_resource_html(options):
 """
 
 
-def lookup_html(option_html):
+def lookup_html(option_html, css=ASSISTIVE_CSS):
     """The guide's own Sample Screen dialog with a Record Variable lookup whose list is open."""
-    return f"""{ASSISTIVE_CSS}
+    return f"""{css}
 <div id="dlg" role="dialog" aria-modal="true" aria-labelledby="t">
   <h2 id="t">Sample Screen</h2>
   <label for="rv">Record Variable</label>
@@ -192,6 +192,8 @@ class OptionLinesTests(unittest.TestCase):
 
     def test_places_that_do_not_match_inner_text_make_the_option_unreadable(self):
         self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", 0)], total=99), [])
+        self.assertEqual(self.lines("varSampleRec", [], total=99), [])
+        self.assertEqual(self.lines("varSampleRec", []), ["varSampleRec"])
 
     def test_hidden_part_in_the_middle_makes_the_option_unreadable(self):
         self.assertEqual(self.lines("Contact Account", [("tact", 3)]), [])
@@ -275,15 +277,16 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
         page = self.open(lookup_html('<span class="slds-assistive-text">Record</span><strong>Record Sample</strong>'))
         self.assertEqual(guide_walk._option_lines(page.locator("#opt1")), ["Record Sample"])
 
-    def test_icon_line_then_assistive_line_are_both_dropped_and_the_option_is_picked(self):
+    def test_visible_icon_line_then_assistive_line_is_unreadable(self):
+        # aria-hidden text is seen, so the assistive part sits in the middle: fail closed.
         inner = ('<span aria-hidden="true" style="display:block">Sample Icon</span>'
                  '<span class="slds-assistive-text">Record</span><strong>varSampleRec</strong>')
         page = self.open(lookup_html(inner))
-        self.assertEqual(guide_walk._option_lines(page.locator("#opt1")), ["varSampleRec"])
+        self.assertEqual(guide_walk._option_lines(page.locator("#opt1")), [])
 
-    def pick(self, option_html, value):
+    def pick(self, option_html, value, css=ASSISTIVE_CSS):
         """Fill the Record Variable lookup with VALUE in the guide's own Sample Screen dialog."""
-        page = self.open(lookup_html(option_html))
+        page = self.open(lookup_html(option_html, css))
         state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=1.5, page_poll_s=0.2)
         guide_walk._open_guide_dialog(state, "Sample Screen")
         return guide_walk.attempt_step(state, make_step("rv", f"Record Variable: {value}"))
@@ -297,9 +300,18 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
         self.assertEqual(guide_walk._option_label(self.page.locator("#opt1")), "Contact")
         self.assertEqual(guide_walk._option_lines(self.page.locator("#opt1")), ["Contact", "Account"])
 
-    def test_trailing_hidden_duplicate_removes_only_its_own_line(self):
+    def test_trailing_aria_hidden_duplicate_is_seen_and_kept(self):
+        # aria-hidden text is visible to the eye: its line stays, and the label is still Contact.
         inner = ('<span style="display:block">Contact</span><span style="display:block">Account</span>'
                  '<span aria-hidden="true" style="display:block">Contact</span>')
+        result = self.pick(inner, "Account")
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_lines(self.page.locator("#opt1")), ["Contact", "Account", "Contact"])
+
+    def test_trailing_assistive_duplicate_removes_only_its_own_line(self):
+        inner = ('<span style="display:block">Contact</span><span style="display:block">Account</span>'
+                 '<span class="slds-assistive-text">Contact</span>')
         result = self.pick(inner, "Account")
         self.assertNotEqual(result.status, "PASS", result.note)
         self.assertEqual(self.page.evaluate("window.chosen"), [])
@@ -322,8 +334,8 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
                          'Recording <span class="slds-assistive-text">Record</span></div></div>')
         self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Recording"])
 
-    def assert_unreadable_and_not_clicked(self, inner, value):
-        result = self.pick(inner, value)
+    def assert_unreadable_and_not_clicked(self, inner, value, css=ASSISTIVE_CSS):
+        result = self.pick(inner, value, css)
         self.assertEqual(result.status, "UI_MISMATCH", result.note)
         self.assertTrue(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), [])
@@ -336,6 +348,10 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
         # The fixture really shifts the count: the uppercase sharp s renders as two letters.
         self.assertIn("VAROTHERSS", self.page.locator("#opt1").evaluate("el => el.innerText"))
 
+    def test_totals_that_do_not_add_up_fail_closed_without_any_hidden_part(self):
+        self.assert_unreadable_and_not_clicked(
+            '<strong style="text-transform:uppercase">varOther&szlig;</strong>', "VAROTHERSS")
+
     def test_hidden_part_with_a_line_break_is_never_clicked(self):
         self.assert_unreadable_and_not_clicked(
             '<span class="slds-assistive-text">varSampleRec<br>x</span>varOtherRec', "varSampleRec")
@@ -346,19 +362,53 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
             "varSampleRec")
 
     def test_inline_nested_hidden_part_is_never_clicked(self):
-        # No line break here: only the nested part makes the option unreadable.
+        # No stylesheet, so no line break: only the nested part makes the option unreadable.
         self.assert_unreadable_and_not_clicked(
-            '<span aria-hidden="true">varSampleRec<span aria-hidden="true">x</span></span>varOtherRec',
-            "varOtherRec")
+            '<span class="slds-assistive-text">varSampleRec<span class="slds-assistive-text">x</span></span>'
+            'varOtherRec', "varOtherRec", css="")
+
+    def test_aria_hidden_trailing_text_is_seen_and_never_clicked(self):
+        result = self.pick('Account <span aria-hidden="true">Contact</span>', "Account")
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_label(self.page.locator("#opt1")), "Account Contact")
+
+    def test_aria_hidden_leading_text_is_seen_and_never_clicked(self):
+        result = self.pick('<span aria-hidden="true">Big</span> Account', "Account")
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_label(self.page.locator("#opt1")), "Big Account")
+
+    def test_off_screen_text_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<span style="position:absolute; left:-9999px">Record</span><strong>varSampleRec</strong>', "Record")
+
+    def test_shadow_root_text_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<span id="sh"></span>Contact<script>document.getElementById("sh")'
+            '.attachShadow({mode: "open"}).innerHTML = "Account ";</script>', "Contact")
+        self.assertEqual(self.page.locator("#opt1").evaluate("el => el.innerText").strip(), "Contact")
+
+    def test_invisible_styles_make_the_option_unreadable(self):
+        for style in ("opacity:0", "font-size:0", "color:transparent", "color:rgba(0, 0, 0, 0)"):
+            with self.subTest(style):
+                self.assert_unreadable_and_not_clicked(
+                    f'<span style="{style}">Record</span>varSampleRec', "varSampleRec")
+
+    def test_clip_path_assistive_text_is_removed_and_the_option_is_picked(self):
+        inner = ('<span style="position:absolute; width:1px; height:1px; overflow:hidden; clip-path:inset(50%)">'
+                 'Record</span><strong>varSampleRec</strong>')
+        page = self.open(lookup_html(inner))
+        self.assertEqual(guide_walk._option_lines(page.locator("#opt1")), ["varSampleRec"])
 
     def test_hidden_part_in_the_middle_of_a_label_is_never_clicked(self):
         self.assert_unreadable_and_not_clicked('Con<span class="slds-assistive-text">tact</span> Account', "Con")
 
-    def test_visible_aria_hidden_line_is_dropped(self):
+    def test_visible_aria_hidden_line_is_kept(self):
         page = self.open('<div role="listbox"><div role="option" id="o">'
                          '<span aria-hidden="true" style="display:block">Sample Icon</span>'
                          '<span style="display:block">Variable</span></div></div>')
-        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Variable"])
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Sample Icon", "Variable"])
 
     def test_resource_type_miss_saves_the_option_structure_with_no_text(self):
         def pick(state, item):
