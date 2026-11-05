@@ -129,11 +129,11 @@ class WalkState:
     miss_full_wait: dict[str, bool] = field(default_factory=dict)
     # Per step: triage notes added to the step result (never PASS evidence).
     step_notes: list[str] = field(default_factory=list)
-    # Per step: (normalized label, note) of the last lookup poll that found its list but no
-    # option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
+    # Per step: (normalized label, note, list scope) of the last lookup poll that found its list
+    # but no option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
     lookup_miss: tuple = ()
-    # Per step: on a lookup or Resource Type miss, up to 3 options' structures with no text
-    # (_option_shapes), saved into the failure snapshot so the next miss shows the real DOM.
+    # Per step: when a lookup or Resource Type miss freezes, up to 3 options' structures with no
+    # text (_option_shapes), saved into the failure snapshot so the next miss shows the real DOM.
     option_shapes: list = field(default_factory=list)
 
 
@@ -4194,10 +4194,11 @@ def _resource_is_variable(page) -> bool:
 
 
 # The option's text as the browser renders it (element.innerText: layout-aware, a soft wrap never
-# splits a line, and text Lightning's custom elements render is included), plus the texts of its
-# screen-reader-only or hidden parts (.slds-assistive-text, aria-hidden="true", a 1px clipped box).
-# "leading" marks a part with no other text before it in the option: it may sit inline at the
-# start of the label line.
+# splits a line, and text Lightning's custom elements render is included), plus its screen-reader-only
+# or hidden parts (.slds-assistive-text, aria-hidden="true", a 1px clipped box) that innerText really
+# holds. A text node counts only when it is rendered: it has a box and its parent is visible. Each
+# part carries its place: "start" is the count of non-space characters of rendered text before it,
+# and "size" its own; "total" is the count for the whole option, to check against innerText.
 _VISIBLE_LINES_JS = r"""
 (el) => {
   const clipped = (style) =>
@@ -4206,30 +4207,56 @@ _VISIBLE_LINES_JS = r"""
     const box = at.getBoundingClientRect();
     return box.width <= 1 && box.height <= 1 && clipped(getComputedStyle(at));
   };
+  const squeeze = (value) => value.replace(/\s+/g, "").length;
+  const rendered = (node) => {
+    const parent = node.parentElement;
+    if (!parent || getComputedStyle(parent).visibility !== "visible") return false;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return range.getClientRects().length > 0;
+  };
+  const runs = [];
+  let total = 0;
+  const texts = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+    const size = squeeze(node.data);
+    if (!size || !rendered(node)) continue;
+    runs.push({ node, start: total, size });
+    total += size;
+  }
   const parts = [];
-  for (const at of el.querySelectorAll("*")) {
+  const elements = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+  for (let at = elements.nextNode(); at; at = elements.nextNode()) {
     const quiet = at.classList.contains("slds-assistive-text") || at.getAttribute("aria-hidden") === "true";
     if (!quiet && !tiny(at)) continue;
-    if (at.parentElement && at.parentElement !== el && parts.some((part) => part.node.contains(at))) continue;
-    const text = String(at.innerText || at.textContent || "").trim();
+    if (parts.some((part) => part.node.contains(at))) continue;
+    const own = runs.filter((run) => at.contains(run.node));
+    if (!own.length) continue;  // not rendered: innerText does not hold it
+    const text = String(at.innerText || "").trim();
     if (!text) continue;
-    const before = document.createRange();
-    before.setStart(el, 0);
-    before.setEndBefore(at);
-    parts.push({ node: at, text, leading: before.toString().trim() === "" });
+    parts.push({ node: at, text, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
   }
-  return { text: String(el.innerText || ""), parts: parts.map(({ text, leading }) => ({ text, leading })) };
+  return {
+    text: String(el.innerText || ""),
+    total,
+    parts: parts.map(({ text, start, size }) => ({ text, start, size })),
+  };
 }
 """
+
+
+def _squeezed(value: str) -> int:
+    return len("".join(str(value or "").split()))
 
 
 def _option_lines(option) -> list[str]:
     """The option's visible, non-empty lines, from the browser's own innerText.
 
-    A line that is exactly the text of a screen-reader-only or hidden part is dropped. A leading
-    such part that shares the first line with the label is cut off its start ("Record varSample"
-    reads "varSample"). Nothing is invented: with no line left there is no label.
-    An option that cannot be read in the browser has no lines, so it never matches.
+    A rendered screen-reader-only or hidden part removes only its own place: the line it fills
+    is dropped, or, when it starts a line and the line starts with its text, that text is cut
+    ("Record varSample" reads "varSample"). A part that is not rendered is not in innerText and
+    removes nothing. When the places cannot be matched to innerText nothing is removed. Nothing
+    is invented: with no line left there is no label. An option that cannot be read has no lines.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
@@ -4237,26 +4264,30 @@ def _option_lines(option) -> list[str]:
         return []
     if not isinstance(raw, dict):
         return []
-    parts = [
-        (_plain(item.get("text")), bool(item.get("leading")))
-        for item in raw.get("parts") or () if isinstance(item, dict)
-    ]
-    parts = [(text, leading) for text, leading in parts if text]
-    lines = [line for line in (_plain(item) for item in str(raw.get("text") or "").split("\n")) if line]
-    kept = []
-    hidden = {text for text, _leading in parts}
+    lines = [_plain(item) for item in str(raw.get("text") or "").split("\n")]
+    spans, at = [], 0
     for line in lines:
-        if line in hidden:
-            hidden.discard(line)  # this part had its own line; it is gone
+        spans.append((at, _squeezed(line)))
+        at += spans[-1][1]
+    parts = []
+    for item in raw.get("parts") or ():
+        if not isinstance(item, dict):
             continue
-        kept.append(line)
-    inline = [text for text, leading in parts if leading and text in hidden]
-    if kept:
-        for text in inline:
-            if kept[0].startswith(text):
-                kept[0] = _plain(kept[0][len(text):])
-                break
-    return [line for line in kept if line]
+        text, start, size = _plain(item.get("text")), item.get("start"), item.get("size")
+        if text and isinstance(start, int) and isinstance(size, int) and size == _squeezed(text):
+            parts.append((text, start, size))
+    if raw.get("total") != at:
+        parts = []  # the places do not match innerText: remove nothing
+    for text, start, size in parts:
+        index = next((i for i, (first, count) in enumerate(spans) if first <= start < first + count), None)
+        if index is None or spans[index][0] != start:
+            continue  # the part does not start a line: it is left in place
+        line = lines[index]
+        if line.startswith(text):
+            # The part's text starts this line: cut it. A part that fills the line drops it.
+            lines[index] = _plain(line[len(text):])
+            spans[index] = (start + size, spans[index][1] - size)
+    return [line for line in lines if line]
 
 
 def _option_label(option) -> str:
@@ -4572,6 +4603,8 @@ def _lookup_miss_result(state: WalkState, target: str) -> CheckResult | None:
     """At the time limit: the last lookup poll's miss, as the step's frozen UI_MISMATCH."""
     if not state.lookup_miss or state.lookup_miss[0] != norm(target):
         return None
+    # Read once, when the miss freezes: the structure of the options that were in scope.
+    state.option_shapes = _option_shapes(state.lookup_miss[2] if len(state.lookup_miss) > 2 else None)
     return CheckResult("UI_MISMATCH", state.lookup_miss[1], (), freeze=True)
 
 
@@ -4610,8 +4643,9 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         picks = _matching_options(root, box, want, empty_falls_back=True)
     if not picks:
         # Not yet: the caller keeps polling. What was in scope is kept for the time limit.
-        state.lookup_miss = (norm(label), _lookup_miss_note(root, box, label, want))
-        state.option_shapes = _option_shapes(_owned_scope(root, box, empty_falls_back=True)[1])
+        state.lookup_miss = (
+            norm(label), _lookup_miss_note(root, box, label, want), _owned_scope(root, box, empty_falls_back=True)[1],
+        )
         return None
     if len(picks) > 1:
         return CheckResult(

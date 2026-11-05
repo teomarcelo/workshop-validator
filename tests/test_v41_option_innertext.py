@@ -148,41 +148,54 @@ def lengths_in(shape):
 
 
 class OptionLinesTests(unittest.TestCase):
-    """The line rules on the browser's reply, with no browser."""
+    """The line rules on the browser's reply, with no browser. A part is (text, start): start is
+    the count of non-space characters before it, as the browser reports it."""
 
     class _Option:
-        def __init__(self, text, parts=()):
-            self.reply = {"text": text, "parts": [{"text": t, "leading": lead} for t, lead in parts]}
+        def __init__(self, text, parts=(), total=None):
+            squeeze = lambda value: len("".join(value.split()))  # noqa: E731
+            self.reply = {
+                "text": text,
+                "total": squeeze(text) if total is None else total,
+                "parts": [{"text": t, "start": start, "size": squeeze(t)} for t, start in parts],
+            }
 
         def evaluate(self, script, arg=None):
             if script is guide_walk._VISIBLE_LINES_JS:
                 return self.reply
             raise NotImplementedError(script)
 
-    def lines(self, text, parts=()):
-        return guide_walk._option_lines(self._Option(text, parts))
+    def lines(self, text, parts=(), total=None):
+        return guide_walk._option_lines(self._Option(text, parts, total))
 
     def test_line_that_is_only_assistive_text_is_dropped(self):
-        self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", True)]), ["varSampleRec"])
+        self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", 0)]), ["varSampleRec"])
 
-    def test_assistive_lines_that_are_not_leading_are_dropped(self):
-        self.assertEqual(self.lines("Sample Icon\nRecord\nvarSampleRec", [("Sample Icon", True), ("Record", False)]),
+    def test_assistive_lines_after_other_text_are_dropped(self):
+        self.assertEqual(self.lines("Sample Icon\nRecord\nvarSampleRec", [("Sample Icon", 0), ("Record", 10)]),
                          ["varSampleRec"])
-        self.assertEqual(self.lines("Variable\nRecord", [("Record", False)]), ["Variable"])
+        self.assertEqual(self.lines("Variable\nRecord", [("Record", 8)]), ["Variable"])
+
+    def test_only_the_parts_own_line_is_dropped(self):
+        self.assertEqual(self.lines("Contact\nAccount\nContact", [("Contact", 14)]), ["Contact", "Account"])
 
     def test_leading_inline_assistive_text_is_cut_from_the_label_line(self):
-        self.assertEqual(self.lines("Record varSampleRec\nSample row", [("Record", True)]),
+        self.assertEqual(self.lines("Record varSampleRec\nSample row", [("Record", 0)]),
                          ["varSampleRec", "Sample row"])
 
     def test_assistive_text_on_its_own_line_is_not_also_cut_from_the_label(self):
-        self.assertEqual(self.lines("Record\nRecord Sample", [("Record", True)]), ["Record Sample"])
+        self.assertEqual(self.lines("Record\nRecord Sample", [("Record", 0)]), ["Record Sample"])
 
-    def test_text_that_is_not_leading_is_never_cut(self):
-        self.assertEqual(self.lines("Recording Record", [("Record", False)]), ["Recording Record"])
+    def test_text_that_does_not_start_a_line_is_never_cut(self):
+        self.assertEqual(self.lines("Recording Record", [("Record", 9)]), ["Recording Record"])
+
+    def test_places_that_do_not_match_inner_text_remove_nothing(self):
+        self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", 0)], total=99),
+                         ["Record", "varSampleRec"])
 
     def test_no_label_is_invented(self):
-        self.assertEqual(self.lines("Record", [("Record", True)]), [])
-        self.assertEqual(guide_walk._option_label(self._Option("Record", [("Record", True)])), "")
+        self.assertEqual(self.lines("Record", [("Record", 0)]), [])
+        self.assertEqual(guide_walk._option_label(self._Option("Record", [("Record", 0)])), "")
         self.assertEqual(guide_walk._option_label(self._Option("\n\nVariable\nSample")), "Variable")
 
     def test_unexpected_reply_has_no_lines(self):
@@ -252,6 +265,47 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
                  '<span class="slds-assistive-text">Record</span><strong>varSampleRec</strong>')
         page = self.open(lookup_html(inner))
         self.assertEqual(guide_walk._option_lines(page.locator("#opt1")), ["varSampleRec"])
+
+    def pick(self, option_html, value):
+        """Fill the Record Variable lookup with VALUE in the guide's own Sample Screen dialog."""
+        page = self.open(lookup_html(option_html))
+        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=1.5, page_poll_s=0.2)
+        guide_walk._open_guide_dialog(state, "Sample Screen")
+        return guide_walk.attempt_step(state, make_step("rv", f"Record Variable: {value}"))
+
+    def test_unrendered_hidden_duplicate_never_removes_the_visible_label(self):
+        inner = ('<span aria-hidden="true" style="display:none">Contact</span>'
+                 '<span style="display:block">Contact</span><span style="display:block">Account</span>')
+        result = self.pick(inner, "Account")
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_label(self.page.locator("#opt1")), "Contact")
+        self.assertEqual(guide_walk._option_lines(self.page.locator("#opt1")), ["Contact", "Account"])
+
+    def test_trailing_hidden_duplicate_removes_only_its_own_line(self):
+        inner = ('<span style="display:block">Contact</span><span style="display:block">Account</span>'
+                 '<span aria-hidden="true" style="display:block">Contact</span>')
+        result = self.pick(inner, "Account")
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_lines(self.page.locator("#opt1")), ["Contact", "Account"])
+
+    def test_unrendered_hidden_prefix_is_never_cut_from_the_label(self):
+        page = self.open('<div role="listbox"><div role="option" id="o">'
+                         '<span aria-hidden="true" style="display:none">Acc</span>Account</div></div>')
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Account"])
+        self.assertEqual(guide_walk._option_label(page.locator("#o")), "Account")
+
+    def test_assistive_line_is_dropped_next_to_unrendered_hidden_text(self):
+        page = self.open(ASSISTIVE_CSS + '<div role="listbox"><div role="option" id="o">'
+                         '<span aria-hidden="true" style="display:none">Sample Icon</span>'
+                         '<span class="slds-assistive-text">Record</span><strong>varSampleRec</strong></div></div>')
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["varSampleRec"])
+
+    def test_hidden_text_that_does_not_start_the_line_is_never_cut(self):
+        page = self.open('<div role="listbox"><div role="option" id="o">'
+                         'Recording <span class="slds-assistive-text">Record</span></div></div>')
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Recording Record"])
 
     def test_visible_aria_hidden_line_is_dropped(self):
         page = self.open('<div role="listbox"><div role="option" id="o">'
