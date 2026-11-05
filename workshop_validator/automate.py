@@ -151,11 +151,20 @@ def load_aliases(root: Path) -> dict[str, str]:
     }
 
 
+def gate_floor(gate: dict) -> int:
+    """W-099: the lowest org index a run may use. A claim sets it to the new org's
+    0-based index, so retired orgs (W-098) below it are never used again. No floor is 0."""
+    floor = gate.get("floor")
+    if isinstance(floor, bool) or not isinstance(floor, int) or floor < 0:
+        return 0
+    return floor
+
+
 def next_org_index(gate: dict) -> int | None:
-    """Return the org to run, or None while a freeze waits for a verified fix."""
+    """Return the org to run, or None while a freeze waits for a verified fix. Never below the floor."""
     if gate.get("frozen"):
         return None
-    return int(gate.get("org") or 0)
+    return max(int(gate.get("org") or 0), gate_floor(gate))
 
 
 def outcome_of(result) -> tuple[str, str]:
@@ -394,13 +403,17 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
     # Inconclusive runs keep it. The org decision judges the stopping step only.
     gate_outcome = gate_outcome_of(result)
     used = gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
-    save_gate(private_root, {
-        "org": index + 1 if used else index,
-        "frozen": outcome != SUCCESS,
-        "reason": reason,
-        "last_outcome": outcome,
-        "last_run": run_id,
-    })
+    def finish(gate: dict) -> None:
+        # Read-modify-write under the gate lock: a claim that ran during this walk
+        # keeps its floor and pointer (W-099), and keys this run does not own stay.
+        gate.update({
+            "org": max(index + 1 if used else index, gate_floor(gate)),
+            "frozen": outcome != SUCCESS,
+            "reason": reason,
+            "last_outcome": outcome,
+            "last_run": run_id,
+        })
+    update_gate(private_root, finish)
     summary = {**_summary(result, index, len(orgs), outcome, reason, output), "guide_name": guide.name}
     history_path = append_history(private_root, {"run_id": run_id, "guide": guide.name, **summary})
     _write_private(output / "summary.json", json.dumps(summary, indent=2) + "\n")
@@ -425,7 +438,7 @@ def reset_gate(private_root: Path) -> int:
         gate["frozen"] = False
         gate["reason"] = ""
     gate = update_gate(private_root, unfreeze)
-    print(f"Gate open. Next run uses org {int(gate.get('org') or 0) + 1}.")
+    print(f"Gate open. Next run uses org {max(int(gate.get('org') or 0), gate_floor(gate)) + 1}.")
     return 0
 
 
@@ -520,6 +533,8 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         return refuse(f"stop step {stop} is {'/'.join(sorted(found or ())) or 'not verified'}, "
                       "not FALSE_FAILURE")
     run_index = summary["org"] - 1
+    if run_index < gate_floor(gate):
+        return refuse("that run used a retired org (W-098)")
     if gate.get("org") != run_index + 1:
         return refuse(f"the gate is not on the org right after org {run_index + 1}")
     gate.update({

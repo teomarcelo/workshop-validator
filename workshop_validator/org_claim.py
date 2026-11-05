@@ -14,9 +14,15 @@ Modes:
   the username and password by label, and append one org to
   ``verification-orgs.json``. W-097: allowed whenever the owner's code is set
   in org-claim.json. Only one claim runs at a time (a non-blocking lock held
-  for the whole claim), and one event code is tried at most 3 times. Only a
-  username that was not on the page before submit and is not in the org file
-  is saved. W-098: the org gate then points at the new org (a freeze stays).
+  for the whole claim). Each event code (kept as its SHA-256) is CLAIMED at
+  most once and submitted at most 3 times; a try counts only at the submit
+  click. Only a username that was not on the page before submit and is not in
+  the org file is saved. W-098, W-099: the org gate then points at the new org
+  and its floor, so the retired orgs below it are never used again (a freeze
+  stays).
+* ``--repoint``: when the last claim ended CLAIMED but the gate step failed,
+  point the gate (and floor) at the last org in the org file. Refused unless
+  the marker says CLAIMED and the gate floor is lower.
 * ``--guides``: download the exercise-guide PDFs linked on the portal into
   ``team/guide-inbox/``.
 
@@ -43,7 +49,7 @@ import sys
 import tempfile
 import time
 
-from .automate import ORGS_NAME, load_gate, load_orgs, update_gate
+from .automate import ORGS_NAME, gate_floor, load_gate, load_orgs, update_gate
 
 CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
@@ -51,7 +57,8 @@ ATTEMPT = Path("team") / "claim-attempt"
 RUN_LOCK = Path("team") / ".claim-run.lock"
 MAX_ATTEMPTS = 3
 LEFT_PORTAL = "left the https portal"
-ATTEMPT_REFUSED = "a claim was already tried for this run"
+MARKER_REFUSED = "the claim marker could not be read"
+CLAIMED_REFUSED = "this event code was already claimed"
 RUNNING_REFUSED = "another claim is running"
 CAP_REFUSED = f"this event code was already tried {MAX_ATTEMPTS} times"
 
@@ -72,6 +79,10 @@ class ClaimError(Exception):
 
 class ClaimRefused(ClaimError):
     """The claim was refused before anything was submitted (exit 2)."""
+
+
+class GateNotUpdated(Exception):
+    """The org was claimed and saved, but the gate step failed (exit 3). The message is safe."""
 
 
 # ---------------------------------------------------------------- HTML model
@@ -422,37 +433,63 @@ def claim_run_lock(root: Path):
         os.close(fd)
 
 
-def reserve_attempt(root: Path, code: str) -> dict:
-    """Record a new attempt before the browser opens. The caller holds claim_run_lock.
-
-    Refused (ClaimRefused) when the marker is unreadable, when this run already
-    ended CLAIMED, or when this event code was tried MAX_ATTEMPTS times. A marker
-    that ended any other way does not block (W-097). Returns the marker written.
-    """
+def _read_marker(root: Path) -> dict | None:
+    """The claim marker, {} when there is none, None when it cannot be read."""
     path = _attempt_path(root)
+    if not path.exists():
+        return {}
+    try:
+        marker = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return marker if isinstance(marker, dict) else None
+
+
+def _claimed_digests(marker: dict) -> set[str]:
+    claimed = marker.get("claimed")
+    digests = {d for d in claimed if isinstance(d, str)} if isinstance(claimed, list) else set()
+    if marker.get("result") == "CLAIMED" and isinstance(marker.get("code_sha256"), str):
+        digests.add(marker["code_sha256"])
+    return digests
+
+
+def reserve_attempt(root: Path, code: str) -> dict:
+    """Check and record a new attempt before the browser opens. The caller holds claim_run_lock.
+
+    Refused (ClaimRefused) when the marker is unreadable, when this event code was
+    already CLAIMED, or when it was submitted MAX_ATTEMPTS times. A different code
+    can be claimed right away (W-099). No try is counted here: mark_attempt
+    ("started") counts it just before the submit click. Returns the marker written.
+    """
     run, digest = last_run_id(root), code_digest(code)
-    counts: dict = {}
-    if path.exists():
-        try:
-            marker = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            marker = None
-        if not isinstance(marker, dict):
-            raise ClaimRefused(ATTEMPT_REFUSED)  # unreadable marker: assume a claim was tried
-        if marker.get("last_run") == run and marker.get("result") == "CLAIMED":
-            raise ClaimRefused(ATTEMPT_REFUSED)
-        counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
+    marker = _read_marker(root)
+    if marker is None:
+        raise ClaimRefused(MARKER_REFUSED)  # unreadable marker: assume a claim was tried
+    claimed = _claimed_digests(marker)
+    if digest in claimed:
+        raise ClaimRefused(CLAIMED_REFUSED)
+    counts = marker.get("code_attempts") if isinstance(marker.get("code_attempts"), dict) else {}
     tried = counts.get(digest, 0)
     if not isinstance(tried, int) or isinstance(tried, bool) or tried >= MAX_ATTEMPTS:
         raise ClaimRefused(CAP_REFUSED)
-    counts = {**counts, digest: tried + 1}
-    marker = {"last_run": run, "result": "started", "code_sha256": digest, "code_attempts": counts}
-    _atomic_write(path, json.dumps(marker) + "\n")
+    marker = {"last_run": run, "result": "reserved", "code_sha256": digest,
+              "code_attempts": dict(counts), "claimed": sorted(claimed)}
+    _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
     return marker
 
 
 def mark_attempt(root: Path, marker: dict, result: str) -> None:
-    _atomic_write(_attempt_path(root), json.dumps({**marker, "result": result}) + "\n")
+    """Record a result. "started" counts one try for this code; "CLAIMED" spends the code.
+    The marker dict is updated in place, so later results keep the counts."""
+    digest = marker.get("code_sha256")
+    if result == "started" and isinstance(digest, str):
+        counts = dict(marker.get("code_attempts") or {})
+        counts[digest] = int(counts.get(digest, 0)) + 1
+        marker["code_attempts"] = counts
+    elif result == "CLAIMED" and isinstance(digest, str):
+        marker["claimed"] = sorted(set(marker.get("claimed") or ()) | {digest})
+    marker["result"] = result
+    _atomic_write(_attempt_path(root), json.dumps(marker) + "\n")
 
 
 def _atomic_write(path: Path, text: str) -> None:
@@ -481,11 +518,35 @@ def append_org(root: Path, username: str, password: str) -> int:
 
 
 def point_gate_at(root: Path, number: int) -> None:
-    """W-098: the next automate run uses org `number` (1-based). automate's gate["org"] is
-    a 0-based index. Written atomically under automate's gate lock; a freeze is kept."""
+    """W-098, W-099: the next automate run uses org `number` (1-based). automate's gate["org"]
+    is a 0-based index; gate["floor"] gets the same index, so no run goes back to a retired
+    org. Written atomically under automate's gate lock; a freeze and other keys are kept."""
     def change(gate: dict) -> None:
-        gate["org"] = number - 1
+        gate["org"] = gate["floor"] = max(number - 1, gate_floor(gate))
     update_gate(Path(root), change)
+
+
+def repoint(root: Path) -> str:
+    """Point the gate (and floor) at the last org in the org file after a CLAIMED claim whose
+    gate step failed. Under the claim, org-file and gate locks. Refused unless the marker
+    says CLAIMED and the gate floor is lower than the last org."""
+    root = Path(root)
+    with claim_run_lock(root):
+        marker = _read_marker(root)
+        if not marker or marker.get("result") != "CLAIMED":
+            raise ClaimRefused("the last claim did not end CLAIMED")
+        with _org_lock(root / ORGS_NAME):
+            total = count_orgs(root)
+            if total < 1:
+                raise ClaimRefused("the org file has no org")
+
+            def change(gate: dict) -> None:
+                floor = gate.get("floor")
+                if isinstance(floor, int) and not isinstance(floor, bool) and floor >= total - 1:
+                    raise ClaimRefused("the gate floor is already at the last org")
+                gate["org"] = gate["floor"] = total - 1
+            update_gate(root, change)
+    return f"org-claim: REPOINTED gate at org {total}"
 
 
 def known_usernames(root: Path) -> set[str]:
@@ -712,7 +773,7 @@ def _claim_locked(root: Path, config: dict, code: str, marker: dict) -> str:
         _require_portal(page, portal_url)
         seen = known | usernames_on_page(_flat(page))  # earlier events on the page are never new
         _require_portal(page, portal_url)
-        mark_attempt(root, marker, "started")  # before submitting: a crash still counts
+        mark_attempt(root, marker, "started")  # the try counts here, right before submit
         page.get_by_role("button", name=form["button"], exact=True).first.click()
         _settle(page)
 
@@ -729,7 +790,10 @@ def _claim_locked(root: Path, config: dict, code: str, marker: dict) -> str:
         number = append_org(root, *creds)
         # CLAIMED before the gate step: a gate failure must never redeem the code again.
         mark_attempt(root, marker, "CLAIMED")
-        point_gate_at(root, number)
+        try:
+            point_gate_at(root, number)
+        except Exception:  # never echo it; --repoint fixes the gate later
+            raise GateNotUpdated(f"org-claim: CLAIMED org {number}, gate not updated") from None
         return f"org-claim: CLAIMED org {number}"
     return _browser(run)
 
@@ -768,12 +832,17 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--dry-run", action="store_true", help="Default. Stop at the Add Event form.")
     mode.add_argument("--claim", action="store_true", help="W-097: Submit the event code and save the new org.")
     mode.add_argument("--guides", action="store_true", help="Download linked exercise-guide PDFs.")
+    mode.add_argument("--repoint", action="store_true",
+                      help="After 'CLAIMED org N, gate not updated': point the gate at the last org.")
     parser.add_argument("--force", action="store_true",
                         help="Accepted as a no-op alias for --claim.")
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     args = parser.parse_args(argv)
     root = Path(args.private_root).expanduser()
     try:
+        if args.repoint:
+            print(repoint(root))
+            return OK
         if args.claim:
             allowed, reason = claim_allowed(root)
             if not allowed:
@@ -786,6 +855,9 @@ def main(argv: list[str] | None = None) -> int:
             line = guides(root, config)
         else:
             line = dry_run(config)
+    except GateNotUpdated as exc:
+        print(str(exc))
+        return INCONCLUSIVE
     except ClaimRefused as exc:
         print(f"org-claim: REFUSED {exc}")
         return REFUSED
