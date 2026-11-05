@@ -101,6 +101,30 @@ class SubagentActivityTests(_Base):
         self.assertEqual(self._active(), datetime.fromtimestamp(deep.stat().st_mtime, timezone.utc))
 
 
+class SessionIdPathTests(_Base):
+    """A session id that is not a plain name never reads another session's transcripts."""
+
+    def _assert_not_activity(self, sid: str) -> None:
+        self._job(STALE)
+        (self.transcripts / "prod").mkdir(exist_ok=True)  # lets "prod/.." resolve
+        main = self._subagent(f"{sid}.jsonl", NOW - timedelta(minutes=1))
+        sub = self._subagent(f"{sid}/subagents/agent-1.jsonl", NOW - timedelta(minutes=1))
+        self.assertTrue(main.is_file() and sub.is_file())
+        team_kit.claim_producer(self.team, session_id=sid, now=DAY_AGO)
+        self.assertEqual(self._active(), DAY_AGO)
+        line = self._check()
+        self.assertTrue(line.startswith(("TAKEOVER", "NUDGE")), line)
+
+    def test_parent_escape_is_not_activity(self):
+        self._assert_not_activity("../other")
+
+    def test_dotdot_inside_id_is_not_activity(self):
+        self._assert_not_activity("prod/../other")
+
+    def test_nested_id_is_not_activity(self):
+        self._assert_not_activity("a/b")
+
+
 class NoOpenJobTests(_Base):
     """Finding 2: with no open job an unrelated transcript must not mask an idle chain."""
 
