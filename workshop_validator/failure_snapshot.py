@@ -285,6 +285,7 @@ def save_failure_snapshot(
     leaks: Callable[[str], bool] | None = None,
     clock: Callable[[], float] | None = None,
     budget_s: float = BUDGET_S,
+    option_shapes: list | None = None,
 ) -> str:
     """Write the snapshot; return its path relative to RUN_DIR. Raises on a write error."""
     budget = _Budget(clock or time.monotonic, budget_s)
@@ -318,6 +319,9 @@ def save_failure_snapshot(
         "screenshot": png_href or f"unavailable ({png_error or 'empty'})",
         # Set only when a read was skipped because the cap was reached.
         "truncated": TRUNCATED_NOTE if budget.hit else "",
+        # A lookup or Resource Type miss: up to 3 options' tags, roles, classes and nesting,
+        # each text node as its length only.
+        "option_shapes": list(option_shapes or [])[:3],
     }, leaks)
     text = json.dumps(payload, indent=2)
     if leaks is not None and leaks(text):

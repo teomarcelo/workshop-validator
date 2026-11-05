@@ -129,9 +129,12 @@ class WalkState:
     miss_full_wait: dict[str, bool] = field(default_factory=dict)
     # Per step: triage notes added to the step result (never PASS evidence).
     step_notes: list[str] = field(default_factory=list)
-    # Per step: (normalized label, note) of the last lookup poll that found its list but no
-    # option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
+    # Per step: (normalized label, note, list scope) of the last lookup poll that found its list
+    # but no option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
     lookup_miss: tuple = ()
+    # Per step: when a lookup or Resource Type miss freezes, up to 3 options' structures with no
+    # text (_option_shapes), saved into the failure snapshot so the next miss shows the real DOM.
+    option_shapes: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -4190,63 +4193,261 @@ def _resource_is_variable(page) -> bool:
     return box is not None and _shown_value(box) == "Variable"
 
 
-# The option's visible lines, read like innerText: a line ends only at a hard boundary
-# (a block-level element, <br>, or a newline in preformatted text), never at a soft wrap.
-# Screen-reader-only text (.slds-assistive-text, or a tiny clipped box), aria-hidden parts
-# and parts with no rendered box are skipped.
+# The option's text as the browser renders it (element.innerText: layout-aware, a soft wrap never
+# splits a line, and text Lightning's custom elements render is included), plus its truly invisible
+# parts that innerText still holds: .slds-assistive-text, or a box of 1px or less clipped with
+# clip: rect(0 0 0 0) or clip-path: inset(50%). aria-hidden="true" text is seen by the eye, so it is
+# ordinary text. A text node counts only when it is rendered: it has a box and its parent is visible.
+# Each part carries its place: "start" is the count of non-space characters of rendered text before
+# it, and "size" its own; "total" is the count for the whole option, to check against innerText.
+# "unclear" is set when the option holds text the reader cannot classify: text of its own inside a
+# shadow root at any depth (innerText never shows it; style and script text is skipped), or rendered
+# text outside a part whose box lies wholly outside the option's own box, that is fully cut away by
+# an overflow-clipping ancestor inside the option, at opacity 0, at font size 0, or in a fully
+# transparent colour.
 _VISIBLE_LINES_JS = r"""
 (el) => {
   const clipped = (style) =>
     /^rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)$/.test(style.clip) || style.clipPath === "inset(50%)";
-  const hidden = (at, style) => {
-    if (at.classList.contains("slds-assistive-text")) return true;
-    if (at.getAttribute("aria-hidden") === "true") return true;
-    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return true;
-    if (style.display !== "contents" && at.getClientRects().length === 0) return true;
+  const tiny = (at) => {
     const box = at.getBoundingClientRect();
-    return box.width <= 1 && box.height <= 1 && clipped(style);
+    return box.width <= 1 && box.height <= 1 && clipped(getComputedStyle(at));
   };
-  const out = [];
-  const walk = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const space = getComputedStyle(node.parentElement).whiteSpace;
-      const keep = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(space);
-      out.push(keep ? node.data : node.data.replace(/\s+/g, " "));
-      return;
+  const squeeze = (value) => value.replace(/\s+/g, "").length;
+  const rendered = (node) => {
+    const parent = node.parentElement;
+    if (!parent || getComputedStyle(parent).visibility !== "visible") return false;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    return range.getClientRects().length > 0;
+  };
+  let unclear = false;
+  // Any non-space text inside a shadow root, or inside a shadow root nested at any depth in it,
+  // is text innerText never shows: the option is unreadable. Style and script text is not shown.
+  const shadowText = (host) => {
+    try {
+      const walk = document.createTreeWalker(host.shadowRoot, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+      for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.shadowRoot && shadowText(node)) return true;
+          continue;
+        }
+        const tag = node.parentElement ? node.parentElement.tagName : "";
+        if (tag === "STYLE" || tag === "SCRIPT") continue;
+        if (node.data.trim()) return true;
+      }
+      return false;
+    } catch (error) {
+      return true;
     }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const style = getComputedStyle(node);
-    if (hidden(node, style)) return;
-    if (node.tagName === "BR") { out.push("\n"); return; }
-    const block = node !== el && !style.display.startsWith("inline") && style.display !== "contents";
-    if (block) out.push("\n");
-    for (const child of node.childNodes) walk(child);
-    if (block) out.push("\n");
   };
-  walk(el);
-  return out.join("").split("\n");
+  const runs = [];
+  let total = 0;
+  const texts = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+  for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+    const size = squeeze(node.data);
+    if (!size || !rendered(node)) continue;
+    runs.push({ node, start: total, size });
+    total += size;
+  }
+  const parts = [];
+  const elements = document.createTreeWalker(el, NodeFilter.SHOW_ELEMENT);
+  if (el.shadowRoot && shadowText(el)) unclear = true;
+  for (let at = elements.nextNode(); at; at = elements.nextNode()) {
+    if (at.shadowRoot && shadowText(at)) unclear = true;
+    if (!at.classList.contains("slds-assistive-text") && !tiny(at)) continue;
+    const own = runs.filter((run) => at.contains(run.node));
+    if (!own.length) continue;  // not rendered: innerText does not hold it
+    const nested = parts.some((part) => part.node.contains(at));
+    const text = String(at.innerText || "").trim();
+    if (!text && !nested) continue;
+    parts.push({ node: at, text, nested, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
+  }
+  const box = el.getBoundingClientRect();
+  // Text whose box lies wholly outside the option's own box (on screen or off it) is not its label.
+  const outside = (at) => at.right <= box.left || at.bottom <= box.top || at.left >= box.right || at.top >= box.bottom;
+  // True when no part of the text is left after the clip of every overflow-clipping ancestor up to
+  // and including the option itself (height:0 or max-height:0 with overflow hidden, and the like).
+  const cut = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    let rects = Array.from(range.getClientRects(), (r) => ({ l: r.left, t: r.top, r: r.right, b: r.bottom }));
+    for (let up = node.parentElement; up; up = up === el ? null : up.parentElement) {
+      const style = getComputedStyle(up);
+      if (style.display === "inline" || style.display === "contents") continue;
+      const edge = up.getBoundingClientRect();
+      const left = edge.left + up.clientLeft, top = edge.top + up.clientTop;
+      const right = left + up.clientWidth, bottom = top + up.clientHeight;
+      const clipX = style.overflowX !== "visible", clipY = style.overflowY !== "visible";
+      rects = rects.map((r) => ({
+        l: clipX ? Math.max(r.l, left) : r.l,
+        r: clipX ? Math.min(r.r, right) : r.r,
+        t: clipY ? Math.max(r.t, top) : r.t,
+        b: clipY ? Math.min(r.b, bottom) : r.b,
+      }));
+    }
+    return rects.every((r) => r.r - r.l <= 0 || r.b - r.t <= 0);
+  };
+  const faint = (at) => {
+    const style = getComputedStyle(at);
+    if (parseFloat(style.fontSize) === 0) return true;
+    return style.color === "transparent" || /^rgba\([^)]*,\s*0(\.0+)?\)$/.test(style.color);
+  };
+  for (const run of runs) {
+    if (parts.some((part) => part.node.contains(run.node))) continue;
+    const range = document.createRange();
+    range.selectNodeContents(run.node);
+    const at = range.getBoundingClientRect();
+    if (outside(at)) unclear = true;
+    if (cut(run.node)) unclear = true;
+    if (faint(run.node.parentElement)) unclear = true;
+    for (let up = run.node.parentElement; up; up = up === el ? null : up.parentElement) {
+      if (getComputedStyle(up).opacity === "0") unclear = true;
+    }
+  }
+  return {
+    text: String(el.innerText || ""),
+    total,
+    unclear,
+    parts: parts.map(({ text, nested, start, size }) => ({ text, nested, start, size })),
+  };
 }
 """
 
 
-def _option_lines(option) -> list[str]:
-    """The option's visible, non-empty lines. Screen-reader-only text is never read.
+def _squeezed(value: str) -> int:
+    return len("".join(str(value or "").split()))
 
-    An option that cannot be read in the browser has no lines, so it never matches.
+
+def _option_lines(option) -> list[str]:
+    """The option's visible, non-empty lines, from the browser's own innerText. Fails closed.
+
+    A truly invisible part (.slds-assistive-text, or a clipped 1px box) is removed only when it is
+    the option's leading content (it starts where earlier removed leading parts end) or its
+    trailing content (it ends at the option's end), and its text exactly fills, prefixes or
+    suffixes the first or last line there ("Record varSample" reads "varSample"). aria-hidden text
+    is seen, so it stays. Any other invisible part (in the middle, nested in another, holding a
+    line break, or not lining up), text the page script could not classify (shadow root text at
+    any depth, a box wholly outside the option's box, fully cut away by an overflow-clipping
+    ancestor, opacity 0, font size 0, transparent), or places that do not add up to innerText
+    make the option unreadable: no lines, so it never matches and nothing is clicked. A part that
+    is not rendered is not in innerText and is ignored. Nothing is invented.
+
+    Known limits, not handled here: closed shadow roots (the page script cannot see inside them);
+    CSS ::before / ::after generated text; form control values (input, select, textarea); and
+    text hidden by filter, -webkit-text-fill-color or a near-zero (not exactly 0) opacity.
+    Text only partly clipped or partly outside the option's box is read as shown.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
     except Exception:
         return []
-    if not isinstance(raw, list):
+    if not isinstance(raw, dict):
         return []
-    return [line for line in (_plain(item) for item in raw) if line]
+    text = str(raw.get("text") or "")
+    lines = [line for line in (_plain(item) for item in text.split("\n")) if line]
+    parts = []
+    for item in raw.get("parts") or ():
+        if not isinstance(item, dict):
+            return []
+        own, start, size = str(item.get("text") or "").strip(), item.get("start"), item.get("size")
+        if (
+            item.get("nested") or not own or "\n" in own or "\r" in own
+            or not isinstance(start, int) or not isinstance(size, int) or size != _squeezed(own)
+        ):
+            return []
+        parts.append((_plain(own), start, size))
+    if raw.get("unclear") or raw.get("total") != _squeezed(text):
+        return []  # text the reader cannot classify, or places that do not add up to innerText
+    if not parts:
+        return lines
+    front, back = 0, raw["total"]
+    parts.sort(key=lambda part: part[1])
+    while parts and parts[0][1] == front and lines:
+        own, _start, size = parts.pop(0)
+        if not lines[0].startswith(own):
+            return []
+        lines[0] = _plain(lines[0][len(own):])
+        lines = [line for line in lines if line]
+        front += size
+    while parts and parts[-1][1] + parts[-1][2] == back and lines:
+        own, _start, size = parts.pop()
+        if not lines[-1].endswith(own):
+            return []
+        lines[-1] = _plain(lines[-1][: len(lines[-1]) - len(own)])
+        lines = [line for line in lines if line]
+        back -= size
+    if parts:
+        return []  # a hidden part in the middle of the option
+    return lines
 
 
 def _option_label(option) -> str:
     """An option's label: its first visible line. Flow Builder adds a description line below it."""
     lines = _option_lines(option)
     return lines[0] if lines else ""
+
+
+# An option's structure with no text: per element its tag, role, class and display, and
+# its children (an open shadow root as "shadow"); each text node is only its length. A
+# TreeWalker is used because Lightning may patch childNodes on its custom elements.
+_OPTION_SHAPE_JS = r"""
+(el) => {
+  let budget = 60;
+  const kids = (root, depth) => {
+    const out = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    for (let node = walker.firstChild(); node && out.length < 12; node = walker.nextSibling()) {
+      const item = shape(node, depth + 1);
+      if (item) out.push(item);
+    }
+    return out;
+  };
+  const shape = (node, depth = 0) => {
+    if (budget <= 0) return null;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const size = node.data.trim().length;
+      if (!size) return null;
+      budget -= 1;
+      return { text: size };
+    }
+    budget -= 1;
+    const style = getComputedStyle(node);
+    const item = {
+      tag: node.tagName.toLowerCase(),
+      role: node.getAttribute("role") || "",
+      class: String(node.getAttribute("class") || "").slice(0, 120),
+      display: style.display,
+    };
+    if (depth < 8) {
+      item.children = kids(node, depth);
+      if (node.shadowRoot) item.shadow = kids(node.shadowRoot, depth);
+    }
+    return item;
+  };
+  return shape(el);
+}
+"""
+
+
+def _option_shapes(scope, limit: int = 3) -> list:
+    """Up to LIMIT options' structures for a failure snapshot. No text is read, only lengths."""
+    shapes = []
+    if scope is None:
+        return shapes
+    try:
+        options = scope.get_by_role("option")
+        total = _count(options)
+    except Exception:
+        return shapes
+    for index in range(min(total, limit)):
+        try:
+            item = options.nth(index).evaluate(_OPTION_SHAPE_JS)
+        except Exception:
+            item = None
+        if isinstance(item, dict):
+            shapes.append(item)
+    return shapes
 
 
 def _by_id(root, ident: str):
@@ -4494,6 +4695,8 @@ def _lookup_miss_result(state: WalkState, target: str) -> CheckResult | None:
     """At the time limit: the last lookup poll's miss, as the step's frozen UI_MISMATCH."""
     if not state.lookup_miss or state.lookup_miss[0] != norm(target):
         return None
+    # Read once, when the miss freezes: the structure of the options that were in scope.
+    state.option_shapes = _option_shapes(state.lookup_miss[2] if len(state.lookup_miss) > 2 else None)
     return CheckResult("UI_MISMATCH", state.lookup_miss[1], (), freeze=True)
 
 
@@ -4532,7 +4735,9 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         picks = _matching_options(root, box, want, empty_falls_back=True)
     if not picks:
         # Not yet: the caller keeps polling. What was in scope is kept for the time limit.
-        state.lookup_miss = (norm(label), _lookup_miss_note(root, box, label, want))
+        state.lookup_miss = (
+            norm(label), _lookup_miss_note(root, box, label, want), _owned_scope(root, box, empty_falls_back=True)[1],
+        )
         return None
     if len(picks) > 1:
         return CheckResult(
@@ -4594,6 +4799,13 @@ def _resource_type_diagnostic(page) -> str:
     )
 
 
+def _resource_type_miss(state: WalkState, note: str) -> CheckResult:
+    """No single Variable option: nothing is clicked. The options' structure goes to the snapshot."""
+    root, _role, box = _resource_type_box(state.page)
+    state.option_shapes = _option_shapes(_resource_listbox(root, box))
+    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(state.page)}", (), freeze=True)
+
+
 def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     """API Name stays hidden until the resource type is Variable. The choice is read from the page."""
     page = state.page
@@ -4614,7 +4826,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     picked = _variable_options(page)
     if len(picked) != 1:
         # No option labelled Variable in the Resource Type list, or more than one: nothing is clicked.
-        return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
+        return _resource_type_miss(state, note)
     try:
         picked[0].click(timeout=8000)
     except Exception:
@@ -4637,7 +4849,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
         missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
         if missed is None or missed.status != "UI_MISMATCH":
             return missed
-    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
+    return _resource_type_miss(state, note)
 
 
 def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
@@ -6549,6 +6761,7 @@ def walk_guide(
         state.miss_full_wait = {}
         state.step_notes = []
         state.lookup_miss = ()
+        state.option_shapes = []
         if skipped is None:
             _forget_closed_dialogs(state)
         state.step_deadline = t_start + step_cap_s
@@ -6598,7 +6811,7 @@ def walk_guide(
                     state.page, snapshot_dir, index, step.step_id, result.status,
                     result.note or "", roots=_roots(state.page),
                     redact_tree=_redact_aria_snapshot, leaks=snapshot_leaks,
-                    clock=state.clock,
+                    clock=state.clock, option_shapes=state.option_shapes,
                 )
             except Exception as exc:
                 result = replace(
