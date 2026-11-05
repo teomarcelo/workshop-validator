@@ -4229,17 +4229,17 @@ _VISIBLE_LINES_JS = r"""
   for (let at = elements.nextNode(); at; at = elements.nextNode()) {
     const quiet = at.classList.contains("slds-assistive-text") || at.getAttribute("aria-hidden") === "true";
     if (!quiet && !tiny(at)) continue;
-    if (parts.some((part) => part.node.contains(at))) continue;
     const own = runs.filter((run) => at.contains(run.node));
     if (!own.length) continue;  // not rendered: innerText does not hold it
+    const nested = parts.some((part) => part.node.contains(at));
     const text = String(at.innerText || "").trim();
-    if (!text) continue;
-    parts.push({ node: at, text, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
+    if (!text && !nested) continue;
+    parts.push({ node: at, text, nested, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
   }
   return {
     text: String(el.innerText || ""),
     total,
-    parts: parts.map(({ text, start, size }) => ({ text, start, size })),
+    parts: parts.map(({ text, nested, start, size }) => ({ text, nested, start, size })),
   };
 }
 """
@@ -4250,13 +4250,16 @@ def _squeezed(value: str) -> int:
 
 
 def _option_lines(option) -> list[str]:
-    """The option's visible, non-empty lines, from the browser's own innerText.
+    """The option's visible, non-empty lines, from the browser's own innerText. Fails closed.
 
-    A rendered screen-reader-only or hidden part removes only its own place: the line it fills
-    is dropped, or, when it starts a line and the line starts with its text, that text is cut
-    ("Record varSample" reads "varSample"). A part that is not rendered is not in innerText and
-    removes nothing. When the places cannot be matched to innerText nothing is removed. Nothing
-    is invented: with no line left there is no label. An option that cannot be read has no lines.
+    A rendered screen-reader-only or hidden part is removed only when it is the option's leading
+    content (it starts where earlier removed leading parts end) or its trailing content (it ends
+    at the option's end), and its text exactly fills, prefixes or suffixes the first or last line
+    there ("Record varSample" reads "varSample"). Any other rendered hidden part (in the middle,
+    nested in another, holding a line break, or not lining up, or places that do not add up to
+    innerText) makes the option unreadable: no lines, so it never matches and nothing is clicked.
+    Hidden text is never kept. A part that is not rendered is not in innerText and is ignored.
+    Nothing is invented: with no line left there is no label.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
@@ -4264,30 +4267,42 @@ def _option_lines(option) -> list[str]:
         return []
     if not isinstance(raw, dict):
         return []
-    lines = [_plain(item) for item in str(raw.get("text") or "").split("\n")]
-    spans, at = [], 0
-    for line in lines:
-        spans.append((at, _squeezed(line)))
-        at += spans[-1][1]
+    text = str(raw.get("text") or "")
+    lines = [line for line in (_plain(item) for item in text.split("\n")) if line]
     parts = []
     for item in raw.get("parts") or ():
         if not isinstance(item, dict):
-            continue
-        text, start, size = _plain(item.get("text")), item.get("start"), item.get("size")
-        if text and isinstance(start, int) and isinstance(size, int) and size == _squeezed(text):
-            parts.append((text, start, size))
-    if raw.get("total") != at:
-        parts = []  # the places do not match innerText: remove nothing
-    for text, start, size in parts:
-        index = next((i for i, (first, count) in enumerate(spans) if first <= start < first + count), None)
-        if index is None or spans[index][0] != start:
-            continue  # the part does not start a line: it is left in place
-        line = lines[index]
-        if line.startswith(text):
-            # The part's text starts this line: cut it. A part that fills the line drops it.
-            lines[index] = _plain(line[len(text):])
-            spans[index] = (start + size, spans[index][1] - size)
-    return [line for line in lines if line]
+            return []
+        own, start, size = str(item.get("text") or "").strip(), item.get("start"), item.get("size")
+        if (
+            item.get("nested") or not own or "\n" in own or "\r" in own
+            or not isinstance(start, int) or not isinstance(size, int) or size != _squeezed(own)
+        ):
+            return []
+        parts.append((_plain(own), start, size))
+    if not parts:
+        return lines
+    if raw.get("total") != _squeezed(text):
+        return []  # the places do not add up to innerText
+    front, back = 0, raw["total"]
+    parts.sort(key=lambda part: part[1])
+    while parts and parts[0][1] == front and lines:
+        own, _start, size = parts.pop(0)
+        if not lines[0].startswith(own):
+            return []
+        lines[0] = _plain(lines[0][len(own):])
+        lines = [line for line in lines if line]
+        front += size
+    while parts and parts[-1][1] + parts[-1][2] == back and lines:
+        own, _start, size = parts.pop()
+        if not lines[-1].endswith(own):
+            return []
+        lines[-1] = _plain(lines[-1][: len(lines[-1]) - len(own)])
+        lines = [line for line in lines if line]
+        back -= size
+    if parts:
+        return []  # a hidden part in the middle of the option
+    return lines
 
 
 def _option_label(option) -> str:

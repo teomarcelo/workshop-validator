@@ -186,12 +186,27 @@ class OptionLinesTests(unittest.TestCase):
     def test_assistive_text_on_its_own_line_is_not_also_cut_from_the_label(self):
         self.assertEqual(self.lines("Record\nRecord Sample", [("Record", 0)]), ["Record Sample"])
 
-    def test_text_that_does_not_start_a_line_is_never_cut(self):
-        self.assertEqual(self.lines("Recording Record", [("Record", 9)]), ["Recording Record"])
+    def test_trailing_inline_hidden_text_is_cut_from_the_last_line(self):
+        # Fail-closed rule: a part that ends the option is trailing content and is removed.
+        self.assertEqual(self.lines("Recording Record", [("Record", 9)]), ["Recording"])
 
-    def test_places_that_do_not_match_inner_text_remove_nothing(self):
-        self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", 0)], total=99),
-                         ["Record", "varSampleRec"])
+    def test_places_that_do_not_match_inner_text_make_the_option_unreadable(self):
+        self.assertEqual(self.lines("Record\nvarSampleRec", [("Record", 0)], total=99), [])
+
+    def test_hidden_part_in_the_middle_makes_the_option_unreadable(self):
+        self.assertEqual(self.lines("Contact Account", [("tact", 3)]), [])
+        self.assertEqual(self.lines("Sample\nRecord\nvarSampleRec", [("Record", 6)]), [])
+
+    def test_leading_part_that_does_not_line_up_makes_the_option_unreadable(self):
+        self.assertEqual(self.lines("varSampleRec Record", [("Record", 0)]), [])
+
+    def test_nested_or_multi_line_part_makes_the_option_unreadable(self):
+        option = self._Option("Recordx\nvarSampleRec", [("Recordx", 0)])
+        option.reply["parts"].append({"text": "x", "start": 6, "size": 1, "nested": True})
+        self.assertEqual(guide_walk._option_lines(option), [])
+        option = self._Option("Record\nx varSampleRec", [])
+        option.reply["parts"] = [{"text": "Record\nx", "start": 0, "size": 7}]
+        self.assertEqual(guide_walk._option_lines(option), [])
 
     def test_no_label_is_invented(self):
         self.assertEqual(self.lines("Record", [("Record", 0)]), [])
@@ -302,10 +317,42 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
                          '<span class="slds-assistive-text">Record</span><strong>varSampleRec</strong></div></div>')
         self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["varSampleRec"])
 
-    def test_hidden_text_that_does_not_start_the_line_is_never_cut(self):
+    def test_trailing_inline_hidden_text_is_never_kept(self):
         page = self.open('<div role="listbox"><div role="option" id="o">'
                          'Recording <span class="slds-assistive-text">Record</span></div></div>')
-        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Recording Record"])
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Recording"])
+
+    def assert_unreadable_and_not_clicked(self, inner, value):
+        result = self.pick(inner, value)
+        self.assertEqual(result.status, "UI_MISMATCH", result.note)
+        self.assertTrue(result.freeze)
+        self.assertEqual(self.page.evaluate("window.chosen"), [])
+        self.assertEqual(guide_walk._option_lines(self.page.locator("#opt1")), [])
+
+    def test_hidden_part_when_totals_do_not_add_up_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<span class="slds-assistive-text">varSampleRec</span>'
+            '<strong style="text-transform:uppercase">varOther&szlig;</strong>', "varSampleRec")
+        # The fixture really shifts the count: the uppercase sharp s renders as two letters.
+        self.assertIn("VAROTHERSS", self.page.locator("#opt1").evaluate("el => el.innerText"))
+
+    def test_hidden_part_with_a_line_break_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<span class="slds-assistive-text">varSampleRec<br>x</span>varOtherRec', "varSampleRec")
+
+    def test_nested_hidden_part_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<span aria-hidden="true">varSampleRec<span class="slds-assistive-text">x</span></span>varOtherRec',
+            "varSampleRec")
+
+    def test_inline_nested_hidden_part_is_never_clicked(self):
+        # No line break here: only the nested part makes the option unreadable.
+        self.assert_unreadable_and_not_clicked(
+            '<span aria-hidden="true">varSampleRec<span aria-hidden="true">x</span></span>varOtherRec',
+            "varOtherRec")
+
+    def test_hidden_part_in_the_middle_of_a_label_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked('Con<span class="slds-assistive-text">tact</span> Account', "Con")
 
     def test_visible_aria_hidden_line_is_dropped(self):
         page = self.open('<div role="listbox"><div role="option" id="o">'
