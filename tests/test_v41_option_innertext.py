@@ -124,6 +124,17 @@ def lookup_html(option_html, css=ASSISTIVE_CSS):
 """
 
 
+# Put inside an option of lookup_html: a pick closes the lookup's list, as the real lookup does.
+CLOSE_ON_PICK = """
+<script>
+  document.getElementById("lb").addEventListener("click", () => {
+    document.getElementById("rv").setAttribute("aria-expanded", "false");
+    document.getElementById("lb").hidden = true;
+  });
+</script>
+"""
+
+
 def make_step(step_id, text):
     return GuideStep(step_id, 1, "Exercise 9: Sample", "Task 1: Sample.", "1", text,
                      (90.0, 10.0, 400.0, 24.0), None, ())
@@ -409,6 +420,60 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
                          '<span aria-hidden="true" style="display:block">Sample Icon</span>'
                          '<span style="display:block">Variable</span></div></div>')
         self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["Sample Icon", "Variable"])
+
+    def test_nested_shadow_root_text_is_never_clicked(self):
+        # The host's shadow holds a <span> (a <b> cannot host a shadow) whose own shadow root holds
+        # text that innerText never shows.
+        self.assert_unreadable_and_not_clicked(
+            '<span id="sh"></span>Contact<script>'
+            'const inner = document.getElementById("sh").attachShadow({mode: "open"});'
+            'inner.innerHTML = "<span></span>";'
+            'inner.querySelector("span").attachShadow({mode: "open"}).innerHTML = "Account ";'
+            '</script>', "Contact")
+        self.assertEqual(self.page.locator("#opt1").evaluate("el => el.innerText").strip(), "Contact")
+
+    def test_slot_and_style_shadow_host_is_still_picked(self):
+        inner = ('<span id="sh">varSampleRec</span><script>document.getElementById("sh")'
+                 '.attachShadow({mode: "open"}).innerHTML = "<style>:host { color: navy; }</style><slot></slot>";'
+                 '</script>' + CLOSE_ON_PICK)
+        result = self.pick(inner, "varSampleRec")
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
+
+    def test_text_cut_away_by_an_overflow_clip_is_never_clicked(self):
+        for style in ("height:0; overflow:hidden", "max-height:0; overflow:hidden", "height:0; overflow:clip"):
+            with self.subTest(style):
+                self.assert_unreadable_and_not_clicked(
+                    f'<div style="{style}">Record</div><div>varSampleRec</div>', "Record")
+
+    def test_text_moved_outside_the_option_box_is_never_clicked(self):
+        self.assert_unreadable_and_not_clicked(
+            '<div style="position:relative; left:-500px">Record</div><div>varSampleRec</div>', "Record")
+
+    def test_text_outside_the_option_box_on_screen_is_never_clicked(self):
+        # The option is narrow; the text sits on screen but wholly to the right of the option's box.
+        css = ASSISTIVE_CSS + "<style>#opt1, #opt2 { width: 200px; }</style>"
+        self.assert_unreadable_and_not_clicked(
+            '<div style="position:relative; left:400px">Record</div><div>varSampleRec</div>', "Record", css)
+
+    def test_text_outside_the_option_box_below_the_fold_is_never_clicked(self):
+        page = self.open('<div style="height:3000px"></div><div role="listbox"><div role="option" id="o">'
+                         '<div style="position:relative; left:-500px">Record</div><div>varSampleRec</div>'
+                         '</div></div>')
+        self.assertGreater(page.locator("#o").evaluate("el => el.getBoundingClientRect().top"),
+                           page.evaluate("innerHeight"))
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), [])
+
+    def test_below_the_fold_normal_option_is_read_and_picked(self):
+        page = self.open('<div style="height:3000px"></div><div role="listbox"><div role="option" id="o">'
+                         '<div>varSampleRec</div><div>Sample description</div></div></div>')
+        self.assertGreater(page.locator("#o").evaluate("el => el.getBoundingClientRect().top"),
+                           page.evaluate("innerHeight"))
+        self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["varSampleRec", "Sample description"])
+        result = self.pick('<div>varSampleRec</div>' + CLOSE_ON_PICK, "varSampleRec",
+                           css=ASSISTIVE_CSS + '<div style="height:3000px"></div>')
+        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
 
     def test_resource_type_miss_saves_the_option_structure_with_no_text(self):
         def pick(state, item):

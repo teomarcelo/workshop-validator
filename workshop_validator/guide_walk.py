@@ -4201,8 +4201,10 @@ def _resource_is_variable(page) -> bool:
 # Each part carries its place: "start" is the count of non-space characters of rendered text before
 # it, and "size" its own; "total" is the count for the whole option, to check against innerText.
 # "unclear" is set when the option holds text the reader cannot classify: text of its own inside a
-# shadow root (innerText never shows it), or rendered text outside a part that is off-screen, at
-# opacity 0, at font size 0, or in a fully transparent colour.
+# shadow root at any depth (innerText never shows it; style and script text is skipped), or rendered
+# text outside a part whose box lies wholly outside the option's own box, that is fully cut away by
+# an overflow-clipping ancestor inside the option, at opacity 0, at font size 0, or in a fully
+# transparent colour.
 _VISIBLE_LINES_JS = r"""
 (el) => {
   const clipped = (style) =>
@@ -4220,10 +4222,18 @@ _VISIBLE_LINES_JS = r"""
     return range.getClientRects().length > 0;
   };
   let unclear = false;
+  // Any non-space text inside a shadow root, or inside a shadow root nested at any depth in it,
+  // is text innerText never shows: the option is unreadable. Style and script text is not shown.
   const shadowText = (host) => {
     try {
-      const walk = document.createTreeWalker(host.shadowRoot, NodeFilter.SHOW_TEXT);
+      const walk = document.createTreeWalker(host.shadowRoot, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
       for (let node = walk.nextNode(); node; node = walk.nextNode()) {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          if (node.shadowRoot && shadowText(node)) return true;
+          continue;
+        }
+        const tag = node.parentElement ? node.parentElement.tagName : "";
+        if (tag === "STYLE" || tag === "SCRIPT") continue;
         if (node.data.trim()) return true;
       }
       return false;
@@ -4254,7 +4264,30 @@ _VISIBLE_LINES_JS = r"""
     parts.push({ node: at, text, nested, start: own[0].start, size: own.reduce((sum, run) => sum + run.size, 0) });
   }
   const box = el.getBoundingClientRect();
-  const onScreen = box.right > 0 && box.bottom > 0 && box.left < innerWidth && box.top < innerHeight;
+  // Text whose box lies wholly outside the option's own box (on screen or off it) is not its label.
+  const outside = (at) => at.right <= box.left || at.bottom <= box.top || at.left >= box.right || at.top >= box.bottom;
+  // True when no part of the text is left after the clip of every overflow-clipping ancestor up to
+  // and including the option itself (height:0 or max-height:0 with overflow hidden, and the like).
+  const cut = (node) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    let rects = Array.from(range.getClientRects(), (r) => ({ l: r.left, t: r.top, r: r.right, b: r.bottom }));
+    for (let up = node.parentElement; up; up = up === el ? null : up.parentElement) {
+      const style = getComputedStyle(up);
+      if (style.display === "inline" || style.display === "contents") continue;
+      const edge = up.getBoundingClientRect();
+      const left = edge.left + up.clientLeft, top = edge.top + up.clientTop;
+      const right = left + up.clientWidth, bottom = top + up.clientHeight;
+      const clipX = style.overflowX !== "visible", clipY = style.overflowY !== "visible";
+      rects = rects.map((r) => ({
+        l: clipX ? Math.max(r.l, left) : r.l,
+        r: clipX ? Math.min(r.r, right) : r.r,
+        t: clipY ? Math.max(r.t, top) : r.t,
+        b: clipY ? Math.min(r.b, bottom) : r.b,
+      }));
+    }
+    return rects.every((r) => r.r - r.l <= 0 || r.b - r.t <= 0);
+  };
   const faint = (at) => {
     const style = getComputedStyle(at);
     if (parseFloat(style.fontSize) === 0) return true;
@@ -4265,8 +4298,8 @@ _VISIBLE_LINES_JS = r"""
     const range = document.createRange();
     range.selectNodeContents(run.node);
     const at = range.getBoundingClientRect();
-    if (at.left + scrollX < -1000 || at.top + scrollY < -1000) unclear = true;
-    if (onScreen && (at.right <= 0 || at.bottom <= 0 || at.left >= innerWidth || at.top >= innerHeight)) unclear = true;
+    if (outside(at)) unclear = true;
+    if (cut(run.node)) unclear = true;
     if (faint(run.node.parentElement)) unclear = true;
     for (let up = run.node.parentElement; up; up = up === el ? null : up.parentElement) {
       if (getComputedStyle(up).opacity === "0") unclear = true;
@@ -4294,10 +4327,16 @@ def _option_lines(option) -> list[str]:
     trailing content (it ends at the option's end), and its text exactly fills, prefixes or
     suffixes the first or last line there ("Record varSample" reads "varSample"). aria-hidden text
     is seen, so it stays. Any other invisible part (in the middle, nested in another, holding a
-    line break, or not lining up), text the page script could not classify (shadow root text,
-    off-screen, opacity 0, font size 0, transparent), or places that do not add up to innerText
+    line break, or not lining up), text the page script could not classify (shadow root text at
+    any depth, a box wholly outside the option's box, fully cut away by an overflow-clipping
+    ancestor, opacity 0, font size 0, transparent), or places that do not add up to innerText
     make the option unreadable: no lines, so it never matches and nothing is clicked. A part that
     is not rendered is not in innerText and is ignored. Nothing is invented.
+
+    Known limits, not handled here: closed shadow roots (the page script cannot see inside them);
+    CSS ::before / ::after generated text; form control values (input, select, textarea); and
+    text hidden by filter, -webkit-text-fill-color or a near-zero (not exactly 0) opacity.
+    Text only partly clipped or partly outside the option's box is read as shown.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
