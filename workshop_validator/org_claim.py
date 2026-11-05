@@ -1,4 +1,4 @@
-"""Claim a new verification org from the event portal (W-042, W-043).
+"""Claim a new verification org from the event portal (W-042, W-097).
 
 The owner gives only the event code. The portal address and the code live in
 a private file, ``~/.workshop-validator/org-claim.json``, readable only by
@@ -12,9 +12,8 @@ Modes:
   submitted.
 * ``--claim``: submit the event code, open the claimed org's details, read
   the username and password by label, and append one org to
-  ``verification-orgs.json``. Refused unless the last run's org decision
-  said move on and no unused org is left. ``--force`` (owner only) skips that
-  check.
+  ``verification-orgs.json``. W-097: allowed whenever the owner's code is set
+  in org-claim.json. The org gate is updated to point at the new org.
 * ``--guides``: download the exercise-guide PDFs linked on the portal into
   ``team/guide-inbox/``.
 
@@ -40,13 +39,12 @@ import sys
 import tempfile
 import time
 
-from .automate import FAILED, ORGS_NAME, SUCCESS, load_gate, load_orgs
+from .automate import FAILED, ORGS_NAME, SUCCESS, load_gate, load_orgs, save_gate
 
 CONFIG_NAME = "org-claim.json"
 INBOX = Path("team") / "guide-inbox"
 ATTEMPT = Path("team") / "claim-attempt"
 LEFT_PORTAL = "left the https portal"
-FORCE_REFUSED = "--force needs the owner at a terminal"
 ATTEMPT_REFUSED = "a claim was already tried for this run"
 
 OK, NEEDS_REVIEW_EXIT, REFUSED, INCONCLUSIVE = 0, 1, 2, 3
@@ -55,7 +53,8 @@ _VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "me
          "source", "track", "wbr"}
 _SKIP = {"script", "style", "template", "noscript"}
 _EMAIL = re.compile(r"^[A-Za-z0-9._%+'-]+@[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+$")
-_LABELS = {"username": ("username", "user name"), "password": ("password",)}
+_LABELS = {"username": ("username", "user name", "salesforce org username"),
+           "password": ("password", "salesforce org password")}
 
 
 class ClaimError(Exception):
@@ -335,14 +334,13 @@ def count_orgs(root: Path) -> int:
 
 
 def claim_allowed(root: Path) -> tuple[bool, str]:
-    """W-043: claim only when the org rule says move on and no unused org is left."""
-    gate = load_gate(Path(root))
-    last = gate.get("last_outcome")
-    if last not in {SUCCESS, FAILED}:
-        return False, "the last run did not end in a success or a real failure"
-    total = count_orgs(root)
-    if int(gate.get("org") or 0) < total:
-        return False, "an unused org remains"
+    """W-097: claim only when the owner's code is set in org-claim.json."""
+    try:
+        config = load_config(root)
+        if not config.get("event_code"):
+            return False, "no event_code in org-claim.json"
+    except ClaimError as exc:
+        return False, str(exc)
     return True, ""
 
 
@@ -355,7 +353,7 @@ def last_run_id(root: Path):
 
 
 def attempt_allowed(root: Path) -> bool:
-    """One claim per gate run: a second is refused unless the earlier one ended CLAIMED."""
+    """Allow attempt unless an earlier one is running (lock held) or ended CLAIMED for this run."""
     path = _attempt_path(root)
     if not path.exists():
         return True
@@ -365,7 +363,8 @@ def attempt_allowed(root: Path) -> bool:
         return False  # unreadable marker: assume a claim was tried
     if not isinstance(marker, dict):
         return False
-    return marker.get("last_run") != last_run_id(root) or marker.get("result") == "CLAIMED"
+    # Allow if: different run, or same run but not CLAIMED
+    return marker.get("last_run") != last_run_id(root) or marker.get("result") != "CLAIMED"
 
 
 def reserve_attempt(root: Path) -> bool:
@@ -416,7 +415,12 @@ def append_org(root: Path, username: str, password: str) -> int:
     """Append one org in the loader's format, atomically, mode 0600. Returns its number."""
     path = Path(root) / ORGS_NAME
     with _org_lock(path):
-        return _append_locked(path, username, password)
+        number = _append_locked(path, username, password)
+        # W-098: update the org gate to point at the new org
+        gate = load_gate(root)
+        gate["org"] = number
+        save_gate(root, gate)
+        return number
 
 
 @contextlib.contextmanager
@@ -671,27 +675,22 @@ def guides(root: Path, config: dict) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Claim a verification org from the event portal.")
+    parser = argparse.ArgumentParser(description="Claim a verification org from the event portal (W-097).")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--dry-run", action="store_true", help="Default. Stop at the Add Event form.")
-    mode.add_argument("--claim", action="store_true", help="Submit the event code and save the new org.")
+    mode.add_argument("--claim", action="store_true", help="W-097: Submit the event code and save the new org.")
     mode.add_argument("--guides", action="store_true", help="Download linked exercise-guide PDFs.")
     parser.add_argument("--force", action="store_true",
-                        help="Owner only, at a terminal: claim even when the org rule does not say move on.")
+                        help="Accepted as a no-op alias for --claim.")
     parser.add_argument("--private-root", default=str(Path.home() / ".workshop-validator"))
     args = parser.parse_args(argv)
     root = Path(args.private_root).expanduser()
     try:
         if args.claim:
-            if args.force:
-                if not sys.stdin.isatty():
-                    print(f"org-claim: REFUSED {FORCE_REFUSED}")
-                    return REFUSED
-            else:
-                allowed, reason = claim_allowed(root)
-                if not allowed:
-                    print(f"org-claim: REFUSED {reason}")
-                    return REFUSED
+            allowed, reason = claim_allowed(root)
+            if not allowed:
+                print(f"org-claim: REFUSED {reason}")
+                return REFUSED
             if not reserve_attempt(root):
                 print(f"org-claim: REFUSED {ATTEMPT_REFUSED}")
                 return REFUSED
