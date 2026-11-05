@@ -239,6 +239,11 @@ def _org_open(page) -> bool:
 def login_to_salesforce(page, username: str, password: str) -> None:
     """Standard login form only. No SSO/MFA bypass; fail closed on other flow.
 
+    The page may open on the classic username form or on the "Log In with
+    Email" card, which has no username box. Sign-in first waits up to about
+    30 s for either the username box or the exact "Log In with Username"
+    button. On the email card that one button is clicked, then the username
+    form must appear. More than one such button is refused unclicked.
     login.salesforce.com currently asks for the username first, then the
     password on the next screen. Older combined forms still work: if the
     password field is already visible, it is filled without an extra click.
@@ -263,17 +268,39 @@ def login_to_salesforce(page, username: str, password: str) -> None:
             if not _promo_failure(exc):
                 raise
         username_box = page.locator("#username")
-        if not username_box.is_visible():
-            login_with_username_button = page.get_by_role(
-                "button", name="Log In with Username", exact=True
+        username_button = page.get_by_role(
+            "button", name="Log In with Username", exact=True
+        )
+        # A slow or script-built page is still loading, not a failure.
+        try:
+            username_box.or_(username_button).first.wait_for(
+                state="visible", timeout=30000
             )
-            if login_with_username_button.count() == 1 and login_with_username_button.is_visible():
-                login_with_username_button.click(timeout=15000)
-                username_box.wait_for(state="visible", timeout=20000)
-            else:
+        except PlaywrightTimeout:
+            raise PrivateRunnerError(
+                "Salesforce login page: neither the username form nor "
+                "the Log In with Username button appeared"
+            ) from None
+        if not username_box.is_visible():
+            matches = username_button.count()
+            if matches > 1:
                 raise PrivateRunnerError(
-                    "Salesforce login page showed the Log In with Email screen and no username form"
+                    "Salesforce login page showed more than one Log In with "
+                    "Username button; nothing was clicked"
                 )
+            if matches != 1 or not username_button.is_visible():
+                raise PrivateRunnerError(
+                    "Salesforce login page: neither the username form nor "
+                    "the Log In with Username button appeared"
+                )
+            username_button.click(timeout=15000)
+            try:
+                username_box.wait_for(state="visible", timeout=20000)
+            except PlaywrightTimeout:
+                raise PrivateRunnerError(
+                    "Salesforce login page showed the Log In with Email screen; "
+                    "the username form did not appear after Log In with Username"
+                ) from None
         username_box.fill(username, timeout=15000)
         password_box = page.locator("#password")
         if password_box.count() == 0 or not password_box.is_visible():

@@ -95,12 +95,34 @@ class PrivatePlanTests(unittest.TestCase):
         with self.assertRaises(PrivateRunnerError):
             load_plan(self.path,pdf_digest="a"*64,page_count=4)
 
+try:
+    from playwright.sync_api import TimeoutError as _PlaywrightTimeout
+except ImportError:
+    _PlaywrightTimeout = TimeoutError
+
+_USERNAME_BUTTON = "Log In with Username"
+
+
 class _Loc:
-    def __init__(self, page, selector, role=None, name=None):
+    def __init__(self, page, selector, role=None, name=None, exact=False, parts=None):
         self.page = page
         self.selector = selector
         self.role = role
         self.name = name
+        self.exact = exact
+        self.parts = parts
+
+    def _is_username_button(self):
+        # Matches only the exact accessible name on a button role.
+        return (self.role == "button" and self.name == _USERNAME_BUTTON
+                and self.exact is True)
+
+    def or_(self, other):
+        return _Loc(self.page, None, parts=(self, other))
+
+    @property
+    def first(self):
+        return self
 
     def fill(self, value, timeout=None):
         self.page.events.append(("fill", self.selector))
@@ -110,9 +132,11 @@ class _Loc:
             raise TimeoutError("username field not visible")
 
     def click(self, timeout=None):
-        if self.role == "button" and self.name == "Log In with Username":
-            self.page.events.append(("click", "button:Log In with Username"))
-            if self.page.email_screen:
+        if self._is_username_button():
+            if self.count() != 1:
+                raise AssertionError("strict mode: button matched %d" % self.count())
+            self.page.events.append(("click", "button:" + _USERNAME_BUTTON))
+            if self.page.email_screen and self.page.username_after_click:
                 self.page.username_visible = True
         else:
             self.page.events.append(("click", self.selector))
@@ -120,35 +144,52 @@ class _Loc:
                 self.page.password_visible = True
 
     def count(self):
+        if not self.page.rendered:
+            return 0
         if self.selector == "#password":
             return 1 if self.page.password_visible or self.page.combined_form else 0
         if self.selector == "#username":
             return 0
-        if self.role == "button" and self.name == "Log In with Username":
-            return 1 if self.page.email_screen and self.page.has_username_button else 0
+        if self.role is not None:
+            if not self._is_username_button():
+                return 0
+            if self.page.email_screen and self.page.has_username_button:
+                return self.page.username_button_count
+            return 0
         return 1
 
     def is_visible(self):
+        if not self.page.rendered:
+            return False
+        if self.parts is not None:
+            return any(part.is_visible() for part in self.parts)
         if self.selector == "#password":
             return self.page.password_visible or self.page.combined_form
         if self.selector == "#username":
             if self.page.email_screen:
                 return self.page.username_visible
             return True
-        if self.role == "button" and self.name == "Log In with Username":
-            return self.page.email_screen and self.page.has_username_button
+        if self.role is not None:
+            return self.count() > 0
         return True
 
     def wait_for(self, state=None, timeout=None):
+        self.page.waits.append((self.selector if self.parts is None else "or", timeout))
+        # Waiting lets a slow page finish rendering.
+        self.page.rendered = True
         if self.selector == "#password" and not self.is_visible():
             raise TimeoutError("password field did not appear")
-        if self.selector == "#username" and not self.is_visible():
-            raise TimeoutError("username field did not appear")
+        if not self.is_visible():
+            raise _PlaywrightTimeout("locator did not become visible")
 
 
 class _Page:
-    def __init__(self, combined_form=False, promo_blocked=False, email_screen=False, has_username_button=True):
+    def __init__(self, combined_form=False, promo_blocked=False, email_screen=False,
+                 has_username_button=True, slow_render=False,
+                 username_after_click=True, username_button_count=1):
         self.events = []
+        self.waits = []
+        self.role_queries = []
         self.password_visible = False
         self.combined_form = combined_form
         self.promo_blocked = promo_blocked
@@ -156,6 +197,9 @@ class _Page:
         self.email_screen = email_screen
         self.has_username_button = has_username_button
         self.username_visible = not email_screen
+        self.rendered = not slow_render
+        self.username_after_click = username_after_click
+        self.username_button_count = username_button_count
         self.url = "https://example.lightning.force.com/lightning/page/home"
 
     def route(self, pattern, handler=None, **kwargs):
@@ -174,7 +218,8 @@ class _Page:
         return _Loc(self, selector)
 
     def get_by_role(self, role, name=None, exact=False):
-        return _Loc(self, None, role=role, name=name)
+        self.role_queries.append((role, name, exact))
+        return _Loc(self, None, role=role, name=name, exact=exact)
 
     def wait_for_url(self, predicate, timeout=None):
         if not predicate(self.url):
@@ -253,6 +298,11 @@ class LoginAdapterTests(unittest.TestCase):
             ("fill", "#password"),
             ("click", "#Login"),
         ])
+        self.assertTrue(page.role_queries)
+        for role, name, exact in page.role_queries:
+            self.assertEqual(role, "button")
+            self.assertEqual(name, "Log In with Username")
+            self.assertIs(exact, True)
 
     def test_classic_screen_skips_username_button(self):
         page = _Page(combined_form=False, email_screen=False)
@@ -270,11 +320,64 @@ class LoginAdapterTests(unittest.TestCase):
         page = _Page(email_screen=True, has_username_button=False)
         with self.assertRaises(PrivateRunnerError) as ctx:
             login_to_salesforce(page, "learner@example.com", "secret-value")
-        self.assertIn("Log In with Email screen", str(ctx.exception))
-        self.assertIn("no username form", str(ctx.exception))
+        self.assertIn(
+            "neither the username form nor the Log In with Username button appeared",
+            str(ctx.exception),
+        )
         self.assertEqual(page.events, [
             ("goto", "https://login.salesforce.com/"),
         ])
+
+    def test_slow_classic_screen_waits_then_signs_in(self):
+        page = _Page(slow_render=True)
+        login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+            ("fill", "#username"),
+            ("click", "#Login"),
+            ("fill", "#password"),
+            ("click", "#Login"),
+        ])
+        self.assertEqual(page.waits[0][0], "or")
+        self.assertGreaterEqual(page.waits[0][1], 25000)
+
+    def test_slow_email_screen_waits_then_clicks_username_button(self):
+        page = _Page(slow_render=True, email_screen=True)
+        login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+            ("click", "button:Log In with Username"),
+            ("fill", "#username"),
+            ("click", "#Login"),
+            ("fill", "#password"),
+            ("click", "#Login"),
+        ])
+        self.assertEqual(page.waits[0][0], "or")
+
+    def test_username_form_missing_after_button_names_the_screen(self):
+        page = _Page(email_screen=True, username_after_click=False)
+        with self.assertRaises(PrivateRunnerError) as ctx:
+            login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertEqual(
+            str(ctx.exception),
+            "Salesforce login page showed the Log In with Email screen; the "
+            "username form did not appear after Log In with Username",
+        )
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+            ("click", "button:Log In with Username"),
+        ])
+        self.assertFalse([event for event in page.events if event[0] == "fill"])
+
+    def test_two_username_buttons_refuse_without_clicking(self):
+        page = _Page(email_screen=True, username_button_count=2)
+        with self.assertRaises(PrivateRunnerError) as ctx:
+            login_to_salesforce(page, "learner@example.com", "secret-value")
+        self.assertIn("more than one Log In with Username button", str(ctx.exception))
+        self.assertEqual(page.events, [
+            ("goto", "https://login.salesforce.com/"),
+        ])
+        self.assertFalse([event for event in page.events if event[0] in ("click", "fill")])
 
     @staticmethod
     def _password_submits(page):
