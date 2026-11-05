@@ -336,6 +336,11 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
                 self.assertEqual(guide_walk._option_lines(page.locator(f"#{ident}")), ["Account Name"])
                 self.assertEqual(guide_walk._option_label(page.locator(f"#{ident}")), "Account Name")
 
+    def test_assistive_text_class_is_skipped_without_the_slds_stylesheet(self):
+        page = self.open('<div role="listbox"><div role="option" id="cls">'
+                         '<span class="slds-assistive-text">Record</span>Account</div></div>')
+        self.assertEqual(guide_walk._option_lines(page.locator("#cls")), ["Account"])
+
     def test_hard_boundaries_still_split_lines(self):
         page = self.open(LABEL_CASES_HTML)
         for ident in ("two-block", "br-line"):
