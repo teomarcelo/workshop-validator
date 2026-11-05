@@ -38,6 +38,8 @@ REVIEW_NOTE = ("Record Variable option recThing was clicked and a selected pill 
                "please confirm.")
 PILL = ('<span class="slds-pill"><span class="slds-pill__label">recThing</span>'
         '<button class="slds-pill__remove" title="Remove">x</button></span>')
+# The pill a div combobox renders inside itself: its label only, so the box's own text is recThing.
+BARE = '<span class="slds-pill"><span class="slds-pill__label">recThing</span></span>'
 
 
 def div_html(after_js, labelled=True):
@@ -77,14 +79,14 @@ def div_html(after_js, labelled=True):
 """
 
 
-BARE_PILL = f"rv.innerHTML = {PILL!r};"
+BARE_PILL = f"rv.innerHTML = {BARE!r};"
 NO_EXPANDED = 'rv.removeAttribute("aria-expanded");'
 # The box's own open shadow root holds the pill; its light text (slotted) is recThing.
 OWN_SHADOW_PILL = (f"rv.textContent = 'recThing'; rv.attachShadow({{mode: 'open'}}).innerHTML = "
-                   f"'<slot></slot>' + {PILL!r};")
+                   f"'<slot></slot>' + {BARE!r};")
 # A part inside the box has an open shadow root holding the pill; the box's own text is recThing.
 PART_SHADOW_PILL = ("rv.innerHTML = '<span>recThing</span><x-part></x-part>'; "
-                    f"rv.querySelector('x-part').attachShadow({{mode: 'open'}}).innerHTML = {PILL!r};")
+                    f"rv.querySelector('x-part').attachShadow({{mode: 'open'}}).innerHTML = {BARE!r};")
 
 
 def typed_html(after_js):
