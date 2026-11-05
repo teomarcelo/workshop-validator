@@ -22,7 +22,8 @@ import subprocess
 import sys
 import unicodedata
 
-from .team_state import _write_private, is_open, load as load_job
+from .team_state import (PRODUCER_LIVE_NAME, _write_private, is_open, is_stale, load as load_job,
+                         producer_live_lock)
 
 STATES = ("next", "running", "waiting", "done")
 STALL_MINUTES = 30
@@ -47,11 +48,16 @@ def ledger_path(team: Path) -> Path:
 
 
 def producer_live_path(team: Path) -> Path:
-    return team / "producer-live"
+    return team / PRODUCER_LIVE_NAME
 
 
 def _utc(now=None) -> datetime:
-    return now or datetime.now(timezone.utc)
+    return _aware(now) if now else datetime.now(timezone.utc)
+
+
+def _aware(moment: datetime) -> datetime:
+    """An offset-naive time is read as UTC, so comparisons never raise TypeError."""
+    return moment.replace(tzinfo=timezone.utc) if moment.tzinfo is None else moment
 
 
 def clock12(moment: datetime) -> str:
@@ -141,7 +147,8 @@ def append_ledger(team: Path, row: dict, now=None) -> dict:
 
 def claim_producer(team: Path, session_id: str = "pending", now=None) -> dict:
     payload = {"session_id": session_id, "claimed": _utc(now).isoformat()}
-    _write_private(producer_live_path(team), json.dumps(payload) + "\n")
+    with producer_live_lock(team):
+        _write_private(producer_live_path(team), json.dumps(payload) + "\n")
     return payload
 
 
@@ -150,22 +157,29 @@ def load_producer(team: Path) -> dict | None:
     if not path.is_file():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except ValueError:
+        live = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
+    return live if isinstance(live, dict) else None
 
 
 def release_producer(team: Path) -> None:
-    producer_live_path(team).unlink(missing_ok=True)
+    if not producer_live_path(team).exists():
+        return
+    with producer_live_lock(team):
+        producer_live_path(team).unlink(missing_ok=True)
 
 
 def bind_producer(team: Path, session_id: str) -> bool:
     """A pending claim adopts the first session id a hook sees."""
-    live = load_producer(team)
-    if live and live.get("session_id") == "pending" and session_id and session_id.strip():
-        live["session_id"] = session_id
-        _write_private(producer_live_path(team), json.dumps(live) + "\n")
-        return True
+    if not (session_id and session_id.strip()) or not producer_live_path(team).is_file():
+        return False
+    with producer_live_lock(team):
+        live = load_producer(team)
+        if live and live.get("session_id") == "pending":
+            live["session_id"] = session_id
+            _write_private(producer_live_path(team), json.dumps(live) + "\n")
+            return True
     return False
 
 
@@ -279,28 +293,79 @@ def watchdog_action(state: str, live: dict | None, *, now: datetime, idle_since:
     return "NUDGE"
 
 
-def producer_active_at(repo: Path, live: dict | None) -> datetime | None:
-    """Last sign of the live producer: its transcript mtime once bound, else the claim time."""
-    if not live:
+def _session_mtime(repo: Path, sid) -> float:
+    """Newest mtime of one session's own transcripts: `<sid>.jsonl` and every
+    `<sid>/**/*.jsonl` (its subagents). Never another session's files."""
+    if not isinstance(sid, str) or sid in {"", "pending", ".", ".."} or Path(sid).name != sid:
+        return 0.0
+    tdir = transcripts_dir(repo)
+    newest = _newest_mtime([tdir / f"{sid}.jsonl"])
+    subtree = tdir / sid
+    if subtree.is_dir() and not subtree.is_symlink():
+        for folder, _dirs, files in os.walk(subtree, followlinks=False):
+            newest = max(newest, _newest_mtime(Path(folder) / f for f in files if f.endswith(".jsonl")))
+    return newest
+
+
+def producer_active_at(repo: Path, live: dict | None, now=None) -> datetime | None:
+    """Last sign of the live producer: newest of its own transcripts (once bound, main file
+    and its subagents' files), its `last_seen` (refreshed by the claimed session's
+    `team_state heartbeat` / `advance`) and the claim time. A time after `now` is ignored,
+    so a future stamp cannot hide a stall."""
+    if not isinstance(live, dict):
         return None
-    sid = live.get("session_id")
-    transcript = transcripts_dir(repo) / f"{sid}.jsonl"
-    if sid != "pending" and transcript.is_file():
-        return datetime.fromtimestamp(transcript.stat().st_mtime, timezone.utc)
-    return _read_time_iso(live.get("claimed"))
+    now = _utc(now)
+    times = [_read_time_iso(live.get("last_seen")), _read_time_iso(live.get("claimed"))]
+    mtime = _session_mtime(repo, live.get("session_id"))
+    if mtime:
+        times.append(datetime.fromtimestamp(mtime, timezone.utc))
+    times = [t for t in times if t and t <= now]
+    return max(times) if times else None
+
+
+def masked_stall(job: dict | None, active: datetime | None, now: datetime,
+                 step_moved: datetime | None = None) -> bool:
+    """WORKING that is really a stall. Other transcripts (the watchdog task itself, old
+    agents) can keep `status` at WORKING; they are not the producer (escape 2026-11-04).
+
+    With an open job: its heartbeat and the producer are both quiet for STALL_MINUTES.
+    With no open job: the producer and `step_moved` (plan edits, running-step branch
+    commits) are both quiet for STALL_MINUTES."""
+    now = _aware(now)
+    quiet = timedelta(minutes=STALL_MINUTES)
+    producer_stale = active is None or now - _aware(active) >= quiet
+    if job and is_open(job) and job.get("heartbeat"):
+        try:
+            job_stale = is_stale(job, now, minutes=STALL_MINUTES)
+        except (ValueError, TypeError):
+            job_stale = True
+        return job_stale and producer_stale
+    step_stale = step_moved is None or now - _aware(step_moved) >= quiet
+    return producer_stale and step_stale
+
+
+def step_moved_at(repo: Path, team: Path, plan: dict, now=None) -> datetime | None:
+    """Newest plan edit or commit on a running step's branch (never a transcript).
+    A time after `now` is ignored."""
+    limit = _utc(now).timestamp()
+    stamps = [_newest_mtime([now_path(team)])] + \
+        [_branch_commit_time(repo, s["branch"]) for s in plan.get("steps", [])
+         if s.get("state") == "running" and s.get("branch")]
+    stamps = [t for t in stamps if 0 < t <= limit]
+    return datetime.fromtimestamp(max(stamps), timezone.utc) if stamps else None
 
 
 def producer_is_fresh(repo: Path, team: Path, now: datetime) -> bool:
     """The producer-live claim is held and active within PRODUCER_ALIVE_MINUTES (the status rule)."""
     live = load_producer(team)
-    active = producer_active_at(repo, live)
+    active = producer_active_at(repo, live, now)
     return bool(live) and active is not None and \
-        now - active < timedelta(minutes=PRODUCER_ALIVE_MINUTES)
+        _aware(now) - active < timedelta(minutes=PRODUCER_ALIVE_MINUTES)
 
 
 def _read_time(path: Path) -> datetime | None:
     try:
-        return datetime.fromisoformat(path.read_text(encoding="utf-8").strip())
+        return _aware(datetime.fromisoformat(path.read_text(encoding="utf-8").strip()))
     except (OSError, ValueError):
         return None
 
@@ -320,6 +385,16 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
         state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
     else:
         state, reason = status(repo, team, now)
+    live = load_producer(team)
+    active = producer_active_at(repo, live, now)
+    if state == "WORKING":
+        job = load_job(team.parent)
+        has_job = bool(job and is_open(job) and job.get("heartbeat"))
+        moved = None if has_job else step_moved_at(repo, team, load_plan(team), now)
+        if masked_stall(job, active, now, moved):
+            what = "job heartbeat" if has_job else "no open job, step"
+            state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
+                                        f" ({reason})")
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
     if state not in {"IDLE", "STALLED"}:
@@ -331,8 +406,6 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     if not idle_file.is_file():
         _write_private(idle_file, now.isoformat())
         takeover_count_file.unlink(missing_ok=True)
-    live = load_producer(team)
-    active = producer_active_at(repo, live)
     takeover_count = 0
     if takeover_count_file.is_file():
         try:
@@ -396,8 +469,8 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
 
 def _read_time_iso(value) -> datetime | None:
     try:
-        return datetime.fromisoformat(value) if value else None
-    except ValueError:
+        return _aware(datetime.fromisoformat(value)) if value else None
+    except (ValueError, TypeError):
         return None
 
 

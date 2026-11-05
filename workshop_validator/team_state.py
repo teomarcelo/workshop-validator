@@ -4,9 +4,11 @@ Stores job state, phase progress, and activity log in `<private_root>/team/`.
 All state files are mode 0600, directory 0700.
 """
 
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import argparse
+import fcntl
 import json
 import os
 import sys
@@ -18,6 +20,8 @@ PHASES = [
 
 STATE_NAME = "state.json"
 LOG_NAME = "team-log.json"
+PRODUCER_LIVE_NAME = "producer-live"
+PRODUCER_LIVE_LOCK_NAME = ".producer-live.lock"
 
 
 def _write_private(path: Path, text: str) -> None:
@@ -84,7 +88,8 @@ def load(root: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def advance(root: Path, phase: str, run_dir: str = None, detail: str = "", *, now=None) -> dict:
+def advance(root: Path, phase: str, run_dir: str = None, detail: str = "", *, now=None,
+            session_id: str = None) -> dict:
     """Advance to the next phase and refresh heartbeat."""
     state = load(root)
     if state is None:
@@ -100,12 +105,57 @@ def advance(root: Path, phase: str, run_dir: str = None, detail: str = "", *, no
     if phase == "run":
         state["iteration"] = state.get("iteration", 0) + 1
     _write_private(_state_path(root), json.dumps(state, indent=2) + "\n")
+    touch_producer_live(root, now, session_id)
     if detail:
         log(root, agent="system", action=f"advance-{phase}", detail=detail, now=now)
     return state
 
 
-def heartbeat(root: Path, *, now=None) -> dict:
+@contextmanager
+def producer_live_lock(team: Path):
+    """Exclusive flock on `team/.producer-live.lock` (0600). Every read-modify-write of
+    producer-live (claim, bind, release, last_seen refresh) holds it."""
+    team = Path(team)
+    team.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(team / PRODUCER_LIVE_LOCK_NAME,
+                 os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def touch_producer_live(root: Path, now: str, session_id: str = None) -> None:
+    """Refresh `last_seen` in a held producer-live claim (atomic, 0600); no claim, no file.
+
+    Only the claimed session refreshes it: `session_id` must equal the claim's bound
+    session id. An unknown caller (None, blank or a pending claim) never refreshes, so a
+    heartbeat from another process cannot make a dead claim look alive.
+
+    Reads and writes under producer_live_lock, so a concurrent release is never undone
+    and a concurrent bind's session_id is never replaced by an older one."""
+    if not isinstance(session_id, str) or not session_id.strip() or session_id == "pending":
+        return
+    team = Path(root) / "team"
+    path = team / PRODUCER_LIVE_NAME
+    if not path.is_file():
+        return
+    with producer_live_lock(team):
+        try:
+            live = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(live, dict) or live.get("session_id") != session_id:
+            return
+        live["last_seen"] = now
+        _write_private(path, json.dumps(live) + "\n")
+
+
+def heartbeat(root: Path, *, now=None, session_id: str = None) -> dict:
     """Update the heartbeat timestamp."""
     state = load(root)
     if state is None:
@@ -114,6 +164,7 @@ def heartbeat(root: Path, *, now=None) -> dict:
         now = _now_utc()
     state["heartbeat"] = now
     _write_private(_state_path(root), json.dumps(state, indent=2) + "\n")
+    touch_producer_live(root, now, session_id)
     return state
 
 
@@ -152,6 +203,10 @@ def is_stale(state: dict, now: datetime, minutes: int = 15) -> bool:
     if state is None or not state.get("heartbeat"):
         return False
     heartbeat = datetime.fromisoformat(state["heartbeat"])
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
     return now - heartbeat > timedelta(minutes=minutes)
 
 
@@ -215,6 +270,7 @@ def main(argv: list[str] | None = None) -> int:
     adv.add_argument("--phase", required=True, choices=PHASES)
     adv.add_argument("--run-dir")
     adv.add_argument("--detail", default="")
+    adv.add_argument("--session", help="the caller's session id; refreshes producer-live last_seen only if it is the claimed one")
 
     lg = sub.add_parser("log", help="Append a log entry")
     lg.add_argument("--agent", required=True)
@@ -222,7 +278,8 @@ def main(argv: list[str] | None = None) -> int:
     lg.add_argument("--detail", default="")
     lg.add_argument("--link", default="")
 
-    sub.add_parser("heartbeat", help="Refresh the heartbeat")
+    hb = sub.add_parser("heartbeat", help="Refresh the heartbeat")
+    hb.add_argument("--session", help="the caller's session id; refreshes producer-live last_seen only if it is the claimed one")
 
     fin = sub.add_parser("finish", help="Mark job as done")
     fin.add_argument("--outcome", required=True)
@@ -236,13 +293,13 @@ def main(argv: list[str] | None = None) -> int:
         state = start_job(root, args.pdf, args.mode)
         print(json.dumps(state, indent=2))
     elif args.command == "advance":
-        state = advance(root, args.phase, args.run_dir, args.detail)
+        state = advance(root, args.phase, args.run_dir, args.detail, session_id=args.session)
         print(json.dumps(state, indent=2))
     elif args.command == "log":
         log(root, args.agent, args.action, args.detail, args.link)
         print("Logged.")
     elif args.command == "heartbeat":
-        state = heartbeat(root)
+        state = heartbeat(root, session_id=args.session)
         print(json.dumps(state, indent=2))
     elif args.command == "finish":
         state = finish(root, args.outcome)
