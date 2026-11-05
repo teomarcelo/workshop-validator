@@ -162,7 +162,7 @@ class _TextsLoc:
     def evaluate(self, script, arg=None):
         """Visible lines: the fake has no screen-reader-only parts."""
         if script is guide_walk._VISIBLE_LINES_JS:
-            return self.inner_text().splitlines()
+            return {"text": self.inner_text(), "parts": []}
         raise NotImplementedError(script)
 
 

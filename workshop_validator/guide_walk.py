@@ -132,6 +132,9 @@ class WalkState:
     # Per step: (normalized label, note) of the last lookup poll that found its list but no
     # option to pick. At the time limit it is the step's frozen UI_MISMATCH, never a silent miss.
     lookup_miss: tuple = ()
+    # Per step: on a lookup or Resource Type miss, up to 3 options' structures with no text
+    # (_option_shapes), saved into the failure snapshot so the next miss shows the real DOM.
+    option_shapes: list = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -4190,63 +4193,138 @@ def _resource_is_variable(page) -> bool:
     return box is not None and _shown_value(box) == "Variable"
 
 
-# The option's visible lines, read like innerText: a line ends only at a hard boundary
-# (a block-level element, <br>, or a newline in preformatted text), never at a soft wrap.
-# Screen-reader-only text (.slds-assistive-text, or a tiny clipped box), aria-hidden parts
-# and parts with no rendered box are skipped.
+# The option's text as the browser renders it (element.innerText: layout-aware, a soft wrap never
+# splits a line, and text Lightning's custom elements render is included), plus the texts of its
+# screen-reader-only or hidden parts (.slds-assistive-text, aria-hidden="true", a 1px clipped box).
+# "leading" marks a part with no other text before it in the option: it may sit inline at the
+# start of the label line.
 _VISIBLE_LINES_JS = r"""
 (el) => {
   const clipped = (style) =>
     /^rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)$/.test(style.clip) || style.clipPath === "inset(50%)";
-  const hidden = (at, style) => {
-    if (at.classList.contains("slds-assistive-text")) return true;
-    if (at.getAttribute("aria-hidden") === "true") return true;
-    if (style.display === "none" || style.visibility === "hidden" || style.visibility === "collapse") return true;
-    if (style.display !== "contents" && at.getClientRects().length === 0) return true;
+  const tiny = (at) => {
     const box = at.getBoundingClientRect();
-    return box.width <= 1 && box.height <= 1 && clipped(style);
+    return box.width <= 1 && box.height <= 1 && clipped(getComputedStyle(at));
   };
-  const out = [];
-  const walk = (node) => {
-    if (node.nodeType === Node.TEXT_NODE) {
-      const space = getComputedStyle(node.parentElement).whiteSpace;
-      const keep = /^(pre|pre-wrap|pre-line|break-spaces)$/.test(space);
-      out.push(keep ? node.data : node.data.replace(/\s+/g, " "));
-      return;
-    }
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const style = getComputedStyle(node);
-    if (hidden(node, style)) return;
-    if (node.tagName === "BR") { out.push("\n"); return; }
-    const block = node !== el && !style.display.startsWith("inline") && style.display !== "contents";
-    if (block) out.push("\n");
-    for (const child of node.childNodes) walk(child);
-    if (block) out.push("\n");
-  };
-  walk(el);
-  return out.join("").split("\n");
+  const parts = [];
+  for (const at of el.querySelectorAll("*")) {
+    const quiet = at.classList.contains("slds-assistive-text") || at.getAttribute("aria-hidden") === "true";
+    if (!quiet && !tiny(at)) continue;
+    if (at.parentElement && at.parentElement !== el && parts.some((part) => part.node.contains(at))) continue;
+    const text = String(at.innerText || at.textContent || "").trim();
+    if (!text) continue;
+    const before = document.createRange();
+    before.setStart(el, 0);
+    before.setEndBefore(at);
+    parts.push({ node: at, text, leading: before.toString().trim() === "" });
+  }
+  return { text: String(el.innerText || ""), parts: parts.map(({ text, leading }) => ({ text, leading })) };
 }
 """
 
 
 def _option_lines(option) -> list[str]:
-    """The option's visible, non-empty lines. Screen-reader-only text is never read.
+    """The option's visible, non-empty lines, from the browser's own innerText.
 
+    A line that is exactly the text of a screen-reader-only or hidden part is dropped. A leading
+    such part that shares the first line with the label is cut off its start ("Record varSample"
+    reads "varSample"). Nothing is invented: with no line left there is no label.
     An option that cannot be read in the browser has no lines, so it never matches.
     """
     try:
         raw = option.evaluate(_VISIBLE_LINES_JS)
     except Exception:
         return []
-    if not isinstance(raw, list):
+    if not isinstance(raw, dict):
         return []
-    return [line for line in (_plain(item) for item in raw) if line]
+    parts = [
+        (_plain(item.get("text")), bool(item.get("leading")))
+        for item in raw.get("parts") or () if isinstance(item, dict)
+    ]
+    parts = [(text, leading) for text, leading in parts if text]
+    lines = [line for line in (_plain(item) for item in str(raw.get("text") or "").split("\n")) if line]
+    kept = []
+    hidden = {text for text, _leading in parts}
+    for line in lines:
+        if line in hidden:
+            hidden.discard(line)  # this part had its own line; it is gone
+            continue
+        kept.append(line)
+    inline = [text for text, leading in parts if leading and text in hidden]
+    if kept:
+        for text in inline:
+            if kept[0].startswith(text):
+                kept[0] = _plain(kept[0][len(text):])
+                break
+    return [line for line in kept if line]
 
 
 def _option_label(option) -> str:
     """An option's label: its first visible line. Flow Builder adds a description line below it."""
     lines = _option_lines(option)
     return lines[0] if lines else ""
+
+
+# An option's structure with no text: per element its tag, role, class and display, and
+# its children (an open shadow root as "shadow"); each text node is only its length. A
+# TreeWalker is used because Lightning may patch childNodes on its custom elements.
+_OPTION_SHAPE_JS = r"""
+(el) => {
+  let budget = 60;
+  const kids = (root, depth) => {
+    const out = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    for (let node = walker.firstChild(); node && out.length < 12; node = walker.nextSibling()) {
+      const item = shape(node, depth + 1);
+      if (item) out.push(item);
+    }
+    return out;
+  };
+  const shape = (node, depth = 0) => {
+    if (budget <= 0) return null;
+    if (node.nodeType === Node.TEXT_NODE) {
+      const size = node.data.trim().length;
+      if (!size) return null;
+      budget -= 1;
+      return { text: size };
+    }
+    budget -= 1;
+    const style = getComputedStyle(node);
+    const item = {
+      tag: node.tagName.toLowerCase(),
+      role: node.getAttribute("role") || "",
+      class: String(node.getAttribute("class") || "").slice(0, 120),
+      display: style.display,
+    };
+    if (depth < 8) {
+      item.children = kids(node, depth);
+      if (node.shadowRoot) item.shadow = kids(node.shadowRoot, depth);
+    }
+    return item;
+  };
+  return shape(el);
+}
+"""
+
+
+def _option_shapes(scope, limit: int = 3) -> list:
+    """Up to LIMIT options' structures for a failure snapshot. No text is read, only lengths."""
+    shapes = []
+    if scope is None:
+        return shapes
+    try:
+        options = scope.get_by_role("option")
+        total = _count(options)
+    except Exception:
+        return shapes
+    for index in range(min(total, limit)):
+        try:
+            item = options.nth(index).evaluate(_OPTION_SHAPE_JS)
+        except Exception:
+            item = None
+        if isinstance(item, dict):
+            shapes.append(item)
+    return shapes
 
 
 def _by_id(root, ident: str):
@@ -4533,6 +4611,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     if not picks:
         # Not yet: the caller keeps polling. What was in scope is kept for the time limit.
         state.lookup_miss = (norm(label), _lookup_miss_note(root, box, label, want))
+        state.option_shapes = _option_shapes(_owned_scope(root, box, empty_falls_back=True)[1])
         return None
     if len(picks) > 1:
         return CheckResult(
@@ -4594,6 +4673,13 @@ def _resource_type_diagnostic(page) -> str:
     )
 
 
+def _resource_type_miss(state: WalkState, note: str) -> CheckResult:
+    """No single Variable option: nothing is clicked. The options' structure goes to the snapshot."""
+    root, _role, box = _resource_type_box(state.page)
+    state.option_shapes = _option_shapes(_resource_listbox(root, box))
+    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(state.page)}", (), freeze=True)
+
+
 def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     """API Name stays hidden until the resource type is Variable. The choice is read from the page."""
     page = state.page
@@ -4614,7 +4700,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
     picked = _variable_options(page)
     if len(picked) != 1:
         # No option labelled Variable in the Resource Type list, or more than one: nothing is clicked.
-        return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
+        return _resource_type_miss(state, note)
     try:
         picked[0].click(timeout=8000)
     except Exception:
@@ -4637,7 +4723,7 @@ def _choose_resource_variable(state: WalkState) -> CheckResult | None:
         missed = require(state, lambda: _resource_is_variable(state.page), note, limit=limit)
         if missed is None or missed.status != "UI_MISMATCH":
             return missed
-    return CheckResult("UI_MISMATCH", f"{note} {_resource_type_diagnostic(page)}", (), freeze=True)
+    return _resource_type_miss(state, note)
 
 
 def run_record_variable(state: WalkState, step: GuideStep) -> CheckResult:
@@ -6549,6 +6635,7 @@ def walk_guide(
         state.miss_full_wait = {}
         state.step_notes = []
         state.lookup_miss = ()
+        state.option_shapes = []
         if skipped is None:
             _forget_closed_dialogs(state)
         state.step_deadline = t_start + step_cap_s
@@ -6598,7 +6685,7 @@ def walk_guide(
                     state.page, snapshot_dir, index, step.step_id, result.status,
                     result.note or "", roots=_roots(state.page),
                     redact_tree=_redact_aria_snapshot, leaks=snapshot_leaks,
-                    clock=state.clock,
+                    clock=state.clock, option_shapes=state.option_shapes,
                 )
             except Exception as exc:
                 result = replace(
