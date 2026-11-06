@@ -87,5 +87,17 @@ class TeamRulesBlockPositionTests(unittest.TestCase):
         self.assertGreater(len(agent_files), 0, "Agents folder is empty")
 
 
+class RunOperatorPrivateOutputTests(unittest.TestCase):
+    """F23: run-operator writes output only to a private temp folder."""
+
+    def test_run_operator_no_tmp_paths(self):
+        """run-operator.md must not write to world-readable /tmp paths."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+        # Should not contain /tmp/ paths that could be world-readable
+        self.assertNotIn("/tmp/", text,
+                         "run-operator.md contains /tmp/ path; must use mktemp -d with mode 0700")
+
+
 if __name__ == "__main__":
     unittest.main()
