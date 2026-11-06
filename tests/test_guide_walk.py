@@ -193,6 +193,9 @@ class Loc:
     def is_checked(self):
         return str(self.get_attribute("aria-checked")).lower() == "true"
 
+    def hover(self, timeout=None):
+        """The walk hovers an option before its pre-click read (W-115); the fake changes nothing."""
+
     def click(self, timeout=None):
         self.page.events.append(("click", self.kind, self.name))
         reveal = getattr(self.page, "on_click", None)
@@ -253,7 +256,18 @@ class Loc:
                     "value": self.input_value() or self.inner_text() or "",
                     "expanded": self.get_attribute("aria-expanded"),
                     "locked": (self.kind, self.name) in getattr(self.page, "locked", ()),
-                    "selected": selected, "active": False}
+                    "selected": selected}
+        if script is guide_walk._HOLD_JS:
+            # The W-115 hold: ARG is [option, kind, mode]. The fake watches nothing between
+            # polls; "watch" and "read" give whether the signal KIND reads on now.
+            option, kind, mode = arg
+            if mode == "stop":
+                return None
+            if kind == "locked":
+                return (self.kind, self.name) in getattr(self.page, "locked", ())
+            if kind == "selected":
+                return option is not None and option.get_attribute("aria-selected") == "true"
+            return kind == "value"
         if script is guide_walk._LOOKUP_MARKS_JS:
             return (self.kind, self.name) in getattr(self.page, "lookup_marked", ())
         if "tagName" in script:

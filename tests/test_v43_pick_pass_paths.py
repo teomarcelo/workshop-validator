@@ -1,11 +1,13 @@
-"""V43 r6 (W-112): a lookup pick PASSes only on a post-click signal that names the pick.
+"""V43 r7 (W-112, W-115): a lookup pick PASSes only on a post-click signal that names the pick.
 
-The walk types the wanted name before the click, so the box showing it is not evidence. PASS
+The walk types the wanted name before the click, so the box showing it is not evidence. The
+before-read is taken after the option is hovered and right before the click (W-115). PASS
 needs, on one poll: no new pill labelled the name near the field or anywhere on the page, no pill
 on the box or its ancestors; a closed read of the same connected box showing the name that held
-for about a second; and a signal read on that box that changed with the click: its value went
-from other text to the name, it became read-only, or the clicked option became selected or the
-box's active descendant. A pill gives NEEDS_REVIEW (W-110); typed text alone, or a field that
+for about a second; and one W-115 signal, a change from the before-read, read on the first and
+on the last steady read of that box and never broken in between: its value went from other text
+to the name, it became readOnly or aria-readonly, or the clicked option became selected. Active
+descendant, disabled and aria-disabled are not signals. A pill gives NEEDS_REVIEW (W-110); typed text alone, or a field that
 keeps changing, gives NEEDS_REVIEW, not frozen. The non-combobox text fill follows the same rule.
 Real browser, synthetic names only, every request answered locally.
 """
@@ -35,7 +37,6 @@ PASS_START = "Record Variable is recThing. The field shows it, its list closed a
 PASS_LOCKED = PASS_START + "it became read-only."
 PASS_CHANGED = PASS_START + "its value changed to the picked name."
 PASS_SELECTED = PASS_START + "the clicked option reads as selected."
-PASS_ACTIVE = PASS_START + "the box points to the clicked option."
 REVIEW_NOTE = ("Record Variable option recThing was clicked and a selected pill labelled recThing "
                "appears near the field, but the validator cannot prove the pill belongs to this field; "
                "please confirm.")
@@ -220,6 +221,31 @@ POINTS = 'rv.setAttribute("aria-activedescendant", picked.id);'
 SHOWS = 'rv.value = picked.textContent.trim();'
 
 
+def on_load(html, js):
+    """HTML with JS run once at load, at the end of its last script (rv, host and list in scope)."""
+    head, tail = html.rsplit("</script>", 1)
+    return head + js + "\n</script>" + tail
+
+
+# W-115 hover shapes: hovering the option alone sets a mark the click then leaves as it is.
+HOVER_SELECTS = ("document.getElementById('opt1').addEventListener('mouseenter', "
+                 "(event) => event.target.setAttribute('aria-selected', 'true'));")
+HOVER_POINTS = ("document.getElementById('opt1').addEventListener('mouseenter', "
+                "() => rv.setAttribute('aria-activedescendant', 'opt1'));")
+# A second option, labelled something else, that a click on opt1 may mark.
+SECOND_OPTION = '<div role="option" id="opt1">recThing</div><div role="option" id="opt2">recOther</div>'
+
+
+def flip(script_on, script_off, on_ms, off_ms):
+    """Run SCRIPT_ON ON_MS after the click and SCRIPT_OFF OFF_MS after it."""
+    return f"setTimeout(() => {{ {script_on} }}, {on_ms}); setTimeout(() => {{ {script_off} }}, {off_ms});"
+
+
+RO_ON, RO_OFF = "rv.readOnly = true;", "rv.readOnly = false;"
+SEL_ON = "picked.setAttribute('aria-selected', 'true');"
+SEL_OFF = "picked.setAttribute('aria-selected', 'false');"
+
+
 def make_step(step_id, text):
     return GuideStep(step_id, 1, "Exercise 9: Sample", "Task 1: Sample.", "1", text,
                      (90.0, 10.0, 400.0, 24.0), None, ())
@@ -272,9 +298,14 @@ class PickPassPathBrowserTests(unittest.TestCase):
         self.page = page
         return page
 
-    def fill(self, html):
+    def fill(self, html, poll=0.2):
+        """Fill at a 0.2 s poll (3 s step, 2 s pick limit), or at the production 2 s poll
+        (POLL 2.0: 12 s step, 6 s pick limit)."""
         page = self.open(html)
-        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        if poll == 2.0:
+            state = guide_walk.WalkState(page=page, timeout_s=12, interval_s=2.0, page_wait_s=6, page_poll_s=2.0)
+        else:
+            state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=poll, page_wait_s=2, page_poll_s=poll)
         guide_walk._open_guide_dialog(state, "Sample Screen")
         return guide_walk.attempt_step(state, make_step("rv", STEP))
 
@@ -454,8 +485,9 @@ class PickPassPathBrowserTests(unittest.TestCase):
     def test_a_real_pick_that_marks_the_clicked_option_selected_passes(self):
         self.assert_pass(self.fill(typed_html(SELECTS)), PASS_SELECTED)
 
-    def test_a_real_pick_that_points_the_box_at_the_clicked_option_passes(self):
-        self.assert_pass(self.fill(typed_html(POINTS)), PASS_ACTIVE)
+    def test_a_box_that_only_points_at_the_clicked_option_is_review_not_pass(self):
+        # W-115: aria-activedescendant is a highlight, not a pick.
+        self.assert_review(self.fill(typed_html(POINTS)), UNCONFIRMED_NOTE)
 
     def test_a_box_already_read_only_before_the_click_is_no_signal(self):
         # The box turns read-only as soon as the name is typed, before the option click.
@@ -597,6 +629,146 @@ class PickPassPathBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
         self.assertEqual(result.note, MARKED_NOTE)
         self.assertEqual(self.page.evaluate("window.typed"), [])
+
+    # W-115, hover: the before-read is taken after the hover, so a mark hover alone sets is no pick.
+
+    def test_hover_that_marks_the_option_selected_then_a_click_that_picks_nothing_is_review(self):
+        self.assert_review(self.fill(on_load(typed_html(""), HOVER_SELECTS)), UNCONFIRMED_NOTE)
+        self.assertEqual(self.page.get_attribute("#opt1", "aria-selected"), "true")
+
+    def test_hover_that_points_the_box_at_the_option_then_a_click_that_picks_nothing_is_review(self):
+        self.assert_review(self.fill(on_load(typed_html(""), HOVER_POINTS)), UNCONFIRMED_NOTE)
+        self.assertEqual(self.page.get_attribute("#rv", "aria-activedescendant"), "opt1")
+
+    def test_pill_only_typed_text_and_a_pill_beside_and_hover_selected_is_review_at_2_s(self):
+        # The reviewer's shape: the typed text stays, hover marks the option selected, and the only
+        # result is a pill beside the field 3 s later. Never PASS on the hover mark.
+        self.assert_review(self.fill(on_load(typed_html(pill_beside(3000)), HOVER_SELECTS), poll=2.0))
+
+    # W-115, locked for another reason: disabled and aria-disabled are not signals.
+
+    def test_a_box_disabled_while_saving_then_cleared_with_no_pick_is_review_at_2_s(self):
+        after = "rv.disabled = true; setTimeout(() => { rv.disabled = false; }, 3000);"
+        self.assert_review(self.fill(typed_html(after), poll=2.0), UNCONFIRMED_NOTE)
+
+    def test_a_box_aria_disabled_while_loading_then_cleared_with_no_pick_is_review_at_2_s(self):
+        after = ("rv.setAttribute('aria-disabled', 'true'); "
+                 "setTimeout(() => { rv.removeAttribute('aria-disabled'); }, 3000);")
+        self.assert_review(self.fill(typed_html(after), poll=2.0), UNCONFIRMED_NOTE)
+
+    # W-115, hold: the signal must read on the first and the last steady read, unbroken.
+
+    def test_read_only_that_turns_on_late_then_off_is_never_pass_at_0_2_s(self):
+        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 1500))), UNCONFIRMED_NOTE)
+
+    def test_read_only_that_turns_on_late_then_off_is_never_pass_at_2_s(self):
+        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 3000)), poll=2.0), UNCONFIRMED_NOTE)
+
+    def test_read_only_that_turns_off_and_back_on_between_reads_is_never_pass_at_0_2_s(self):
+        self.assert_review(self.fill(typed_html(RO_ON + flip(RO_OFF, RO_ON, 300, 600))), UNSTEADY_NOTE)
+
+    def test_read_only_that_turns_off_and_back_on_between_reads_is_never_pass_at_2_s(self):
+        self.assert_review(self.fill(typed_html(RO_ON + flip(RO_OFF, RO_ON, 500, 1200)), poll=2.0), UNSTEADY_NOTE)
+
+    def test_selected_that_turns_on_late_then_off_is_never_pass_at_0_2_s(self):
+        self.assert_review(self.fill(typed_html(flip(SEL_ON, SEL_OFF, 300, 1500))), UNCONFIRMED_NOTE)
+
+    def test_selected_that_turns_on_late_then_off_is_never_pass_at_2_s(self):
+        self.assert_review(self.fill(typed_html(flip(SEL_ON, SEL_OFF, 300, 3000)), poll=2.0), UNCONFIRMED_NOTE)
+
+    def test_selected_that_turns_off_and_back_on_between_reads_is_never_pass_at_2_s(self):
+        self.assert_review(self.fill(typed_html(SEL_ON + flip(SEL_OFF, SEL_ON, 500, 1200)), poll=2.0),
+                           UNSTEADY_NOTE)
+
+    def test_read_only_that_flickers_every_300_ms_is_never_pass_at_0_2_s(self):
+        after = RO_ON + "setInterval(() => { rv.readOnly = !rv.readOnly; }, 300);"
+        self.assert_review(self.fill(typed_html(after)), UNSTEADY_NOTE)
+
+    def test_read_only_that_flickers_every_300_ms_is_never_pass_at_2_s(self):
+        after = RO_ON + "setInterval(() => { rv.readOnly = !rv.readOnly; }, 300);"
+        self.assert_review(self.fill(typed_html(after), poll=2.0), UNSTEADY_NOTE)
+
+    # Real picks still PASS at the production 2 s poll, one per W-115 signal.
+
+    def test_a_real_pick_that_turns_the_box_read_only_passes_at_2_s(self):
+        self.assert_pass(self.fill(typed_html(LOCKS), poll=2.0), PASS_LOCKED)
+
+    def test_a_real_pick_that_turns_the_box_aria_readonly_passes(self):
+        self.assert_pass(self.fill(typed_html("rv.setAttribute('aria-readonly', 'true');")), PASS_LOCKED)
+
+    def test_a_real_pick_that_turns_the_box_aria_readonly_passes_at_2_s(self):
+        self.assert_pass(self.fill(typed_html("rv.setAttribute('aria-readonly', 'true');"), poll=2.0), PASS_LOCKED)
+
+    def test_a_real_pick_that_marks_the_clicked_option_selected_passes_at_2_s(self):
+        self.assert_pass(self.fill(typed_html(SELECTS), poll=2.0), PASS_SELECTED)
+
+    def test_a_real_pick_that_changes_the_value_to_the_picked_name_passes_at_2_s(self):
+        self.assert_pass(self.fill(typed_html(SHOWS, list_shown=True), poll=2.0), PASS_CHANGED)
+
+    # Guards pinned one by one.
+
+    def test_a_different_option_marked_selected_is_no_signal(self):
+        html = typed_html("document.getElementById('opt2').setAttribute('aria-selected', 'true');")
+        html = html.replace('<div role="option" id="opt1">recThing</div>', SECOND_OPTION)
+        self.assert_review(self.fill(html), UNCONFIRMED_NOTE)
+        self.assertEqual(self.page.get_attribute("#opt2", "aria-selected"), "true")
+
+    def test_a_new_hidden_pill_named_the_pick_does_not_block_a_real_pick(self):
+        hidden = PILL.replace('<span class="slds-pill">', '<span class="slds-pill" hidden>')
+        after = LOCKS + f"document.getElementById('elsewhere').insertAdjacentHTML('beforeend', {hidden!r});"
+        self.assert_pass(self.fill(typed_html(after)), PASS_LOCKED)
+
+    def test_a_pill_while_the_box_still_reads_expanded_is_not_taken_and_ends_frozen(self):
+        # The list hides but the box keeps aria-expanded "true": a pill beside it is not read as
+        # this pick's result until the box closes, so the step ends as the frozen miss.
+        after = "rv.setAttribute('aria-expanded', 'true'); host.insertAdjacentHTML('beforeend', pillHtml);"
+        self.assert_miss(self.fill(typed_html(after)))
+
+    def test_a_text_field_whose_lookup_marks_cannot_be_read_waits_and_types_nothing(self):
+        page = self.open(text_html())
+        real = guide_walk._lookup_marked
+        guide_walk._lookup_marked = lambda _page, _label: None
+        self.addCleanup(setattr, guide_walk, "_lookup_marked", real)
+        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
+        guide_walk._open_guide_dialog(state, "Sample Screen")
+        self.assertIsNone(guide_walk._act_fill(state, make_step("rv", STEP), "Record Variable", "recThing"))
+        self.assertEqual(page.evaluate("window.typed"), [])
+
+    def test_a_text_field_that_controls_another_element_is_review_and_nothing_is_typed(self):
+        result = self.fill(text_html(attrs='aria-controls="elsewhere"'))
+        self.assertEqual((result.status, result.note, result.freeze), ("NEEDS_REVIEW", MARKED_NOTE, False))
+        self.assertEqual(self.page.evaluate("window.typed"), [])
+
+    def test_a_text_field_that_owns_another_element_is_review_and_nothing_is_typed(self):
+        result = self.fill(text_html(attrs='aria-owns="elsewhere"'))
+        self.assertEqual((result.status, result.note, result.freeze), ("NEEDS_REVIEW", MARKED_NOTE, False))
+        self.assertEqual(self.page.evaluate("window.typed"), [])
+
+    def test_a_date_like_text_field_with_a_dialog_popup_is_typed_and_passes_on_its_value(self):
+        result = self.fill(text_html(attrs='aria-haspopup="dialog" placeholder="Pick a date"'))
+        self.assertEqual((result.status, result.note), ("PASS", "Record Variable is recThing."))
+        self.assertEqual(self.page.evaluate("window.typed"), ["recThing"])
+
+    def test_a_textbox_with_suggestions_from_a_datalist_is_typed_and_passes_on_its_value(self):
+        # role="textbox" keeps it off the combobox path (a bare input with a list is a combobox).
+        # Any text is a valid value in a datalist field, so the list attribute is no lookup mark.
+        html = text_html(attrs='role="textbox" list="hints"').replace(
+            "</sample-field>", '<datalist id="hints"><option value="recOther"></option></datalist></sample-field>')
+        result = self.fill(html)
+        self.assertEqual((result.status, result.note), ("PASS", "Record Variable is recThing."))
+        self.assertEqual(self.page.evaluate("window.typed"), ["recThing"])
+
+    def test_a_plain_text_field_whose_value_is_cleared_after_typing_never_passes(self):
+        result = self.fill(text_html(on_input="setTimeout(() => { rv.value = ''; }, 150);"))
+        self.assertNotEqual(result.status, "PASS", result.note)
+        self.assertGreaterEqual(len(self.page.evaluate("window.typed")), 1)
+
+    def test_a_plain_text_field_that_shows_a_pill_only_right_after_typing_is_review_not_pass(self):
+        on_input = ("document.getElementById('elsewhere').insertAdjacentHTML('beforeend', pillHtml); "
+                    "setTimeout(() => { document.getElementById('elsewhere').innerHTML = ''; }, 100);")
+        result = self.fill(text_html(on_input=on_input))
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, TYPED_PILL_NOTE)
 
     # The walk goes on after each review result, and the run is inconclusive (same org).
 

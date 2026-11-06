@@ -4629,8 +4629,10 @@ def _closed_read(root, box, want: str, dialog_name: str = "", first=None, option
 
 
 def _box_before(box, option):
-    """(held, read) of the box just before the option click, for the pick signals; (None, None)
-    when it cannot be read. The held element also anchors the page-wide pill search."""
+    """(held, read) of the box for the pick signals; (None, None) when it cannot be read. W-115:
+    the caller takes this read after it hovered the option and right before the click, so a
+    highlight or selection that hover alone sets is already in it and never counts as the pick.
+    The held element also anchors the page-wide pill search."""
     held = None
     try:
         held = box.element_handle(timeout=1000)
@@ -4640,22 +4642,76 @@ def _box_before(box, option):
     return held, (read if isinstance(read, dict) else None)
 
 
+# W-115: the only PASS signals for a lookup pick, each a change from the read taken after the
+# hover and right before the click. aria-activedescendant (a highlight), disabled and
+# aria-disabled (a page that is saving or loading) are never signals.
+_PICK_SIGNAL_NOTES = {
+    "value": "its value changed to the picked name",
+    "locked": "it became read-only",
+    "selected": "the clicked option reads as selected",
+}
+
+
 def _pick_signal(before: dict | None, read: dict, want: str) -> str:
-    """What, read after the click on the same element as READ, names the pick (W-112); "" if
-    nothing. Each signal is a change from the box's read just before the click: the value went
-    from other text to WANT, the box became read-only or disabled, or the clicked option (by
-    identity) became selected or the box's active descendant. The text the walk typed is never one."""
+    """Which W-115 signal, read after the click on the same element as READ, names the pick; ""
+    if none. Each is a change from BEFORE, the read after the hover and right before the click:
+    the value went from other text to WANT ("value"), the box became readOnly or aria-readonly
+    ("locked"), or the clicked option, by identity, became aria-selected ("selected"). The text
+    the walk typed is never one."""
     if not isinstance(before, dict) or not isinstance(read, dict):
         return ""
     if _plain(before.get("value")) != want and _plain(read.get("value")) == want:
-        return "its value changed to the picked name"
+        return "value"
     if before.get("locked") is False and read.get("locked") is True:
-        return "it became read-only"
+        return "locked"
     if before.get("selected") is False and read.get("selected") is True:
-        return "the clicked option reads as selected"
-    if before.get("active") is False and read.get("active") is True:
-        return "the box points to the clicked option"
+        return "selected"
     return ""
+
+
+# W-115 hold: a signal must hold from the first steady read of the box to the last, on that one
+# element. ARG is [option, kind, mode]. "watch" (on the first read) records the signal KIND and
+# watches the element (and the clicked OPTION) with a MutationObserver and a 50 ms timer; the
+# hold breaks the moment the signal reads off or the element leaves the page, so a signal that
+# flickers or turns off between two polls is caught. "read" (on the last read) is true only when
+# the same KIND and OPTION are watched and the hold never broke; "stop" ends the watch. Anything
+# unread is not a hold.
+_HOLD_JS = r"""(el, arg) => {
+  const [option, kind, mode] = arg;
+  const key = Symbol.for('workshop-validator.pick-hold');
+  const old = el[key];
+  if (mode !== 'watch') {
+    if (!old) return null;
+    if (mode === 'stop') { old.stop(); delete el[key]; return null; }
+    return old.kind === kind && old.option === option && old.broke === false;
+  }
+  if (old) { old.stop(); delete el[key]; }
+  const field = el.matches('input, textarea, select');
+  const shown = () => String((field ? el.value : '') || el.innerText || '');
+  const start = shown();
+  const on = () => kind === 'value' ? shown() === start
+    : kind === 'locked' ? (el.readOnly === true || el.getAttribute('aria-readonly') === 'true')
+    : kind === 'selected' ? (!!option && option.isConnected && option.getAttribute('aria-selected') === 'true')
+    : false;
+  const hold = {kind, option, broke: false};
+  const check = () => { if (!el.isConnected || !on()) hold.broke = true; };
+  const seen = new MutationObserver(check);
+  seen.observe(el, {attributes: true, childList: true, subtree: true, characterData: true});
+  if (option) seen.observe(option, {attributes: true});
+  const timer = setInterval(check, 50);
+  hold.stop = () => { seen.disconnect(); clearInterval(timer); };
+  el[key] = hold;
+  check();
+  return hold.broke === false;
+}"""
+
+
+def _hold(held, option, kind: str, mode: str) -> bool:
+    """Run _HOLD_JS on HELD; True only for a hold that is watched (watch) or never broke (read)."""
+    try:
+        return held.evaluate(_HOLD_JS, [option, kind, mode]) is True
+    except Exception:
+        return False
 
 
 def _variable_options(page) -> list:
@@ -4711,20 +4767,19 @@ _FIELD_HELPERS_JS = r"""
 # it is NOW and still connected (a box removed after NOW resolved reads as not connected), whether
 # it is FIRST (kept), whether any ancestor is a pill (wrapped), the value it shows (a form field's
 # value, else its own text, as input_value then inner_text read it), its aria-expanded (null when
-# the attribute is missing), whether it is read-only or disabled (locked), and whether OPTION,
-# by identity, reads aria-selected="true" (selected) or is the box's aria-activedescendant
-# (active). An element that is not a form field and is, or holds, a pill (pillish, open shadow
-# roots included, as pillsIn reads it) shows no value: its text is the pill's label, and a pill
+# the attribute is missing), whether it is readOnly or aria-readonly (locked), and whether OPTION,
+# by identity, reads aria-selected="true" (selected). disabled, aria-disabled and
+# aria-activedescendant are not read: W-115 makes none of them a signal. An element that is
+# not a form field and is, or holds, a pill (pillish, open shadow roots included, as pillsIn
+# reads it) shows no value: its text is the pill's label, and a pill
 # never proves a pick (W-110).
 _BOX_STATE_JS = "(el, arg) => {" + _FIELD_HELPERS_JS + r"""
   const [now, first, option] = arg;
   const field = el.matches('input, textarea, select');
+  // E1, defense in depth: the wrapped check and the page-wide pill search also cover this.
   const pilled = !field && (pillish(el) || deep(el).some(pillish));
   let wrapped = false;
   for (let n = up(el); n; n = up(n)) if (n.nodeType === 1 && pillish(n)) wrapped = true;
-  const home = el.getRootNode();
-  const active = el.getAttribute('aria-activedescendant') || '';
-  const target = active && home.getElementById ? home.getElementById(active) : null;
   return {
     same: el === now,
     connected: el.isConnected === true,
@@ -4732,10 +4787,8 @@ _BOX_STATE_JS = "(el, arg) => {" + _FIELD_HELPERS_JS + r"""
     wrapped,
     value: pilled ? '' : String((field ? el.value : '') || el.innerText || ''),
     expanded: el.getAttribute('aria-expanded'),
-    locked: el.readOnly === true || el.disabled === true || el.getAttribute('aria-readonly') === 'true'
-      || el.getAttribute('aria-disabled') === 'true',
+    locked: el.readOnly === true || el.getAttribute('aria-readonly') === 'true',
     selected: !!option && option.isConnected && option.getAttribute('aria-selected') === 'true',
-    active: !!option && target === option,
   };
 }"""
 # The lookup's field containers, nearest first: every ancestor of the box, up to but never
@@ -5100,11 +5153,15 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     are never clicked.
 
     The walk types VALUE before the click, so the box showing VALUE is not evidence (W-112).
+    Order (W-115): the page-wide pill set and the field containers are read first, then the
+    option is hovered, then the box and option are read (_box_before), then the option is
+    clicked. A hover that fails leaves no before-read, so nothing can PASS.
     PASS needs, on one poll after the click: no new pill labelled VALUE near the field or
     anywhere on the page; then a closed read of the same connected box (_closed_read) showing
     VALUE that has held on reads at least _PICK_STEADY_S apart (a single re-render restarts the
-    hold on the new element); and a post-click signal on that read that names the pick
-    (_pick_signal). A pill is never PASS evidence (W-110): one labelled VALUE gives NEEDS_REVIEW,
+    hold on the new element); and one W-115 signal (_pick_signal) read on the FIRST closed read
+    of that element, watched without a break (_HOLD_JS) and read again, the same signal, on the
+    last. A signal missing on the first read, or one that breaks, is never PASS. A pill is never PASS evidence (W-110): one labelled VALUE gives NEEDS_REVIEW,
     not frozen. A steady box with no signal, or a box that kept changing, is NEEDS_REVIEW, not
     frozen, so the walk continues. No closed read at all is the frozen UI_MISMATCH.
     """
@@ -5152,7 +5209,14 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         option = picks[0].element_handle(timeout=1000)
     except Exception:
         option = None
+    try:
+        picks[0].hover(timeout=8000)
+        hovered = True
+    except Exception:
+        hovered = False
     anchor, prior = _box_before(box, option)
+    if not hovered:
+        prior = None
     try:
         picks[0].click(timeout=8000)
     except Exception:
@@ -5180,9 +5244,13 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             return False
         seen.append(True)
         if not steady or read.get("kept") is not True:
-            # First closed read, or the box re-rendered: (re)start the hold on this element.
+            # First closed read, or the box re-rendered: (re)start the hold on this element. The
+            # signal it shows now is the one that must hold to the last read (W-115).
             _forget(steady)
-            steady.extend((held, state.clock()))
+            kind = _pick_signal(prior, read, want)
+            if kind and not _hold(held, option, kind, "watch"):
+                kind = ""
+            steady.extend((held, state.clock(), kind))
             return False
         _dispose(held)
         if state.clock() - steady[1] < _PICK_STEADY_S:
@@ -5191,16 +5259,21 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             # A new pill on the page whose label cannot be read (or a search that failed).
             unread.append(True)
             return False
-        signal = _pick_signal(prior, read, want)
-        if not signal:
-            # Steady, but only the typed text: keep reading until the limit for a signal.
+        kind = steady[2]
+        if not kind:
+            # No signal on the first steady read: only the typed text. Never PASS on this element.
             unsigned.append(True)
             return False
-        signals.append(signal)
+        if _pick_signal(prior, read, want) != kind or not _hold(steady[0], option, kind, "read"):
+            # The first read's signal is gone on the last read, or it broke in between.
+            broken.append(True)
+            return False
+        signals.append(_PICK_SIGNAL_NOTES[kind])
         return True
 
     def _forget(kept: list) -> None:
         if kept:
+            _hold(kept[0], option, kept[2], "stop")
             _dispose(kept[0])
         kept.clear()
 
@@ -5208,6 +5281,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     steady: list = []
     seen: list = []
     unsigned: list = []
+    broken: list = []
     unread: list = []
     signals: list = []
     limit = min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
@@ -5225,7 +5299,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
         return CheckResult("NEEDS_REVIEW", _unread_pill_note(label, want), ())
     if missed.status == "UI_MISMATCH" and unsigned:
         return CheckResult("NEEDS_REVIEW", _unconfirmed_pick_note(label, want), ())
-    if missed.status == "UI_MISMATCH" and seen:
+    if missed.status == "UI_MISMATCH" and (broken or seen):
         return CheckResult("NEEDS_REVIEW", _unsteady_pick_note(label, want), ())
     return _stop_here(missed)
 
@@ -6844,16 +6918,19 @@ def _is_lookup(page, label: str) -> bool:
 
 
 # Whether a text field (input, textarea, contenteditable or role textbox; never a button or a
-# select) behaves as a lookup without a combobox or searchbox role: it autocompletes
-# from a list, has a popup, names a list (aria-controls, aria-owns, list), or sits inside a lookup
-# or combobox host (open shadow roots crossed).
+# select) behaves as a lookup without a combobox or searchbox role: it autocompletes from a list
+# (aria-autocomplete list or both), has a listbox popup (aria-haspopup="listbox"), names an
+# element it controls or owns (aria-controls, aria-owns), or sits inside a lookup or combobox host
+# (open shadow roots crossed). Other aria-haspopup values (a date picker's dialog, a menu) and a
+# datalist (the list attribute: suggestions, any text is a valid value) are not lookup marks: such
+# a field is typed into and passes on its value.
 _LOOKUP_MARKS_JS = r"""(el) => {
   if (!el.matches('input, textarea, [contenteditable], [role="textbox"]')) return false;
   const auto = String(el.getAttribute('aria-autocomplete') || '').toLowerCase();
   const popup = String(el.getAttribute('aria-haspopup') || '').toLowerCase();
   if (auto === 'list' || auto === 'both') return true;
-  if (popup && popup !== 'false') return true;
-  if (el.hasAttribute('aria-controls') || el.hasAttribute('aria-owns') || el.hasAttribute('list')) return true;
+  if (popup === 'listbox') return true;
+  if (el.hasAttribute('aria-controls') || el.hasAttribute('aria-owns')) return true;
   const up = (n) => n.parentElement || (n.getRootNode() instanceof ShadowRoot ? n.getRootNode().host : null);
   for (let n = up(el); n; n = up(n)) {
     if (/-(lookup|combobox)$|-combobox-/.test(n.tagName.toLowerCase())) return true;
@@ -6928,7 +7005,11 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         return passed(step, "filled", f"{label} is {value}.")
     if _select_labeled(state.page, label, value, state.step_notes):
         return passed(step, "filled", f"{label} is {value}.")
-    before = _page_pills(_labeled_field(state.page, label))
+    field_el = _labeled_field(state.page, label)
+    try:
+        before = _page_pills(field_el)
+    finally:
+        _dispose(field_el)
     if not _fill_labeled(state, label, value):
         return None
     if _field_value(state, label) != value:
