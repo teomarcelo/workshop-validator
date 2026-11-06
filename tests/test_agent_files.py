@@ -104,8 +104,37 @@ class RunOperatorPrivateOutputTests(unittest.TestCase):
         text = run_operator_file.read_text(encoding="utf-8")
         # Should have mktemp -d
         self.assertIn("mktemp -d", text, "run-operator.md missing mktemp -d")
-        # Should have the failure guard
-        self.assertIn("|| ", text, "run-operator.md missing mktemp failure guard")
+        # Should have the failure guard directly after mktemp -d command substitution
+        guard_pattern = r'mktemp -d[^)]*\)\s*\|\|'
+        self.assertIsNotNone(re.search(guard_pattern, text),
+                            "run-operator.md missing mktemp failure guard directly after mktemp -d")
+
+    def test_run_operator_has_chmod_700(self):
+        """run-operator.md must set mode 700 on temp folder."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+        # Should have chmod 700 on the temp folder variable
+        chmod_pattern = r'chmod\s+700\s+"\$D"'
+        self.assertIsNotNone(re.search(chmod_pattern, text),
+                            "run-operator.md missing chmod 700 on temp folder")
+
+    def test_run_operator_has_exit_trap(self):
+        """run-operator.md must have EXIT trap to remove temp folder."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+        # Should have EXIT trap that removes the temp folder
+        exit_trap_pattern = r'trap\s+\'rm -rf "\$D"\'\s+EXIT'
+        self.assertIsNotNone(re.search(exit_trap_pattern, text),
+                            "run-operator.md missing EXIT trap to remove temp folder")
+
+    def test_run_operator_has_signal_traps(self):
+        """run-operator.md must have TERM/INT/HUP traps."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+        # Should have trap for TERM INT HUP signals
+        signal_trap_pattern = r'trap\s+\'exit 143\'\s+TERM\s+INT\s+HUP'
+        self.assertIsNotNone(re.search(signal_trap_pattern, text),
+                            "run-operator.md missing TERM/INT/HUP trap")
 
 
 class RunOperatorEmailRedactionTests(unittest.TestCase):
