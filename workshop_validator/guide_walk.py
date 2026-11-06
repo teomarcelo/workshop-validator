@@ -6902,37 +6902,31 @@ TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picke
 
 
 # W-116: one read of a labelled select control, on the element held before its option was
-# clicked. ARG is [now, option]: NOW the element the box locator resolves to now, OPTION the clicked
-# option's element. It reads whether the element is NOW and still connected; whether it now reads as
-# a lookup (role combobox or searchbox, its own or a dropdown select's, or a text field); and the
-# value it shows. A native select or a listbox shows its one selected option's first line, only when
-# that option is the clicked one, by identity; any other control shows its own text. The value is
-# null when it cannot be read.
+# clicked. ARG is [now, option]: NOW the element the box locator (its role and name) resolves to
+# now, OPTION the clicked option's element. It reads whether the element is NOW, so it still has
+# that role and name, and whether it is still connected; and the value it shows. A listbox shows
+# its one selected option's first line, only when that option is the clicked one, by identity;
+# any other control shows its own text. The value is null when it cannot be read.
 _SELECT_READ_JS = r"""(el, arg) => {
   const [now, option] = arg;
   const line = (n) => String(n.innerText || n.textContent || '').split('\n')
     .map((s) => s.replace(/\s+/g, ' ').trim()).filter(Boolean)[0] || '';
-  const native = el.tagName === 'SELECT';
-  const own = native && !el.multiple && el.size <= 1 ? 'combobox' : (native ? 'listbox' : '');
-  const role = String(el.getAttribute('role') || own).toLowerCase();
-  const lookup = role === 'combobox' || role === 'searchbox'
-    || el.matches('input, textarea, [contenteditable], [role="textbox"]');
   let value = null;
-  if (native || role === 'listbox') {
-    const chosen = native ? [...el.selectedOptions]
-      : [...el.querySelectorAll('[role="option"][aria-selected="true"]')];
+  if (String(el.getAttribute('role') || '').toLowerCase() === 'listbox') {
+    const chosen = [...el.querySelectorAll('[role="option"][aria-selected="true"]')];
     if (chosen.length === 1 && option && chosen[0] === option) value = line(chosen[0]);
   } else {
     value = String(el.innerText || '');
   }
-  return { same: el === now, connected: el.isConnected === true, lookup, value };
+  return { same: el === now, connected: el.isConnected === true, value };
 }"""
 
 
 def _select_read(box, held, option):
-    """(kept, value) of one _SELECT_READ_JS read of HELD. KEPT is False when the box locator no
-    longer resolves to HELD, HELD left the page, now reads as a lookup, or the read failed; VALUE
-    is the plain shown value, or None when it cannot be read."""
+    """(kept, value) of one _SELECT_READ_JS read of HELD. KEPT is False when BOX, the locator by
+    role and name, no longer resolves to HELD (so a control that turned into a combobox or was
+    re-rendered is never read as the pick), HELD left the page, or the read failed; VALUE is the
+    plain shown value, or None when it cannot be read."""
     now = None
     try:
         now = box.element_handle(timeout=1000)
@@ -6943,16 +6937,14 @@ def _select_read(box, held, option):
         _dispose(now)
     if not isinstance(read, dict) or read.get("same") is not True or read.get("connected") is not True:
         return False, None
-    if read.get("lookup") is not False:
-        return False, None
     value = read.get("value")
     return True, (_plain(value) if isinstance(value, str) else None)
 
 
 def _select_shown(state: WalkState, box, held, option, want: str) -> bool:
     """W-116: True only when HELD, read after the click, shows WANT on at least two polls at least
-    _PICK_STEADY_S apart with no other read between them, and stays the same connected, non-lookup
-    element throughout. A value not shown yet is polled for up to the page wait."""
+    _PICK_STEADY_S apart with no other read between them, and stays the same connected element,
+    with the same role and name, throughout. A value not shown yet is polled for up to the page wait."""
     if held is None or option is None or not want:
         return False
     interval = state.interval_s if state.interval_s > 0 else _PICK_STEADY_S
