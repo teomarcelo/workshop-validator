@@ -2676,7 +2676,11 @@ def _click_locator(loc) -> bool:
         return False
 
 
-def _fill_labeled(state: WalkState, label: str, value: str) -> bool:
+def _fill_labeled(state: WalkState, step: GuideStep, label: str, value: str) -> bool:
+    """Type VALUE into the field labelled LABEL. The (step, label) key goes into
+    state.lookup_typed before anything is tried, so a fill that writes and then raises, or
+    fails, still counts as typed in this step (W-119: the value signal is then off)."""
+    state.lookup_typed.add((step.step_id, norm(label)))
     try:
         loc = state.page.get_by_label(label)
     except Exception:
@@ -5186,8 +5190,7 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     typed_key = (step.step_id, norm(label))
     if not picks:
         if _shown_value(box) != want:
-            if _fill_labeled(state, label, value):
-                state.lookup_typed.add(typed_key)  # W-119: the walk typed in this step.
+            _fill_labeled(state, step, label, value)  # Records typed_key first (W-119).
             root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
             if box is None:
                 return None
@@ -7031,7 +7034,7 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         before = _page_pills(field_el)
     finally:
         _dispose(field_el)
-    if not _fill_labeled(state, label, value):
+    if not _fill_labeled(state, step, label, value):
         return None
     if _field_value(state, label) != value:
         return None
