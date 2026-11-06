@@ -6333,6 +6333,10 @@ def _detect_suspect_flags(
     elif evidence_token.startswith("after-state: ") and " appeared" in evidence_token:
         flags.append("presence-only")
 
+    # W-132: a new element showing the clicked name is never trusted alone; step-verifier checks it.
+    if evidence_token.startswith("after-state: new element shows "):
+        flags.append("new-element-click")
+
     # no-screen-change: URL, title, and headings all unchanged after a screen-change action
     if before_headings is not None and after_headings is not None:
         url_unchanged = before_url == after_url
@@ -6503,42 +6507,60 @@ def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
     return frozenset(named)
 
 
-# V45 (P006N003): one script, two modes, so the before and after reads use the same rules.
+# V45 (P006N003, W-132): one script, two modes, so the before and after reads use the same rules.
 # ARG is [token, want, mode]: a fresh token, the normalized clicked name, and "mark" or "read".
 #
-# The source region is the outermost list or region around the clicked control; with none, it is
-# the nearest ancestor that holds at least two controls of the clicked control's own role (a plain
-# div palette). A match is an element outside the source region (and not holding it), not in and
-# not holding a menu, listbox, tooltip or other popup, that is shown (rendered, visibility visible,
-# no clip, a box larger than 1px left after every overflow-clipping ancestor and the viewport,
-# uncovered at its centre, a cumulative opacity of at least 0.1 for it and every text in it, no CSS
-# ::before or ::after content) and whose text equals WANT (ITEMS kind "text", the raw
-# _VISIBLE_LINES_JS read), or a labelled text field whose value equals WANT (kind "value").
+# SCOPE is the clicked control's nearest dialog (role dialog or alertdialog, or aria-modal=true);
+# with none, its nearest main landmark; with neither, state "no-scope". The SOURCE region is the
+# control's nearest list, listbox, tree, menu or grid ancestor inside the scope; with none, the
+# nearest ancestor inside the scope that holds at least 3 controls of the clicked control's role
+# with distinct names (a plain div palette, not one [Name][i] row). A candidate at or above the
+# scope would hold the whole scope, so it is never used: with no source, state "no-source".
 #
-# "mark", taken after the hover and just before the press: records every element of the clicked
-# control's document (open shadow roots included) by identity, and the matches shown right now.
-# It returns state "marked", "no-source" when no source region is found, or "unproven" when there
-# are too many matches to count.
-# "read": state "unproven" when the mark is missing, from another click or for another element,
-# or there are too many matches; "gone" when the clicked control left the page (a re-render: who
-# owns a new element cannot be read); else "read" with BEFORE (the marked matches) and AFTER (the
-# matches now, each with FRESH true when the element was not in the mark).
+# A match is in the scope, outside the source region (and not holding it), not in and not
+# holding a menu, listbox, tooltip or other popup. It is shown: rendered, visibility visible, no
+# clip, a box larger than 1px left after every overflow-clipping ancestor, not wholly above or
+# left of the document's origin (where nothing can scroll), a cumulative opacity of at least 0.1
+# for it and every text in it, no CSS ::before or ::after content. The viewport and what covers
+# the centre are not read, so scrolling never changes the count. It is innermost: its text equals
+# WANT (ITEMS kind "text", the raw _VISIBLE_LINES_JS read) and no element inside it also has WANT
+# as its whole text, so one shown name in nested wrappers counts once. Or it is a labelled text
+# field whose value equals WANT (kind "value").
+#
+# "mark" records every element in the scope (open shadow roots included) by identity, the matches
+# shown now and the time; it returns state "marked" with COUNT. "read" returns state "unproven"
+# when the mark is missing, from another click or for another element, the scope changed, or
+# there are too many matches; "gone" when the clicked control left the page (who owns a new
+# element cannot be read); "late" more than 5 s after the mark; else "read" with BEFORE (the
+# marked matches) and AFTER (the matches now, each with FRESH true when not in the mark).
 _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
   const [token, want, mode] = arg;
   const visibleLines = __VISIBLE_LINES__;
   const win = el.ownerDocument.defaultView;
   const up = (n) => n.parentElement || (n.getRootNode() instanceof ShadowRoot ? n.getRootNode().host : null);
   const within = (n, box) => { for (let a = n; a; a = up(a)) if (a === box) return true; return false; };
-  let mark = null, source = null;
+  const key = (v) => String(v || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const scopeOf = () => {
+    for (let a = up(el); a; a = up(a)) {
+      if (a.matches && a.matches("[role='dialog'],[role='alertdialog'],[aria-modal='true']")) return a;
+    }
+    for (let a = up(el); a; a = up(a)) if (a.matches && a.matches("main,[role='main']")) return a;
+    return null;
+  };
+  let mark = null, source = null, scope = null;
   if (mode === 'read') {
     mark = win && win.__wvBeforeClick;
     if (!mark || mark.token !== token || mark.clicked !== el) return { state: 'unproven' };
     if (!el.isConnected) return { state: 'gone' };
+    if (!(performance.now() - mark.at <= 5000)) return { state: 'late' };
+    scope = scopeOf();
+    if (!scope || scope !== mark.scope) return { state: 'unproven' };
     source = mark.source;
   } else if (mode === 'mark') {
-    const LISTS = "[role='list'],[role='listbox'],[role='tree'],[role='group'],[role='menu'],[role='menubar'],"
-      + "[role='tablist'],[role='toolbar'],[role='grid'],[role='navigation'],[role='tabpanel'],ul,ol,nav";
-    for (let a = up(el); a; a = up(a)) if (a.matches && a.matches(LISTS)) source = a;
+    scope = scopeOf();
+    if (!scope) return { state: 'no-scope' };
+    const LISTS = "[role='list'],[role='listbox'],[role='tree'],[role='menu'],[role='grid'],ul,ol";
+    for (let a = up(el); a && a !== scope && !source; a = up(a)) if (a.matches && a.matches(LISTS)) source = a;
     if (!source) {
       const roleOf = (n) => {
         const own = String((n.getAttribute && n.getAttribute('role')) || '').trim().split(/\s+/)[0];
@@ -6549,13 +6571,14 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
         if (tag === 'INPUT' && ['button', 'submit', 'reset'].includes(String(n.type || '').toLowerCase())) return 'button';
         return '';
       };
+      const nameOf = (n) => key(n.getAttribute('aria-label')) || key(n.innerText) || key(n.value) || key(n.getAttribute('title'));
       const role = roleOf(el);
       if (role) {
-        for (let a = up(el); a && !source; a = up(a)) {
+        for (let a = up(el); a && a !== scope && !source; a = up(a)) {
           if (!a.querySelectorAll) continue;
-          let same = 0;
-          for (const n of a.querySelectorAll('*')) if (roleOf(n) === role) same += 1;
-          if (same >= 2) source = a;
+          const names = new Set();
+          for (const n of a.querySelectorAll('*')) if (roleOf(n) === role && nameOf(n)) names.add(nameOf(n));
+          if (names.size >= 3) source = a;
         }
       }
     }
@@ -6566,7 +6589,6 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
   const POPUPS = "[role='menu'],[role='menubar'],[role='listbox'],[role='option'],[role='menuitem'],"
     + "[role='combobox'],[role='tree'],[role='grid'],[role='tooltip']";
   const inPopup = (n) => { for (let a = n; a; a = up(a)) if (a.matches && a.matches(POPUPS)) return true; return false; };
-  const key = (v) => String(v || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
   const clippedStyle = (s) =>
     /^rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)$/.test(s.clip) || s.clipPath === 'inset(50%)';
   const pseudo = (e) => ['::before', '::after'].some((at) => {
@@ -6590,15 +6612,8 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
       }
     }
     if (!(alpha >= 0.1)) return false;
-    l = Math.max(l, 0); t = Math.max(t, 0); r = Math.min(r, win.innerWidth); b = Math.min(b, win.innerHeight);
+    l = Math.max(l, -win.scrollX); t = Math.max(t, -win.scrollY);
     if (r - l <= 1 || b - t <= 1) return false;
-    let hit = el.ownerDocument.elementFromPoint((l + r) / 2, (t + b) / 2);
-    while (hit && hit.shadowRoot) {
-      const inner = hit.shadowRoot.elementFromPoint((l + r) / 2, (t + b) / 2);
-      if (!inner || inner === hit) break;
-      hit = inner;
-    }
-    if (!hit || !(within(hit, n) || within(n, hit))) return false;
     if (pseudo(n) || [...n.querySelectorAll('*')].some(pseudo)) return false;
     const texts = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
     for (let node = texts.nextNode(); node; node = texts.nextNode()) {
@@ -6609,6 +6624,7 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
     }
     return true;
   };
+  const innermost = (n) => ![...n.querySelectorAll('*')].some((d) => key(d.innerText) === want);
   const NOT_TEXT = ['hidden', 'password', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file'];
   const labelled = (n) => {
     if (n.labels && [...n.labels].some((label) => key(label.innerText))) return true;
@@ -6635,7 +6651,7 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
         if (tag === 'INPUT' && NOT_TEXT.includes(String(n.type || '').toLowerCase())) continue;
         if (key(n.value) === want && labelled(n) && shown(n)) item = { kind: 'value', value: String(n.value), fresh };
       } else if (tag !== 'SELECT' && tag !== 'OPTION' && tag !== 'SCRIPT' && tag !== 'STYLE') {
-        if (key(n.innerText) === want && shown(n)) item = { kind: 'text', raw: visibleLines(n), fresh };
+        if (key(n.innerText) === want && innermost(n) && shown(n)) item = { kind: 'text', raw: visibleLines(n), fresh };
       }
       if (item) {
         if (items.length >= 50) { overflow = true; return; }
@@ -6643,37 +6659,63 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
       }
     }
   };
-  walk(el.ownerDocument);
+  walk(scope);
   if (overflow) return { state: 'unproven' };
   if (mode === 'mark') {
-    win.__wvBeforeClick = { token, seen, clicked: el, source, before: items };
-    return { state: 'marked' };
+    win.__wvBeforeClick = { token, seen, clicked: el, scope, source, before: items, at: performance.now() };
+    return { state: 'marked', count: items.length };
   }
   return { state: 'read', before: mark.before, after: items };
 }""".replace("__VISIBLE_LINES__", _VISIBLE_LINES_JS.strip())
 
 _CLICK_NO_SOURCE_NOTE = " No source region was found around the clicked control, so a new element could not be read."
+_CLICK_NO_SCOPE_NOTE = " No dialog or main region was found around the clicked control, so a new element could not be read."
+_CLICK_MOVING_NOTE = " The name count was still changing after the hover, so a new element could not be read."
+# W-132: after the hover, the mark waits until the in-scope name count has not changed for
+# _CLICK_SETTLE_STABLE_S, read every _CLICK_SETTLE_STEP_S. The hover and the settle together end
+# by _CLICK_SETTLE_CAP_S; a count still moving then is never marked.
+_CLICK_SETTLE_STEP_S = 0.1
+_CLICK_SETTLE_STABLE_S = 0.5
+_CLICK_SETTLE_CAP_S = 2.0
 
 
 def _mark_before_click(loc, name: str):
-    """(held, token, diag): V45. Hovers the control first, so anything the hover adds is part of
-    the before-state, then takes the identity mark on the element about to be clicked.
-    (None, "", diag) when the mark cannot be taken; DIAG is a note when no source region exists."""
+    """(held, token, diag): V45, W-132. Hovers the control (the click then presses at the same
+    point, so the hover is not repeated), waits for the in-scope name count to settle, and takes
+    the identity mark on the element about to be clicked. (None, "", diag) when no mark is taken;
+    DIAG says why when there is no scope, no source region, or the count kept changing. The hover
+    and the settle add at most _CLICK_SETTLE_CAP_S before the click."""
     held = None
     want = norm(name)
     if not want:
         return None, "", ""
+    start = time.monotonic()
     try:
-        _first(loc).hover(timeout=8000)
-        held = _first(loc).element_handle(timeout=1000)
-        token = f"wv-{time.monotonic_ns()}-{id(held)}"
+        target = _first(loc)
+        target.hover(timeout=1000)
+        held = target.element_handle(timeout=500)
         if held is not None:
-            raw = held.evaluate(_CLICK_NEW_SHOWS_JS, [token, want, "mark"])
-            if isinstance(raw, dict) and raw.get("state") == "marked":
-                return held, token, ""
-            if isinstance(raw, dict) and raw.get("state") == "no-source":
-                _dispose(held)
-                return None, "", _CLICK_NO_SOURCE_NOTE
+            token = f"wv-{time.monotonic_ns()}-{id(held)}"
+            last, since = None, start
+            while True:
+                raw = held.evaluate(_CLICK_NEW_SHOWS_JS, [token, want, "mark"])
+                status = raw.get("state") if isinstance(raw, dict) else None
+                if status in ("no-scope", "no-source"):
+                    _dispose(held)
+                    return None, "", _CLICK_NO_SCOPE_NOTE if status == "no-scope" else _CLICK_NO_SOURCE_NOTE
+                count = raw.get("count") if status == "marked" else None
+                if not isinstance(count, int) or isinstance(count, bool):
+                    break
+                now = time.monotonic()
+                if count != last:
+                    last, since = count, now
+                elif now - since >= _CLICK_SETTLE_STABLE_S:
+                    return held, token, ""
+                left = start + _CLICK_SETTLE_CAP_S - now
+                if left <= 0:
+                    _dispose(held)
+                    return None, "", _CLICK_MOVING_NOTE
+                time.sleep(min(_CLICK_SETTLE_STEP_S, left))
     except Exception:
         pass
     _dispose(held)
@@ -6694,10 +6736,11 @@ def _click_match(item, want: str) -> bool:
 
 
 def _new_element_shows(held, token: str, name: str) -> bool:
-    """V45: True only when, after the click, (1) a visible element that was not on the page before
-    it (by identity), outside the clicked control and the region it was picked from, shows NAME
-    exactly, and (2) the count of shown elements there showing NAME exactly is strictly higher than
-    at the mark. A re-render keeps the count, so it is False. Any failed or unproven read is False."""
+    """V45, W-132: True only when, within 5 s of the mark, (1) a shown innermost element that was
+    not in the mark (by identity), in the clicked control's dialog or main region and outside the
+    region it was picked from, shows NAME exactly, and (2) the count of those places is strictly
+    higher than at the mark. A re-render keeps the count, so it is False. Any failed, late or
+    unproven read is False. Every PASS on this path is flagged "new-element-click"."""
     want = norm(name)
     if held is None or not token or not want:
         return False

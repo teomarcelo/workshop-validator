@@ -69,6 +69,19 @@ PAGE = """<!DOCTYPE html><html><head><style>
     rerenderprops: () => { props.innerHTML = props.innerHTML; },
     laterrerender: () => setTimeout(() => { canvas.innerHTML = canvas.innerHTML; }, 1500),
     hover: () => {},
+    hoverlate: () => {},
+    hoverstream: () => {},
+    wrap: () => { const c = document.querySelector('#canvas .cmp'); c.innerHTML = '<div>' + c.innerHTML + '</div>'; },
+    bold: () => { document.querySelector('#canvas .lbl').innerHTML = '<b>Name</b>'; },
+    body: () => setTimeout(() => add(document.body, 'Name'), 1200),
+    late: () => setTimeout(() => add(canvas, '<span>Name</span>'), 6000),
+    scroll: () => { canvas.innerHTML = canvas.innerHTML; document.getElementById('far').scrollIntoView(); },
+    chip: () => {
+      const chip = document.createElement('span');
+      chip.className = 'chip';
+      chip.textContent = 'Name';
+      document.getElementById('fields').prepend(chip);
+    },
     rerender: () => {
       const list = document.getElementById('fields');
       list.replaceWith(list.cloneNode(true));
@@ -77,6 +90,8 @@ PAGE = """<!DOCTYPE html><html><head><style>
   };
   document.getElementById('f-name').addEventListener('mouseenter', () => {
     if (window.mode === 'hover') add(canvas, '<span>Name</span>');
+    if (window.mode === 'hoverlate') setTimeout(() => add(canvas, '<span>Name</span>'), 300);
+    if (window.mode === 'hoverstream') setInterval(() => add(canvas, '<span>Name</span>'), 150);
   });
   document.getElementById('f-name').addEventListener('click', (event) => {
     event.currentTarget.classList.add('picked');
@@ -90,16 +105,37 @@ LIST_PALETTE = """<ul role="list" id="fields">
       <li><button type="button" id="f-stage">Stage</button></li>
     </ul>"""
 
-# The same palette with no list role or list tag around the buttons.
+# Two buttons with no list role or list tag around them: too few to be a palette (W-132).
 DIV_PALETTE = """<div id="fields">
       <div><button type="button" id="f-name">Name</button></div>
       <div><button type="button" id="f-stage">Stage</button></div>
     </div>"""
 
+# The same plain div palette with three named buttons.
+DIV3_PALETTE = """<div id="fields">
+      <div><button type="button" id="f-name">Name</button></div>
+      <div><button type="button" id="f-stage">Stage</button></div>
+      <div><button type="button" id="f-amount">Amount</button></div>
+    </div>"""
+
+# A plain div palette of [Name][i] rows: one row holds two controls, never a palette alone.
+ROW_PALETTE = """<div id="fields">
+      <div><button type="button" id="f-name">Name</button><button type="button" aria-label="Info">i</button></div>
+      <div><button type="button" id="f-stage">Stage</button><button type="button" aria-label="Info">i</button></div>
+      <div><button type="button" id="f-amount">Amount</button><button type="button" aria-label="Info">i</button></div>
+    </div>"""
+
+# Canvas content far below the first screen, so it is out of view at the mark.
+FAR_CANVAS = '<div style="height:2000px"></div><div class="cmp"><span class="lbl" id="far">Name</span></div>'
+
+DIALOG = 'role="dialog" aria-label="Edit Sample Screen"'
+
 # One button alone: no list and no ancestor with two controls of its role.
 LONE_PALETTE = """<div id="fields"><button type="button" id="f-name">Name</button></div>"""
 
 NO_SOURCE_NOTE = "No source region was found around the clicked control"
+NO_SCOPE_NOTE = "No dialog or main region was found around the clicked control"
+MOVING_NOTE = "The name count was still changing after the hover"
 
 
 def _click_step():
@@ -132,13 +168,14 @@ class ClickNewElementBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def click(self, mode, canvas="", props="", palette=LIST_PALETTE):
+    def click(self, mode, canvas="", props="", palette=LIST_PALETTE, region=DIALOG, timeout_s=3):
         page = self.browser.new_page()
         self.addCleanup(page.close)
         page.set_content(PAGE.replace("__PALETTE__", palette).replace("__CANVAS__", canvas)
-                         .replace("__PROPS__", props))
+                         .replace("__PROPS__", props).replace(DIALOG, region))
         page.evaluate("(mode) => { window.mode = mode; }", mode)
-        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=3, page_poll_s=0.2)
+        state = guide_walk.WalkState(page=page, timeout_s=timeout_s, interval_s=0.2,
+                                     page_wait_s=timeout_s, page_poll_s=0.2)
         state.step_deadline = state.clock() + 60
         result = guide_walk._act_click(state, _click_step(), "Name")
         self.assertIsNotNone(result)
@@ -154,6 +191,7 @@ class ClickNewElementBrowserTests(unittest.TestCase):
     def assert_new_element_pass(self, result):
         self.assertEqual(result.status, "PASS", result.note)
         self.assertEqual(result.evidence_ids, ("P1N1:after-state:-new-element-shows-Name",))
+        self.assertIn("new-element-click", result.suspect)
         self.assertEqual(_gate(result.status, result.note), (SUCCESS, SUCCESS))
 
     # Fails on 5bda7b9 (NEEDS_REVIEW there).
@@ -236,10 +274,56 @@ class ClickNewElementBrowserTests(unittest.TestCase):
         self.assert_needs_review(self.click("hover"))
 
     def test_real_placement_from_a_plain_div_palette_passes(self):
-        self.assert_new_element_pass(self.click("place", palette=DIV_PALETTE))
+        self.assert_new_element_pass(self.click("place", palette=DIV3_PALETTE))
+
+    # W-132: two controls are not a palette, so there is no source region.
+    def test_two_button_plain_div_palette_needs_review_with_a_diagnostic(self):
+        result = self.click("place", palette=DIV_PALETTE)
+        self.assert_needs_review(result)
+        self.assertIn(NO_SOURCE_NOTE, result.note)
+
+    def test_real_placement_in_a_main_region_passes(self):
+        self.assert_new_element_pass(self.click("place", region='role="main"'))
+
+    def test_no_dialog_or_main_region_needs_review_with_a_diagnostic(self):
+        result = self.click("place", region='class="plain"')
+        self.assert_needs_review(result)
+        self.assertIn(NO_SCOPE_NOTE, result.note)
+
+    # W-132 tests below fail on ca1084d (PASS there).
+    def test_canvas_name_re_rendered_inside_an_extra_wrapper_needs_review(self):
+        canvas = '<div class="cmp"><span class="lbl">Name</span></div>'
+        self.assert_needs_review(self.click("wrap", canvas=canvas))
+
+    def test_canvas_name_re_rendered_as_bold_needs_review(self):
+        canvas = '<div class="cmp"><span class="lbl">Name</span></div>'
+        self.assert_needs_review(self.click("bold", canvas=canvas))
+
+    def test_hover_adds_the_name_after_300_ms_and_click_does_nothing_needs_review(self):
+        self.assert_needs_review(self.click("hoverlate"))
+
+    def test_hover_keeps_adding_the_name_needs_review_with_a_diagnostic(self):
+        result = self.click("hoverstream")
+        self.assert_needs_review(result)
+        self.assertIn(MOVING_NOTE, result.note)
+
+    def test_timer_adds_the_name_outside_the_dialog_needs_review(self):
+        self.assert_needs_review(self.click("body"))
+
+    def test_timer_adds_the_name_in_the_dialog_after_6_s_needs_review(self):
+        self.assert_needs_review(self.click("late", timeout_s=8))
+
+    def test_name_scrolled_out_of_view_then_re_rendered_into_view_needs_review(self):
+        self.assert_needs_review(self.click("scroll", canvas=FAR_CANVAS))
+
+    def test_name_chip_inside_a_row_palette_needs_review(self):
+        self.assert_needs_review(self.click("chip", palette=ROW_PALETTE))
+
+    def test_real_placement_from_a_row_palette_passes(self):
+        self.assert_new_element_pass(self.click("place", palette=ROW_PALETTE))
 
     def test_plain_div_palette_click_that_does_nothing_needs_review(self):
-        self.assert_needs_review(self.click("nothing", palette=DIV_PALETTE))
+        self.assert_needs_review(self.click("nothing", palette=DIV3_PALETTE))
 
     def test_no_source_region_needs_review_with_a_diagnostic(self):
         result = self.click("place", palette=LONE_PALETTE)
@@ -281,6 +365,7 @@ class NewElementReadFailsClosedTests(unittest.TestCase):
             (None, "tok"),
             (self.Handle(error=True), "tok"),
             (self.Handle(raw={"state": "unproven"}), "tok"),
+            (self.Handle(raw={"state": "late", "before": [], "after": [good]}), "tok"),
             (self.Handle(raw={"state": "gone", "before": [], "after": [good]}), "tok"),
             (self.Handle(raw="read"), "tok"),
             (self.read([good]), ""),
@@ -311,6 +396,96 @@ class NewElementReadFailsClosedTests(unittest.TestCase):
         self.assertTrue(guide_walk._new_element_shows(
             self.read([self.text(fresh=False), self.text()], before=[self.text(fresh=False)]), "tok", "Name"))
 
+
+class NewElementSuspectFlagTests(unittest.TestCase):
+    """W-132: every PASS on the new-element path is flagged, so step-verifier always checks it."""
+
+    def test_new_element_evidence_is_flagged(self):
+        flags = guide_walk._detect_suspect_flags(
+            _click_step(), "after-state: new element shows Name", frozenset(), frozenset())
+        self.assertIn("new-element-click", flags)
+
+    def test_other_evidence_is_not_flagged_as_new_element(self):
+        flags = guide_walk._detect_suspect_flags(
+            _click_step(), "after-state: dialog opened", frozenset(), frozenset())
+        self.assertNotIn("new-element-click", flags)
+
+
+class MarkSettleTests(unittest.TestCase):
+    """W-132: the mark is taken only once the in-scope name count has settled after the hover."""
+
+    class Held:
+        def __init__(self, counts):
+            self.counts, self.reads = list(counts), 0
+
+        def evaluate(self, script, arg=None):
+            index = min(self.reads, len(self.counts) - 1)
+            self.reads += 1
+            count = self.counts[index]
+            if isinstance(count, str):
+                return {"state": count}
+            return {"state": "marked", "count": count}
+
+        def dispose(self):
+            pass
+
+    class Target:
+        def __init__(self, held):
+            self.held, self.hovers = held, 0
+
+        def hover(self, timeout=None):
+            self.hovers += 1
+
+        def element_handle(self, timeout=None):
+            return self.held
+
+    def mark(self, counts):
+        held = self.Held(counts)
+        target = self.Target(held)
+        started = guide_walk.time.monotonic()
+        result = guide_walk._mark_before_click(target, "Name")
+        self.assertEqual(target.hovers, 1, "one hover only")
+        self.assertLessEqual(guide_walk.time.monotonic() - started, 2.5, "at most about 2 s added")
+        return result, held
+
+    def test_stable_count_is_marked(self):
+        (held, token, diag), fake = self.mark([0])
+        self.assertIs(held, fake)
+        self.assertTrue(token)
+        self.assertEqual(diag, "")
+        self.assertGreaterEqual(fake.reads, 5, "the count was read for about 500 ms")
+
+    def test_count_that_changes_then_settles_is_marked_after_it_settles(self):
+        (held, token, diag), fake = self.mark([0, 0, 0, 1])
+        self.assertIs(held, fake)
+        self.assertGreaterEqual(fake.reads, 9, "500 ms of stable reads after the change")
+
+    def test_moving_count_is_never_marked(self):
+        (held, token, diag), _fake = self.mark(list(range(200)))
+        self.assertIsNone(held)
+        self.assertEqual(token, "")
+        self.assertIn("still changing after the hover", diag)
+
+    def test_no_scope_and_no_source_are_not_marked(self):
+        for state, words in (("no-scope", "No dialog or main region"), ("no-source", "No source region")):
+            with self.subTest(state=state):
+                (held, token, diag), _fake = self.mark([state])
+                self.assertIsNone(held)
+                self.assertIn(words, diag)
+
+    def test_odd_reads_are_not_marked(self):
+        class Raw(self.Held):
+            def __init__(self, raw):
+                super().__init__([0])
+                self.raw = raw
+
+            def evaluate(self, script, arg=None):
+                return self.raw
+
+        for raw in (None, "marked", {"state": "unproven"}, {"state": "marked"},
+                    {"state": "marked", "count": True}, {"state": "marked", "count": "0"}):
+            with self.subTest(raw=raw):
+                self.assertEqual(guide_walk._mark_before_click(self.Target(Raw(raw)), "Name"), (None, "", ""))
 
 if __name__ == "__main__":
     unittest.main()
