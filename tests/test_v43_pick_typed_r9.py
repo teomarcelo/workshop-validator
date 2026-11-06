@@ -149,12 +149,15 @@ class PickTypedR9BrowserTests(unittest.TestCase):
         self.assert_pass(result, PASS_SELECTED)
 
     # The one-second hold edges at the 0.2 s poll (code review finding 4).
+    # Edges moved away from the 1000 ms boundary to avoid timing-dependent results:
+    # - NEEDS_REVIEW: read-only on for 800 ms (1100 - 300), well under 1000 ms
+    # - PASS: read-only on for 2500 ms (2800 - 300), well over 1000 ms
 
-    def test_read_only_on_at_300_ms_off_at_1500_ms_is_review_at_0_2_s(self):
-        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 1500))), UNCONFIRMED_NOTE)
+    def test_read_only_on_at_300_ms_off_at_1100_ms_is_review_at_0_2_s(self):
+        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 1100))), UNCONFIRMED_NOTE)
 
-    def test_read_only_on_at_300_ms_off_at_2500_ms_passes_at_0_2_s(self):
-        self.assert_pass(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 2500))), PASS_LOCKED)
+    def test_read_only_on_at_300_ms_off_at_2800_ms_passes_at_0_2_s(self):
+        self.assert_pass(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 2800))), PASS_LOCKED)
 
 
 del _BASE  # Not a test class of this file.
