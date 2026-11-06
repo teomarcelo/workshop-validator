@@ -552,6 +552,26 @@ class PickPassPathBrowserTests(unittest.TestCase):
         self.assertEqual(result.note, TYPED_PILL_NOTE)
         self.assertFalse(result.freeze)
 
+    def test_a_plain_text_field_that_shows_a_pill_one_poll_after_typing_is_review_not_pass(self):
+        # The pill shows in the first sleep after the name was typed: the read right after typing
+        # sees none, the read one poll later does.
+        page = self.open(text_html())
+        shown = []
+
+        def sleeper(seconds):
+            if not shown and page.evaluate("window.typed.length") > 0:
+                page.evaluate("() => host.insertAdjacentHTML('beforeend', pillHtml)")
+                shown.append(True)
+            page.wait_for_timeout(20)
+
+        state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2,
+                                     sleeper=sleeper)
+        guide_walk._open_guide_dialog(state, "Sample Screen")
+        result = guide_walk.attempt_step(state, make_step("rv", STEP))
+        self.assertEqual(shown, [True])
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, TYPED_PILL_NOTE)
+
     def test_a_plain_text_field_that_shows_a_pill_at_once_is_review_not_pass(self):
         html = text_html(on_input="document.getElementById('elsewhere').insertAdjacentHTML('beforeend', pillHtml);")
         result = self.fill(html)
