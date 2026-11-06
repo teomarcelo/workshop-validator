@@ -6901,12 +6901,38 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
 TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
 
 
-def _select_labeled(page, label: str, value: str, notes: list | None = None) -> bool:
+# W-116: read the selected value from a select/picklist control after the click. For a native
+# <select>, the selected option's text; for a button or combobox, the shown value (input_value or
+# inner_text). Returns the plain value, or None when it cannot be read.
+_SELECT_VALUE_JS = r"""(el) => {
+  if (el.tagName === 'SELECT') {
+    const option = el.options[el.selectedIndex];
+    return option ? String(option.textContent || '').replace(/\s+/g, ' ').trim() : '';
+  }
+  const field = el.matches('input, textarea, select');
+  return String((field ? el.value : '') || el.innerText || '');
+}"""
+
+
+def _read_select_value(box) -> str | None:
+    """The value shown by a select/picklist control; None when it cannot be read. W-116."""
+    if box is None:
+        return None
+    try:
+        read = box.evaluate(_SELECT_VALUE_JS)
+        return _plain(read) if isinstance(read, str) else None
+    except Exception:
+        return None
+
+
+def _select_labeled(state: WalkState, label: str, value: str, notes: list | None = None) -> bool:
     """Lightning dropdowns such as Data Type are choices, not text fields.
 
     A dropdown found only by its visible text (LABEL is not its accessible name) owns no
     list the walk can read, so no option is clicked; a note for triage is added to NOTES.
+    W-116: PASS only when the value is read back after the click and holds on two polls.
     """
+    page = state.page
     opened = (
         click_role(page, "combobox", label)
         or click_role(page, "button", label)
@@ -6919,12 +6945,21 @@ def _select_labeled(page, label: str, value: str, notes: list | None = None) -> 
             opened = by_text = _click_locator(loc)
     if not opened and not present(page, "option", value):
         return False
-    # Only an option in the list this control owns, matched by its first line, is clicked.
+    # W-116 race: re-check the box's role right before acting. If it became a lookup, hand off to
+    # the lookup pick path by returning False here; _act_fill will try the lookup path next.
     root, role, box = _labeled_box(page, label, ("combobox", "button", "listbox"))
     if box is None:
         if by_text and notes is not None and TEXT_ONLY_DROPDOWN_NOTE not in notes:
             notes.append(TEXT_ONLY_DROPDOWN_NOTE)
         return False
+    # If the control is now a combobox with lookup marks, it's a lookup, not a select.
+    if role == "combobox":
+        try:
+            is_lookup = box.evaluate(_LOOKUP_MARKS_JS)
+            if is_lookup is True:
+                return False
+        except Exception:
+            pass
     if role == "listbox":
         picks = [option for option, text, shown in _scoped_options(box) if shown and text == _plain(value)]
     else:
@@ -6935,6 +6970,17 @@ def _select_labeled(page, label: str, value: str, notes: list | None = None) -> 
         picks[0].click(timeout=8000)
     except Exception:
         return False
+    # W-116: read the value back after the click. PASS only when it equals VALUE and holds on
+    # two polls (at 0.2 s and 2 s). If it cannot be read, or does not match, return False so
+    # the caller can try other paths or report NEEDS_REVIEW.
+    want = _plain(value)
+    for wait_s in (0.2, 2.0):
+        _sleep(state, wait_s)
+        # Re-find the box on each poll.
+        _root, _role, box_now = _labeled_box(page, label, ("combobox", "button", "listbox"))
+        read_value = _read_select_value(box_now)
+        if read_value != want:
+            return False
     return True
 
 
@@ -7028,7 +7074,7 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         return CheckResult("NEEDS_REVIEW", _marked_lookup_note(label), ())
     if _field_value(state, label) == value:
         return passed(step, "filled", f"{label} is {value}.")
-    if _select_labeled(state.page, label, value, state.step_notes):
+    if _select_labeled(state, label, value, state.step_notes):
         return passed(step, "filled", f"{label} is {value}.")
     field_el = _labeled_field(state.page, label)
     try:
