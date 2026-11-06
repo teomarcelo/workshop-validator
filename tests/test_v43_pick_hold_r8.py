@@ -148,10 +148,12 @@ class PickHoldR8BrowserTests(unittest.TestCase):
     # (3) Every kept read checks the signal; a watch that did not run is no hold.
 
     def h2(self, interval, page_wait_s):
-        """Page timers pause after the first read; read-only is off on polls 2 and 3, then on."""
+        """Page timers pause after the first read; read-only is off on polls 2 and 3, then on.
+        The pause jumps only 20 ms, so the watch's last run is recent and only the reads see
+        read-only off."""
         def on_poll(n):
             if n == 1:
-                self.page.clock.pause_at(self.page.evaluate("Date.now()") + 1000)
+                self.page.clock.pause_at(self.page.evaluate("Date.now()") + 20)
                 self.page.evaluate("() => { rv.readOnly = false; }")
             if n == 3:
                 self.page.evaluate("() => { rv.readOnly = true; }")
@@ -163,6 +165,27 @@ class PickHoldR8BrowserTests(unittest.TestCase):
 
     def test_h2_timers_paused_read_only_off_on_two_polls_then_on_is_review_at_2_s(self):
         self.assert_review(self.h2(2.0, 6.0), UNSTEADY_NOTE)
+        self.assertTrue(self.page.evaluate("document.getElementById('rv').readOnly"))
+
+    def test_a_read_with_the_signal_off_breaks_the_hold_even_when_the_watch_reads_unbroken(self):
+        # The watch is made to read unbroken on every read (as when the page changes the box
+        # between two of its runs): only the reads see read-only off on polls 2 and 3. The break
+        # is final, so read-only back on from poll 4 is still not a hold.
+        real = guide_walk._hold
+
+        def blind(held, option, kind, mode):
+            out = real(held, option, kind, mode)
+            return True if mode == "read" else out
+
+        def on_poll(n):
+            if n == 1:
+                self.page.evaluate("() => { rv.readOnly = false; }")
+            if n == 3:
+                self.page.evaluate("() => { rv.readOnly = true; }")
+
+        with mock.patch.object(guide_walk, "_hold", blind):
+            result = self.scripted(typed_html(LOCKS), on_poll, 0.25, 2.0)
+        self.assert_review(result, UNSTEADY_NOTE)
         self.assertTrue(self.page.evaluate("document.getElementById('rv').readOnly"))
 
     def test_h5_page_replaces_set_interval_is_review_at_0_2_s(self):
