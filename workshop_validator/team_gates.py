@@ -56,7 +56,15 @@ def _redact_stderr(stderr: str) -> str:
 
 
 def _printable_name(name: str) -> str:
-    """Folder name for printing: control characters stripped, emails and tokens redacted."""
+    """Folder name for printing, through `_redact_stderr`.
+
+    Tabs become spaces. Other control and format characters are stripped,
+    except `\\n`, which is kept. U+2028 and U+2029 are not stripped there;
+    `splitlines` treats them as line breaks, so they come out as `\\n`.
+    Emails, tokens and runs of 40+ token characters are redacted, and only
+    the first 5 lines are kept. In practice a name never holds a line break,
+    because `parse_worktrees` splits the porcelain output on those first.
+    """
     return _redact_stderr(name.replace("\t", " "))
 
 

@@ -403,6 +403,40 @@ class PidParsingTests(unittest.TestCase):
             self.assertIn("kept 1", output)
             self.assertIn("locked", output)
 
+    def test_pid_over_int_digit_limit_kept_locked(self):
+        """A pid of 5,000 digits (over Python's int limit) is kept locked, dry and real."""
+        for dry_run in (True, False):
+            with self.subTest(dry_run=dry_run), tempfile.TemporaryDirectory() as tmp:
+                repo = Path(tmp).resolve()
+                wt = repo / "agent-wt"
+                wt.mkdir(parents=True)
+                branch_oid = "a" * 40
+                long_pid = "7" * 5000
+
+                porcelain = (f"worktree {repo}\nHEAD {'0' * 40}\nbranch refs/heads/main\n\n"
+                             f"worktree {wt}\nHEAD {branch_oid}\nbranch refs/heads/automation/2026-01-01-test\n"
+                             f"locked pid {long_pid}\n")
+
+                runner = FakeRunner([
+                    (lambda c: c[:3] == ["git", "worktree", "list"], 0, porcelain, ""),
+                    (lambda c: c[:2] == ["gh", "pr"], 0, "[]", ""),
+                    (lambda c: c[:2] == ["git", "status"], 0, "", ""),
+                    (lambda c: c[:2] == ["git", "rev-parse"], 0, branch_oid + "\n", ""),
+                    (lambda c: c[:3] == ["git", "worktree", "prune"], 0, "", ""),
+                ])
+
+                out = io.StringIO()
+                with mock.patch.object(team_gates.os, "kill", side_effect=ProcessLookupError) as kill, \
+                        contextlib.redirect_stdout(out):
+                    team_gates.worktree_cleanup(repo, runner=runner, idle_hours=0.0, dry_run=dry_run)
+
+                output = out.getvalue()
+                kill.assert_not_called()
+                self.assertNotIn("stale-lock", output)
+                self.assertIn("kept 1 (1 locked)", output)
+                self.assertEqual(runner.find("git", "worktree", "remove"), [])
+                self.assertTrue(wt.is_dir())
+
     def test_bare_locked_line_no_crash(self):
         """Bare 'locked' line with no reason does not crash."""
         with tempfile.TemporaryDirectory() as tmp:
