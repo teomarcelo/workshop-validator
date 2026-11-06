@@ -267,6 +267,15 @@ class TaskBoundaryPopupTests(unittest.TestCase):
         # The ":" at the end of "Sample miss:" should be preserved
         self.assertEqual(outcome.notes["a3"], "blocked by a2: Sample miss:")
 
+    def test_blocked_note_after_a_failure_with_an_empty_note_reads_cleanly(self):
+        # A failure with no note gives "blocked by a2", with no trailing ": ".
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult("UI_MISMATCH", "", (), freeze=True)
+        })
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertEqual(outcome.notes["a3"], "blocked by a2")
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+
 
 def _run(*statuses, notes=None):
     notes = notes or {}
@@ -284,10 +293,24 @@ class GateTests(unittest.TestCase):
                              4: "Second sample miss.", 5: "blocked by s4: Second sample miss."})
         self.assertEqual(outcome_of(result), (FAILED, "First sample miss."))
         self.assertEqual(gate_outcome_of(result), FAILED)
+        # Added (PR 65 review): the shape above passes on the old gate too. Here the
+        # second task stops on a review step, which the old gate (stop step only) called
+        # inconclusive; the first task's failure must still make it FAILED.
+        result = _run("PASS", "UI_MISMATCH", "NOT_RUN", "PASS", "NEEDS_REVIEW", "NOT_RUN",
+                      notes={1: "First sample miss.", 2: "blocked by s1: First sample miss.",
+                             4: "Second sample review."})
+        self.assertEqual(outcome_of(result), (FAILED, "First sample miss."))
+        self.assertEqual(gate_outcome_of(result), FAILED)
 
     def test_failure_then_passes_to_the_end_is_failed_for_the_gate(self):
         result = _run("PASS", "UI_MISMATCH", "NOT_RUN", "PASS", "PASS",
                       notes={1: "First sample miss.", 2: "blocked by s1: First sample miss."})
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        # Added (PR 65 review): the shape above passes on the old gate too. Here the walk
+        # passes on and then stops out of time, which the old gate called inconclusive.
+        result = _run("PASS", "UI_MISMATCH", "NOT_RUN", "PASS", "PASS", "NOT_RUN", "NOT_RUN",
+                      notes={1: "First sample miss.", 2: "blocked by s1: First sample miss.",
+                             5: guide_walk.OUT_OF_TIME_NOTE})
         self.assertEqual(gate_outcome_of(result), FAILED)
 
 

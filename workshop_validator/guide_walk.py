@@ -6891,16 +6891,12 @@ BLOCKED_BY_PREFIX = "blocked by "
 AFTER_FAILURE_FLAG = "after-earlier-failure"
 
 
-def _task_key(step: GuideStep, task_positions: dict | None = None) -> tuple:
+def _task_key(step: GuideStep, task_positions: dict) -> tuple:
     """Return a unique key for the task this step belongs to.
 
     Uses the task's position (first step index) in the inventory, not just its label,
     so repeated task labels get different keys.
     """
-    if task_positions is None:
-        # Fallback for tests that don't provide positions
-        return (getattr(step, "exercise", None), getattr(step, "task", None))
-
     exercise = getattr(step, "exercise", None)
     task = getattr(step, "task", None)
     # Look up the position of this task occurrence

@@ -221,10 +221,14 @@ def stopping_step_of(steps):
 
 
 def gate_outcome_of(result) -> str:
-    """Classify for the org-move decision. W-121: return FAILED when a real failure
-    (UI_MISMATCH or FUNCTIONAL_FAIL), frozen or not, comes before the stopping step.
-    W-111: if a non-frozen overrun NOT_RUN or inconclusive step comes before that
-    first real failure, return inconclusive.
+    """Classify a run for the org-move decision.
+
+    It looks for the first real failure (UI_MISMATCH or FUNCTIONAL_FAIL) at or before the
+    stopping step. W-111: if a non-frozen NOT_RUN whose note says the step exceeded its
+    time limit (an overrun) comes before that first real failure, the result is
+    inconclusive. Otherwise, W-121: a real failure, frozen or not, before the stopping
+    step gives FAILED. With no such failure, the stopping step is judged, and a walk with
+    no stopping step uses outcome_of.
     """
     steps = result.report_steps
     if not steps:
@@ -291,6 +295,15 @@ def org_changed(result) -> bool:
             if token not in _READ_ONLY and not token.startswith("already-set"):
                 return True
     return False
+
+
+def org_used(result, gate_outcome: str) -> bool:
+    """True when this run used up its org, so the next run moves to the next org.
+
+    A success always uses the org. A real failure uses it only once a step changed
+    the org (org_changed). An inconclusive run keeps the org.
+    """
+    return gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
 
 
 def org_key(username: str) -> str:
@@ -462,9 +475,10 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
         write_results_pdf(board, output / "results.pdf")
     record_lessons(private_root, [(s.title, s.status, s.note) for s in result.report_steps])
     # A success or a real failure used this org, unless nothing in it changed.
-    # Inconclusive runs keep it. The org decision judges the stopping step only.
+    # Inconclusive runs keep it. gate_outcome_of judges the first real failure before
+    # the stop as well as the stopping step (W-121), unless an overrun came first (W-111).
     gate_outcome = gate_outcome_of(result)
-    used = gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
+    used = org_used(result, gate_outcome)
     def finish(gate: dict) -> None:
         # Read-modify-write under the gate lock: a claim that ran during this walk
         # keeps its floor and pointer (W-099), and keys this run does not own stay.
