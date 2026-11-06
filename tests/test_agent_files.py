@@ -177,5 +177,171 @@ class RunOperatorEmailRedactionTests(unittest.TestCase):
                          f"Email redaction failed. Got: {result.stdout.strip()}")
 
 
+def extract_run_command(agent_text):
+    """Extract the single backticked shell command that runs automate from run-operator.md."""
+    # Find all backtick code blocks
+    code_blocks = re.findall(r'`([^`]+)`', agent_text, re.DOTALL)
+    # Filter for commands that contain workshop_validator.automate
+    automate_commands = [block for block in code_blocks if 'workshop_validator.automate' in block]
+
+    if len(automate_commands) != 1:
+        raise ValueError(f"Expected exactly one backticked automate command, found {len(automate_commands)}")
+
+    return automate_commands[0]
+
+
+class RunOperatorRunLinePinsTests(unittest.TestCase):
+    """F25: Pin critical guards and order on the run line."""
+
+    def source(self):
+        return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
+
+    def run_command(self):
+        return extract_run_command(self.source())
+
+    def test_exactly_one_automate_command(self):
+        """run-operator.md must have exactly one backticked shell command running automate."""
+        text = self.source()
+        code_blocks = re.findall(r'`([^`]+)`', text, re.DOTALL)
+        automate_commands = [block for block in code_blocks if 'workshop_validator.automate' in block]
+        self.assertEqual(len(automate_commands), 1,
+                        f"Expected exactly one backticked automate command, found {len(automate_commands)}")
+
+    def test_mktemp_guard_on_run_line(self):
+        """The mktemp -d assignment must have the guard on the run line."""
+        cmd = self.run_command()
+        # Pin the guard pattern: D=$(mktemp -d) || { ...; exit 2; }
+        guard_pattern = r'D=\$\(mktemp -d\)\s*\|\|\s*\{[^}]*exit 2[^}]*\}'
+        self.assertIsNotNone(re.search(guard_pattern, cmd),
+                            "run line missing mktemp guard: D=$(mktemp -d) || { ...; exit 2; }")
+
+    def test_order_guard_before_traps(self):
+        """The mktemp guard must appear before the traps on the run line."""
+        cmd = self.run_command()
+        guard_match = re.search(r'D=\$\(mktemp -d\)\s*\|\|\s*\{[^}]*exit 2[^}]*\}', cmd)
+        trap_match = re.search(r'trap\s+', cmd)
+        self.assertIsNotNone(guard_match, "mktemp guard not found")
+        self.assertIsNotNone(trap_match, "trap not found")
+        self.assertLess(guard_match.start(), trap_match.start(),
+                       "mktemp guard must appear before traps")
+
+    def test_order_traps_before_chmod(self):
+        """Traps must appear before chmod 700 on the run line."""
+        cmd = self.run_command()
+        # Find the last trap
+        trap_matches = list(re.finditer(r'trap\s+', cmd))
+        chmod_match = re.search(r'chmod\s+700', cmd)
+        self.assertTrue(trap_matches, "no traps found")
+        self.assertIsNotNone(chmod_match, "chmod 700 not found")
+        self.assertLess(trap_matches[-1].start(), chmod_match.start(),
+                       "traps must appear before chmod 700")
+
+    def test_order_chmod_before_automate(self):
+        """chmod 700 must appear before automate call on the run line."""
+        cmd = self.run_command()
+        chmod_match = re.search(r'chmod\s+700', cmd)
+        automate_match = re.search(r'workshop_validator\.automate', cmd)
+        self.assertIsNotNone(chmod_match, "chmod 700 not found")
+        self.assertIsNotNone(automate_match, "automate call not found")
+        self.assertLess(chmod_match.start(), automate_match.start(),
+                       "chmod 700 must appear before automate call")
+
+    def test_log_tail_redaction(self):
+        """The tail -5 log output must be piped through the redaction sed on the run line."""
+        cmd = self.run_command()
+        # Look for: tail -5 "$D/run.log" | sed -E 's/.../[email]/g'
+        redaction_pattern = r'tail -5 "\$D/run\.log"\s*\|\s*sed -E'
+        self.assertIsNotNone(re.search(redaction_pattern, cmd),
+                            "run line missing log tail redaction: tail -5 piped to sed")
+
+    def test_no_unguarded_mktemp(self):
+        """There must be no second unguarded mktemp -d on the run line."""
+        cmd = self.run_command()
+        # Find all mktemp -d occurrences
+        mktemp_matches = list(re.finditer(r'mktemp -d', cmd))
+        # Each must be followed by ) || { within a few chars
+        for match in mktemp_matches:
+            after = cmd[match.end():match.end()+20]
+            self.assertIn(') ||', after,
+                         f"Found unguarded mktemp -d at position {match.start()}")
+
+
+class RunOperatorFileAccessPinsTests(unittest.TestCase):
+    """F25: Pin rules for org and browser-state file access."""
+
+    def source(self):
+        return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
+
+    def test_verification_orgs_test_f_only(self):
+        """verification-orgs.json must be checked only with test -f."""
+        text = self.source()
+        # Must mention checking with test -f
+        self.assertIn("test -f", text, "missing test -f check")
+        self.assertIn("verification-orgs.json", text, "missing verification-orgs.json reference")
+        # Pin the exact instruction
+        self.assertIn('~/.workshop-validator/verification-orgs.json', text)
+        self.assertIn('test -f', text)
+
+    def test_never_cat_verification_orgs(self):
+        """run-operator.md must not cat, head, tail, less or open verification-orgs.json."""
+        text = self.source()
+        # Check for commands that would read the file
+        forbidden = ['cat ~/.workshop-validator/verification-orgs.json',
+                    'head ~/.workshop-validator/verification-orgs.json',
+                    'tail ~/.workshop-validator/verification-orgs.json',
+                    'less ~/.workshop-validator/verification-orgs.json',
+                    'open(~/.workshop-validator/verification-orgs.json',
+                    'jq ~/.workshop-validator/verification-orgs.json']
+        for cmd in forbidden:
+            self.assertNotIn(cmd, text, f"run-operator.md must not contain: {cmd}")
+
+    def test_never_read_browser_state(self):
+        """run-operator.md must never read any browser-state.json file."""
+        text = self.source()
+        # Must mention not reading browser-state.json
+        self.assertIn('browser-state.json', text)
+        # Check it says never read
+        browser_state_context = text[max(0, text.find('browser-state.json')-200):
+                                      text.find('browser-state.json')+200]
+        self.assertIn('Never', browser_state_context,
+                     "Should have 'Never' near browser-state.json")
+
+    def test_no_jq_on_sensitive_files(self):
+        """run-operator.md must not use jq on verification-orgs.json or browser-state.json."""
+        text = self.source()
+        # No jq commands on these files
+        self.assertNotIn('jq', text.split('verification-orgs.json')[0] +
+                        (text.split('verification-orgs.json')[1] if 'verification-orgs.json' in text else ''),
+                        "jq should not be used on verification-orgs.json")
+
+
+class RunOperatorFrontMatterPinsTests(unittest.TestCase):
+    """F25: Pin front matter and behavioral rules."""
+
+    def source(self):
+        return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
+
+    def test_tools_exactly_bash(self):
+        """Front matter tools must be exactly 'Bash'."""
+        text = self.source()
+        # Extract front matter
+        front_matter_match = re.match(r'^---\n(.*?)\n---', text, re.DOTALL)
+        self.assertIsNotNone(front_matter_match, "no front matter found")
+        front_matter = front_matter_match.group(1)
+        # Check tools line
+        tools_match = re.search(r'^tools:\s*(.+)$', front_matter, re.MULTILINE)
+        self.assertIsNotNone(tools_match, "tools line not found in front matter")
+        tools_value = tools_match.group(1).strip()
+        self.assertEqual(tools_value, "Bash",
+                        f"tools must be exactly 'Bash', found: {tools_value}")
+
+    def test_no_self_retry(self):
+        """run-operator.md must contain the no self-retry instruction."""
+        text = self.source()
+        # Pin the exact sentence
+        self.assertIn("Do not retry on your own", text,
+                     "missing 'Do not retry on your own' instruction")
+
+
 if __name__ == "__main__":
     unittest.main()
