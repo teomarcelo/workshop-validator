@@ -132,6 +132,15 @@ SAVE_EVENTS = ("const s = document.getElementById('save'); window.saveClicks = 0
 CORNER_TIP = ("position:fixed;top:auto;left:auto;right:0;bottom:0;width:240px;height:120px;"
               "background:#fff;z-index:50;display:block")
 
+# A second unrelated aria-modal tip, under the tour, with no buttons. It never covers Save.
+TIP_SETUP = (" const tip = document.createElement('div'); tip.id = 'tip';"
+             " tip.setAttribute('role', 'dialog'); tip.setAttribute('aria-modal', 'true');"
+             " tip.setAttribute('aria-labelledby', 'tip-title');"
+             " tip.style.cssText = 'position:fixed;right:0;bottom:0;width:240px;height:120px;"
+             "background:#fff;z-index:40';"
+             " tip.innerHTML = '<h2 id=\"tip-title\">Sample Tip</h2><p>Made-up tip text.</p>';"
+             " document.body.appendChild(tip);")
+
 
 def plain_step(text):
     return step("save", "Exercise 1: Sample", "Task 1: Sample.", "5", text)
@@ -283,16 +292,18 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
 
     def test_trial_click_while_covered_sends_save_no_events(self):
         # Code review finding 2: the cover check's trial click must not reach Save. Save gets
-        # exactly one mousedown, mouseup and click, all after the tour was closed.
-        page = self.open(page_html(setup=SAVE_EVENTS))
-        state, result, clicked = self.walk(page)
+        # exactly one mousedown, mouseup and click, all after the tour was closed. A tip that
+        # never covers Save stays open, so the cover check runs again (and trial-clicks the
+        # now clear Save) before the real click: a real click there would be a second one.
+        page = self.open(page_html(setup=SAVE_EVENTS + TIP_SETUP))
+        state, result, clicked = self.walk(page, "Click Save")
         self.assert_closed_early()
         self.assert_closed_once(state, clicked)
         # clicked[0] is the tour close, so every Save event comes after it.
         self.assertEqual([c for c in clicked[1:] if c.startswith("event:")],
                          ["event:mousedown", "event:mouseup", "event:click"], clicked)
         self.assertEqual(page.evaluate("window.saveClicks"), 1)
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertTrue(page.evaluate("document.getElementById('tip') !== null"))
 
     def test_modal_that_does_not_cover_save_is_left_open_and_save_is_clicked_once(self):
         # Rule audit: the trial click is the guard. With an aria-modal tip in a corner and
@@ -328,6 +339,48 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         self.assertIsNone(guide_walk._popup_over_control(
             state, save_step(), guide_walk._Intent("click", "Save")))
         self.assertEqual(state.page.evaluate("window.clicked"), [])
+
+
+class _Raises:
+    def __init__(self, on):
+        self.on = on
+
+    def is_visible(self):
+        if self.on == "is_visible":
+            raise RuntimeError("Sample read error.")
+        return True
+
+    def click(self, **_kwargs):
+        raise RuntimeError("Sample covered control.")
+
+
+class _Loc:
+    def __init__(self, items):
+        self.items = items
+
+    def count(self):
+        return len(self.items)
+
+    def nth(self, index):
+        return self.items[index]
+
+
+class CoverCheckReadErrorTests(unittest.TestCase):
+    def test_unreadable_namesake_is_treated_as_inside_the_dialog(self):
+        # A covered Save, and a second Save whose visibility cannot be read: it may be the
+        # step's own dialog's Save, so the dialog is never closed (NEEDS_REVIEW, not the
+        # W-080 modal miss).
+        covered, unreadable = _Raises("click"), _Raises("is_visible")
+        state = guide_walk.WalkState(page=object())
+        with mock.patch.object(guide_walk, "_unnamed_modal", return_value=(object(), "Sample Form", 1, "dom")), \
+                mock.patch.object(guide_walk, "_read_attr", return_value="true"), \
+                mock.patch.object(guide_walk, "_locator_for_name", return_value=_Loc([covered, unreadable])), \
+                mock.patch.object(guide_walk, "_visible_match", return_value=covered), \
+                mock.patch.object(guide_walk, "_holds_element", return_value=False):
+            result = guide_walk._popup_over_control(
+                state, plain_step("Click Save"), guide_walk._Intent("click", "Save"))
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertIn('"Sample Form" dialog, which has its own Save', result.note)
 
 
 if __name__ == "__main__":
