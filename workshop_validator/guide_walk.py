@@ -4354,6 +4354,11 @@ def _option_lines(option) -> list[str]:
         raw = option.evaluate(_VISIBLE_LINES_JS)
     except Exception:
         return []
+    return _visible_lines_of(raw)
+
+
+def _visible_lines_of(raw) -> list[str]:
+    """The visible lines of one _VISIBLE_LINES_JS read (see _option_lines). Fails closed."""
     if not isinstance(raw, dict):
         return []
     text = str(raw.get("text") or "")
@@ -6498,6 +6503,161 @@ def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
     return frozenset(named)
 
 
+# V45 (P006N003): records, just before a click, every element in the clicked control's own
+# document (open shadow roots included), by identity, so an element the click added can be told
+# apart from one that was already there. The record holds the clicked element and a fresh token.
+_CLICK_MARK_JS = r"""(el, token) => {
+  const seen = new WeakSet();
+  const walk = (root) => {
+    for (const node of root.querySelectorAll('*')) {
+      seen.add(node);
+      if (node.shadowRoot) walk(node.shadowRoot);
+    }
+  };
+  walk(el.ownerDocument);
+  el.ownerDocument.defaultView.__wvBeforeClick = { token, seen, clicked: el };
+  return true;
+}"""
+
+# V45: one read, in one evaluate, of the elements the click added that show the clicked name.
+# ARG is [token, want]: the mark token and the normalized name. It returns state "unproven" when
+# the mark is missing, from another click or for another element, or when the clicked control has
+# no list or region around it; "gone" when the clicked control left the page (a re-render: who
+# owns a new element cannot be read); else "read" with TEXTS (raw _VISIBLE_LINES_JS reads of new
+# elements whose text equals WANT) and VALUES (values of new labelled text fields equal to WANT).
+# A new element counts only when it was not in the mark, lies outside the outermost list or
+# region around the clicked control (and does not contain it), is not in and does not hold a
+# menu, listbox, tooltip or other popup, and is shown: rendered, visibility visible, no clip, a box larger than 1px left
+# after every overflow-clipping ancestor and the viewport, uncovered at its centre, a cumulative
+# opacity of at least 0.1 (shadow hosts crossed) for it and every text in it, and no CSS ::before
+# or ::after content.
+_CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
+  const [token, want] = arg;
+  const visibleLines = __VISIBLE_LINES__;
+  const win = el.ownerDocument.defaultView;
+  const mark = win && win.__wvBeforeClick;
+  if (!mark || mark.token !== token || mark.clicked !== el) return { state: 'unproven' };
+  if (!el.isConnected) return { state: 'gone' };
+  const up = (n) => n.parentElement || (n.getRootNode() instanceof ShadowRoot ? n.getRootNode().host : null);
+  const within = (n, box) => { for (let a = n; a; a = up(a)) if (a === box) return true; return false; };
+  const LISTS = "[role='list'],[role='listbox'],[role='tree'],[role='group'],[role='menu'],[role='menubar'],"
+    + "[role='tablist'],[role='toolbar'],[role='grid'],[role='navigation'],[role='tabpanel'],ul,ol,nav";
+  let source = null;
+  for (let a = up(el); a; a = up(a)) if (a.matches && a.matches(LISTS)) source = a;
+  if (!source) return { state: 'unproven' };
+  const POPUPS = "[role='menu'],[role='menubar'],[role='listbox'],[role='option'],[role='menuitem'],"
+    + "[role='combobox'],[role='tree'],[role='grid'],[role='tooltip']";
+  const inPopup = (n) => { for (let a = n; a; a = up(a)) if (a.matches && a.matches(POPUPS)) return true; return false; };
+  const key = (v) => String(v || '').normalize('NFKC').replace(/\s+/g, ' ').trim().toLowerCase();
+  const clippedStyle = (s) =>
+    /^rect\(0(px)?,? 0(px)?,? 0(px)?,? 0(px)?\)$/.test(s.clip) || s.clipPath === 'inset(50%)';
+  const pseudo = (e) => ['::before', '::after'].some((at) => {
+    const content = getComputedStyle(e, at).content;
+    return !!content && !['none', 'normal', '""', "''"].includes(content);
+  });
+  const shown = (n) => {
+    if (!n.isConnected || n.getClientRects().length === 0) return false;
+    if (getComputedStyle(n).visibility !== 'visible') return false;
+    const box = n.getBoundingClientRect();
+    let l = box.left, t = box.top, r = box.right, b = box.bottom;
+    let alpha = 1;
+    for (let a = n; a; a = up(a)) {
+      const s = getComputedStyle(a);
+      alpha *= parseFloat(s.opacity);
+      if (clippedStyle(s)) return false;
+      if (a !== n && s.display !== 'inline' && s.display !== 'contents') {
+        const e = a.getBoundingClientRect();
+        if (s.overflowX !== 'visible') { l = Math.max(l, e.left); r = Math.min(r, e.right); }
+        if (s.overflowY !== 'visible') { t = Math.max(t, e.top); b = Math.min(b, e.bottom); }
+      }
+    }
+    if (!(alpha >= 0.1)) return false;
+    l = Math.max(l, 0); t = Math.max(t, 0); r = Math.min(r, win.innerWidth); b = Math.min(b, win.innerHeight);
+    if (r - l <= 1 || b - t <= 1) return false;
+    let hit = el.ownerDocument.elementFromPoint((l + r) / 2, (t + b) / 2);
+    while (hit && hit.shadowRoot) {
+      const inner = hit.shadowRoot.elementFromPoint((l + r) / 2, (t + b) / 2);
+      if (!inner || inner === hit) break;
+      hit = inner;
+    }
+    if (!hit || !(within(hit, n) || within(n, hit))) return false;
+    if (pseudo(n) || [...n.querySelectorAll('*')].some(pseudo)) return false;
+    const texts = document.createTreeWalker(n, NodeFilter.SHOW_TEXT);
+    for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+      if (!node.data.trim() || !node.parentElement) continue;
+      let inner = 1;
+      for (let a = node.parentElement; a && a !== n; a = up(a)) inner *= parseFloat(getComputedStyle(a).opacity);
+      if (!(alpha * inner >= 0.1)) return false;
+    }
+    return true;
+  };
+  const NOT_TEXT = ['hidden', 'password', 'checkbox', 'radio', 'button', 'submit', 'reset', 'image', 'file'];
+  const labelled = (n) => {
+    if (n.labels && [...n.labels].some((label) => key(label.innerText))) return true;
+    if (key(n.getAttribute('aria-label'))) return true;
+    const root = n.getRootNode();
+    return String(n.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean).some((id) => {
+      const at = root.getElementById ? root.getElementById(id) : null;
+      return !!at && !!key(at.innerText);
+    });
+  };
+  const texts = [], values = [];
+  const walk = (root) => {
+    for (const n of root.querySelectorAll('*')) {
+      if (texts.length + values.length >= 20) return;
+      if (n.shadowRoot) walk(n.shadowRoot);
+      if (mark.seen.has(n) || within(n, source) || within(source, n) || inPopup(n) || n.querySelector(POPUPS)) continue;
+      const tag = n.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA') {
+        if (tag === 'INPUT' && NOT_TEXT.includes(String(n.type || '').toLowerCase())) continue;
+        if (key(n.value) === want && labelled(n) && shown(n)) values.push(String(n.value));
+        continue;
+      }
+      if (tag === 'SELECT' || tag === 'OPTION' || tag === 'SCRIPT' || tag === 'STYLE') continue;
+      if (key(n.innerText) === want && shown(n)) texts.push(visibleLines(n));
+    }
+  };
+  walk(el.ownerDocument);
+  return { state: 'read', texts, values };
+}""".replace("__VISIBLE_LINES__", _VISIBLE_LINES_JS.strip())
+
+
+def _mark_before_click(loc):
+    """(held, token): the element about to be clicked and the token of the V45 identity mark taken
+    on its document just before the click. (None, "") when the mark cannot be taken."""
+    held = None
+    try:
+        held = _first(loc).element_handle(timeout=1000)
+        token = f"wv-{time.monotonic_ns()}-{id(held)}"
+        if held is not None and held.evaluate(_CLICK_MARK_JS, token) is True:
+            return held, token
+    except Exception:
+        pass
+    _dispose(held)
+    return None, ""
+
+
+def _new_element_shows(held, token: str, name: str) -> bool:
+    """V45: True only when, after the click, a visible element that was not on the page before it
+    (by identity), outside the clicked control and the list or region it was picked from, shows
+    NAME exactly: as its one visible line (the PR 61 visible-text rules) or as the value of a
+    labelled text field. Any failed or unproven read is False."""
+    want = norm(name)
+    if held is None or not token or not want:
+        return False
+    try:
+        raw = held.evaluate(_CLICK_NEW_SHOWS_JS, [token, want])
+    except Exception:
+        return False
+    if not isinstance(raw, dict) or raw.get("state") != "read":
+        return False
+    for item in raw.get("texts") or ():
+        lines = _visible_lines_of(item)
+        if len(lines) == 1 and norm(lines[0]) == want:
+            return True
+    return any(isinstance(value, str) and norm(value) == want for value in raw.get("values") or ())
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -6552,7 +6712,9 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     # The clicked element's own tab, already selected before the click, is not evidence.
     before_tab = _clicked_tab_selected(loc)
     before_nav = _current_nav_item(state.page, frozenset(target_names))
+    click_held, click_token = _mark_before_click(loc)
     if not _click_locator(loc):
+        _dispose(click_held)
         return None
     opened_files_home = False
     if norm(name) in {"files", "files tab"} and _in_setup(state.page):
@@ -6706,6 +6868,10 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 evidence_desc = f"after-state: {target} appeared"
                 break
 
+    # V45: a new element, by identity, outside the clicked control's list, shows the name exactly.
+    if not evidence_desc and _new_element_shows(click_held, click_token, name):
+        evidence_desc = f"after-state: new element shows {name}"
+
     # V22: with no immediate evidence, every click polls for a delayed after-state
     # (a still-loading page is not a failure). The control is never clicked again.
     # Elapsed time is the sum of the walk's own waits; the step cap is read from the
@@ -6724,6 +6890,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if waited > 0:
                 budget = min(budget, timeout_s - waited)
             if budget <= 0:
+                _dispose(click_held)
                 note = f"Clicked {name}, but no change could be read from the page."
                 note += _clicked_element_note(loc)
                 return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
@@ -6848,11 +7015,15 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         evidence_desc = f"after-state: {target} appeared"
                         break
 
+            if not evidence_desc and _new_element_shows(click_held, click_token, name):
+                evidence_desc = f"after-state: new element shows {name}"
+
             # If evidence found, break
             if evidence_desc:
                 break
 
 
+    _dispose(click_held)
     # If no evidence found after the immediate check and the poll, return NEEDS_REVIEW
     if not evidence_desc:
         note = f"Clicked {name}, but no change could be read from the page."
