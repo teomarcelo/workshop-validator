@@ -511,28 +511,38 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         remove_reason = None
 
         # Check for stale lock (lock with dead PID)
-        if lock_reason and isinstance(lock_reason, str):
-            import re
-            pid_match = re.search(r'\b(\d+)\b', lock_reason)
-            if pid_match:
-                pid = int(pid_match.group(1))
-                # Check if process is running
-                try:
-                    import os
-                    os.kill(pid, 0)  # Signal 0 checks existence without killing
-                    # Process exists, keep it locked
-                    keep_reason = None  # Will fall through to other checks
-                except (OSError, ProcessLookupError):
-                    # Process not running - stale lock
-                    keep_reason = "stale-lock"
-                    if dry_run:
-                        print(f"  stale-lock {path.name} ({lock_reason}, pid {pid} not running)")
+        if lock_reason:
+            if isinstance(lock_reason, str):
+                pid_match = re.search(r'\bpid (\d+)\b', lock_reason)
+                pid = None
+                if pid_match:
+                    try:
+                        pid = int(pid_match.group(1))
+                        if pid > 4194304:
+                            pid = None
+                    except (ValueError, OverflowError):
+                        pid = None
+
+                if pid is not None:
+                    try:
+                        os.kill(pid, 0)
+                        keep_reason = "locked"
+                    except ProcessLookupError:
+                        keep_reason = "stale-lock"
+                        print(f"  stale-lock {path.name} (pid {pid} not running)")
+                    except PermissionError:
+                        keep_reason = "locked"
+                    except (OSError, ValueError, OverflowError):
+                        keep_reason = "locked"
+                else:
+                    keep_reason = "locked"
+            else:
+                keep_reason = "locked"
 
         if keep_reason:
             kept_reasons[keep_reason] = kept_reasons.get(keep_reason, 0) + 1
-            if not dry_run and keep_reason == "stale-lock":
-                # Print stale lock info in non-dry-run too
-                print(f"  stale-lock {path.name} ({lock_reason}, pid {pid_match.group(1) if pid_match else 'unknown'} not running)")
+            if dry_run and keep_reason != "locked":
+                print(f"  keep {path.name}: {keep_reason}")
             continue
 
         if dirty:
@@ -608,8 +618,9 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
             else:
                 # Removal failed, count as kept with remove-failed reason
                 kept_reasons["remove-failed"] = kept_reasons.get("remove-failed", 0) + 1
-                # Print path and first line of stderr
-                stderr_first = _redact_stderr(remove_result.stderr).splitlines()[0] if remove_result.stderr else "unknown error"
+                redacted = _redact_stderr(remove_result.stderr) if remove_result.stderr else ""
+                lines = redacted.splitlines()
+                stderr_first = lines[0] if lines else "unknown error"
                 print(f"  remove-failed {path.name}: {stderr_first}")
         else:
             # In dry-run, print worktrees that would be removed
