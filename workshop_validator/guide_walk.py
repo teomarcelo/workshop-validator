@@ -5162,8 +5162,9 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     hold on the new element); and one W-115 signal (_pick_signal) read on the FIRST closed read
     of that element, watched without a break (_HOLD_JS) and read again, the same signal, on the
     last. A signal missing on the first read, or one that breaks, is never PASS. A pill is
-    never PASS evidence (W-110): one labelled VALUE gives NEEDS_REVIEW, not frozen. A steady box with no signal, or a box that kept changing, is NEEDS_REVIEW, not
-    frozen, so the walk continues. No closed read at all is the frozen UI_MISMATCH.
+    never PASS evidence (W-110): one labelled VALUE gives NEEDS_REVIEW, not frozen. A steady
+    box with no signal, or a box that kept changing, is NEEDS_REVIEW, not frozen, so the walk
+    continues. No closed read at all is the frozen UI_MISMATCH.
     """
     want = _plain(value)
     state.lookup_miss = ()
