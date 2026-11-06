@@ -24,7 +24,7 @@ import time
 import webbrowser
 
 from .guide_inventory import extract_inventory
-from .guide_walk import OUT_OF_TIME_NOTE
+from .guide_walk import BLOCKED_BY_PREFIX, OUT_OF_TIME_NOTE
 from .lessons import record_lessons
 from .private_runner import run_uploaded_guide
 from .step_board import (
@@ -300,6 +300,15 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
             "step_id": first.step_id, "page": first.page, "status": first.status,
         },
         "stop_step": None if stop is None else stop.step_id,
+        # W-100, W-117: every real failure in printed order; the first one is judged (W-111).
+        "failures": [
+            {"step_id": s.step_id, "status": s.status, "note": s.note or ""}
+            for s in result.report_steps if s.status in _REAL_FAIL
+        ],
+        "blocked_steps": sum(
+            1 for s in result.report_steps
+            if s.status == "NOT_RUN" and (s.note or "").startswith(BLOCKED_BY_PREFIX)
+        ),
         # W-105: PASS steps (with evidence) that carry a "Guide differs" note.
         "passes_with_guide_note": sum(
             1 for s in result.report_steps
@@ -493,6 +502,25 @@ def _board_stop_step(run_dir: Path) -> str | None:
     return None if stop is None else stop.step_id
 
 
+def _judged_steps(summary: dict, stop) -> list[tuple[str, str]]:
+    """Steps keep-org must see verified FALSE_FAILURE, as (kind, step_id), first one first.
+
+    A summary that lists real failures (W-100) is judged on every one of them, the first
+    first (W-111): one REAL failure after a change uses the org. Older summaries keep the
+    stop step.
+    """
+    failures = summary.get("failures")
+    if failures is None:
+        return [("stop step", stop)]
+    if not isinstance(failures, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("step_id"), str) or not row["step_id"]
+            for row in failures):
+        raise ValueError("malformed summary.json")
+    if not failures:
+        return [("stop step", stop)]
+    return [("failure step", row["step_id"]) for row in failures]
+
+
 def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
     """Read verdicts.json as {step_id: every verdict given to that step}.
 
@@ -545,10 +573,11 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
                 or not isinstance(summary.get("org"), int) or summary["org"] < 1:
             raise ValueError("malformed summary.json")
         stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
+        judged = _judged_steps(summary, stop)
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
-        # Every verdict on the stop step must be FALSE_FAILURE; a mixed record keeps the move.
-        found = verdicts.get(stop)
+        # Every verdict on each judged step must be FALSE_FAILURE; a mixed record keeps the move.
+        found = [(kind, step_id, verdicts.get(step_id)) for kind, step_id in judged]
     except ValueError as error:
         return refuse(str(error))
     except (OSError, TypeError):
@@ -558,9 +587,11 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     kept = gate.get("kept_org_reason")
     if isinstance(kept, dict) and kept.get("run_id") == run_id:
         return refuse("this run already kept its org")
-    if found != {"FALSE_FAILURE"}:
-        return refuse(f"stop step {stop} is {'/'.join(sorted(found or ())) or 'not verified'}, "
-                      "not FALSE_FAILURE")
+    for kind, step_id, given in found:
+        if given != {"FALSE_FAILURE"}:
+            return refuse(f"{kind} {step_id} is {'/'.join(sorted(given or ())) or 'not verified'}, "
+                          "not FALSE_FAILURE")
+    stop = judged[0][1]
     run_index = summary["org"] - 1
     if run_index < gate_floor(gate):
         return refuse("that run used a retired org (W-098)")
@@ -573,7 +604,7 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         "kept_org_reason": {"step_id": str(stop), "verdict": "FALSE_FAILURE", "run_id": run_id},
     })
     _save_gate_locked(private_root, gate)
-    print(f"Gate open. Org kept: stop step {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
+    print(f"Gate open. Org kept: {judged[0][0]} {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
     return 0
 
 

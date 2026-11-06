@@ -6918,9 +6918,8 @@ def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[
 
     Returns (closing notes, stop note). The stop note is empty when the page is usable.
     Only a pop-up's own dismiss control or Escape is used; nothing else is clicked.
+    A closed browser or a lost session already stopped the walk at the failure itself.
     """
-    if not _page_open(state):
-        return [], f"The browser closed after the failure in {failed}, so the following steps were not run."
     closed: list[str] = []
     try:
         for _ in range(_POPUP_CLOSE_LIMIT):
@@ -6997,6 +6996,7 @@ def walk_guide(
     password_form: str | None = None
     failed_task: tuple | None = None  # W-117: the task a stopping real failure ended
     failed_step = ""
+    failed_note = ""
     failed_in: dict[object, set] = {}  # exercise -> tasks with a real failure
     boundary_notes: list[str] = []
     for index, step in enumerate(steps, 1):
@@ -7006,7 +7006,7 @@ def walk_guide(
         if not blocked and failed_task is not None:
             if _task_key(step) == failed_task:
                 statuses[step.step_id] = "NOT_RUN"
-                notes[step.step_id] = f"{BLOCKED_BY_PREFIX}{failed_step}"
+                notes[step.step_id] = f"{BLOCKED_BY_PREFIX}{failed_step}: {failed_note}".rstrip(": ")
                 if heartbeat is not None:
                     heartbeat("", index, total, step.step_id, "NOT_RUN", _clock())
                 continue
@@ -7126,6 +7126,7 @@ def walk_guide(
         if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step):
             # W-117: the rest of this task is NOT_RUN; the walk resumes at the next task.
             failed_task, failed_step = _task_key(step), step.step_id
+            failed_note = result.note or ""
         elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
             if result.freeze:
                 blocked = result.note or "The following steps were not run."
