@@ -291,9 +291,12 @@ class PickPassPathBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def open(self, html):
+    def open(self, html, page_clock=False):
+        """PAGE_CLOCK: install Playwright's page clock first, so a test can pause page timers."""
         page = self.browser.new_page()
         self.addCleanup(page.close)
+        if page_clock:
+            page.clock.install()
         serve(page, html)
         self.page = page
         return page
@@ -309,13 +312,13 @@ class PickPassPathBrowserTests(unittest.TestCase):
         guide_walk._open_guide_dialog(state, "Sample Screen")
         return guide_walk.attempt_step(state, make_step("rv", STEP))
 
-    def fill_scripted(self, html, on_poll=None, on_handle=None, on_hold=None, page_wait_s=2.0):
+    def fill_scripted(self, html, on_poll=None, on_handle=None, on_hold=None, page_wait_s=2.0, page_clock=False):
         """Fill with a stepped clock: each sleep moves it by the interval (0.25 s, exact). After
         each closed read of the pick, ON_POLL(n) runs with the read's number (1-based) before the
         next poll; ON_HANDLE(n, when, k) runs around the k-th box handle of read n. ON_HOLD runs
         once, in the sleep that brings the clock to the first closed read's time plus the hold
         (_PICK_STEADY_S): just before the poll on which the hold completes."""
-        page = self.open(html)
+        page = self.open(html, page_clock=page_clock)
         now = [100.0]
         reads = [0]
         due = []
@@ -695,6 +698,16 @@ class PickPassPathBrowserTests(unittest.TestCase):
     def test_a_picked_value_that_changes_and_comes_back_between_reads_is_never_pass_at_2_s(self):
         after = SHOWS + flip("rv.value = 'recOther';", "rv.value = 'recThing';", 500, 1200)
         self.assert_review(self.fill(typed_html(after, list_shown=True), poll=2.0), UNSTEADY_NOTE)
+
+    def test_a_signal_gone_on_the_last_read_is_never_pass_even_when_the_watch_did_not_run(self):
+        # Page timers pause just before the poll on which the hold completes, so the 50 ms watch
+        # never sees read-only turn off: the last read itself must find the signal gone.
+        def off_with_timers_paused():
+            self.page.clock.pause_at(self.page.evaluate("Date.now()") + 1000)
+            self.page.evaluate("() => { rv.readOnly = false; }")
+        result = self.fill_scripted(typed_html(LOCKS), on_hold=off_with_timers_paused, page_clock=True)
+        self.assert_review(result, UNSTEADY_NOTE)
+        self.assertFalse(self.page.evaluate("document.getElementById('rv').readOnly"))
 
     def test_read_only_that_flickers_every_300_ms_is_never_pass_at_0_2_s(self):
         after = RO_ON + "setInterval(() => { rv.readOnly = !rv.readOnly; }, 300);"
