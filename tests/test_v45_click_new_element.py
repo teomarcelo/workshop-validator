@@ -66,6 +66,7 @@ PAGE = """<!DOCTYPE html><html><head><style>
     invisible: () => add(canvas, '<span style="visibility:hidden">Name</span>'),
     clipped: () => add(canvas, '<div style="height:0;overflow:hidden"><span>Name</span></div>'),
     faint: () => add(canvas, '<span style="opacity:0.05">Name</span>'),
+    transparent: () => add(canvas, '<span style="color:transparent">Name</span>'),
     offscreen: () => add(canvas, '<span style="position:absolute;left:-9999px">Name</span>'),
     tooltip: () => add(document.body, '<div role="tooltip"><span>Name</span></div>'),
     rerender: () => {
@@ -176,6 +177,10 @@ class ClickNewElementBrowserTests(unittest.TestCase):
 
     def test_new_element_at_near_zero_opacity_needs_review(self):
         self.assert_needs_review(self.click("faint"))
+
+    # Only the PR 61 visible-text rules see transparent text as not shown.
+    def test_new_element_with_transparent_text_needs_review(self):
+        self.assert_needs_review(self.click("transparent"))
 
     def test_new_element_off_screen_needs_review(self):
         self.assert_needs_review(self.click("offscreen"))
