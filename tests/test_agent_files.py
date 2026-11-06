@@ -98,6 +98,55 @@ class RunOperatorPrivateOutputTests(unittest.TestCase):
         self.assertNotIn("/tmp/", text,
                          "run-operator.md contains /tmp/ path; must use mktemp -d with mode 0700")
 
+    def test_run_operator_has_mktemp_guard(self):
+        """run-operator.md must guard against mktemp -d failure."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+        # Should have mktemp -d
+        self.assertIn("mktemp -d", text, "run-operator.md missing mktemp -d")
+        # Should have the failure guard
+        self.assertIn("|| ", text, "run-operator.md missing mktemp failure guard")
+
+
+class RunOperatorEmailRedactionTests(unittest.TestCase):
+    """F23: run-operator must redact email addresses in stderr output."""
+
+    def test_email_redaction_works_on_synthetic_addresses(self):
+        """Email redaction sed expression must work with both BSD and GNU sed."""
+        import subprocess
+        import shutil
+
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        text = run_operator_file.read_text(encoding="utf-8")
+
+        # Extract the sed expression from the file
+        # Look for sed -E 's/...pattern.../[email]/g'
+        sed_match = re.search(r"sed -E 's/([^']+)/\[email\]/g'", text)
+        self.assertIsNotNone(sed_match, "sed expression not found in run-operator.md")
+        sed_pattern = sed_match.group(1)
+
+        # Test with synthetic email addresses
+        test_input = "Error for jane.doe+x@example.co.uk at foo\nuser admin@corp-test.example.com failed"
+        expected_output = "Error for [email] at foo\nuser [email] failed"
+
+        # Use system sed if available, otherwise skip
+        sed_path = shutil.which("sed")
+        if not sed_path:
+            self.skipTest("sed not found in PATH")
+
+        # Run sed with the extracted pattern
+        result = subprocess.run(
+            [sed_path, "-E", f"s/{sed_pattern}/[email]/g"],
+            input=test_input,
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        self.assertEqual(result.returncode, 0, f"sed failed: {result.stderr}")
+        self.assertEqual(result.stdout.strip(), expected_output,
+                         f"Email redaction failed. Got: {result.stdout.strip()}")
+
 
 if __name__ == "__main__":
     unittest.main()
