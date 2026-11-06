@@ -3988,8 +3988,9 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
     """
     last_attempt = None
     loop_count = 0
-    for _ in range(_POPUP_CLOSE_LIMIT):
-        if _time_left(state) <= 0:
+    for attempt_num in range(_POPUP_CLOSE_LIMIT):
+        # W-080: always try at least once, even when time is up, if a popup blocked the control.
+        if _time_left(state) <= 0 and attempt_num > 0:
             return blocked
         title, attempt = _close_unrelated_popup(state, step)
         last_attempt = attempt
@@ -7205,6 +7206,14 @@ def _finish_attempt(
                     return _alias_result(intent, alias, result)
                 if result is not None:
                     return result
+            # W-080: close an unrelated covering pop-up early, before the timeout expires.
+            title = _unnamed_modal_title(state.page, step.text or "")
+            if title:
+                popup_title, attempt = _close_unrelated_popup(state, step)
+                if popup_title:
+                    state.popup_notes.append(_popup_note(popup_title))
+                    # Resume waiting for the control after the close
+                    continue
             _consult(state, step, lookup, memory)
         if loading and _wait_done(state, start) and not memory.pending:
             return CheckResult("NOT_RUN", LOADING_NOTE, ())
