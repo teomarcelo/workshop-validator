@@ -7191,7 +7191,7 @@ def _popup_over_control(state: WalkState, step: GuideStep, intent: _Intent) -> s
     the browser's trial click (nothing is clicked). A control that is not on the page yet, or
     that is inside the dialog, is never a reason to close anything (W-080, W-083).
     """
-    if intent.kind != "click" or not intent.target:
+    if intent.kind != "click":
         return None
     found = _unnamed_modal(state.page, step.text or "", state=state)
     if not found or _read_attr(found[0], "aria-modal") != "true":

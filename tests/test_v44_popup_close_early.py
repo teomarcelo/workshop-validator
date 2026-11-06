@@ -38,7 +38,7 @@ NEXT_ONLY = '<button onclick="tour(\'Next\')">Next</button>'
 PAGE_HTML = """<!doctype html><html><head><title>Sample Settings</title></head><body>
 <main><h1>Sample Settings</h1><p>Made-up settings page.</p>
 <button id="save" style="{save_style}" onclick="save()">Save</button></main>
-<div id="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" style="{tour_style}">
+<div id="tour" role="dialog" {tour_modal} aria-labelledby="tour-title" style="{tour_style}">
   <h2 id="tour-title">{tour_title}</h2>
   <p id="tour-step">Step 1 of 2</p>
   <p>Made-up help text for a tour the guide does not mention.</p>
@@ -68,7 +68,9 @@ PAGE_HTML = """<!doctype html><html><head><title>Sample Settings</title></head><
       const ok = document.createElement('button');
       ok.textContent = 'OK';
       ok.onclick = () => stored('OK');
+      ok.disabled = {ok_disabled_ms} > 0;
       box.appendChild(ok);
+      setTimeout(() => {{ ok.disabled = false; }}, {ok_disabled_ms});
     }}, {ok_delay_ms});
   }}
   function stored(name) {{
@@ -93,10 +95,11 @@ def save_step():
 
 
 def page_html(tour_buttons=TOUR_BUTTONS, tour_style=SHOWN, save_style="", after_tour="",
-              ok_delay_ms=0, setup=""):
+              ok_delay_ms=0, ok_disabled_ms=0, setup="", tour_modal='aria-modal="true"'):
     return PAGE_HTML.format(
         tour_title=TOUR_TITLE, tour_buttons=tour_buttons, tour_style=tour_style,
-        save_style=save_style, after_tour=after_tour, ok_delay_ms=ok_delay_ms, setup=setup,
+        save_style=save_style, after_tour=after_tour, ok_delay_ms=ok_delay_ms,
+        ok_disabled_ms=ok_disabled_ms, setup=setup, tour_modal=tour_modal,
     )
 
 
@@ -170,8 +173,9 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         self.assertEqual(result.status, "PASS", result.note)
 
     def test_guide_popup_opened_by_save_is_never_closed_by_w080(self):
-        # The step's own popup has an X named Close, and its OK shows a second later.
-        page = self.open(page_html(ok_delay_ms=1000))
+        # The step's own popup has an X named Close. Its OK shows a second later and stays
+        # disabled one more second: neither a missing nor an unclickable OK closes the popup.
+        page = self.open(page_html(ok_delay_ms=1000, ok_disabled_ms=1000))
         state, result, elapsed, clicked = self.walk(page)
         self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
         self.assert_closed_once(state, clicked)
@@ -190,6 +194,29 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         self.assertIn("Escape pressed yes", result.note)
         self.assertIn("still visible yes", result.note)
         self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
+
+    def state_on(self, html):
+        page = self.open(html)
+        return guide_walk.WalkState(page=page, timeout_s=2, interval_s=0.2, page_wait_s=2, page_poll_s=0.5)
+
+    def test_cover_check_names_the_modal_over_a_visible_control(self):
+        state = self.state_on(page_html())
+        found = guide_walk._popup_over_control(state, save_step(), guide_walk._Intent("click", "Save"))
+        self.assertEqual(found, TOUR_TITLE)
+        self.assertEqual(state.page.evaluate("window.clicked"), [])
+
+    def test_cover_check_is_only_for_clicks(self):
+        state = self.state_on(page_html())
+        for kind in ("fill", "toggle", "observe"):
+            with self.subTest(kind=kind):
+                self.assertIsNone(guide_walk._popup_over_control(
+                    state, save_step(), guide_walk._Intent(kind, "Save")))
+
+    def test_cover_check_skips_a_dialog_that_is_not_modal(self):
+        state = self.state_on(page_html(tour_modal=""))
+        self.assertIsNone(guide_walk._popup_over_control(
+            state, save_step(), guide_walk._Intent("click", "Save")))
+        self.assertEqual(state.page.evaluate("window.clicked"), [])
 
 
 if __name__ == "__main__":
