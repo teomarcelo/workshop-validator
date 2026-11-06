@@ -7183,12 +7183,15 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     return passed(step, "clicked", "Clicked " + " then ".join(done) + ".")
 
 
-def _popup_over_control(state: WalkState, step: GuideStep, intent: _Intent) -> str | None:
-    """Title of an unnamed modal pop-up that keeps the step's own visible control from a click, or None.
+def _popup_over_control(state: WalkState, step: GuideStep, intent: _Intent) -> CheckResult | None:
+    """The miss for an unnamed modal pop-up over the step's own visible control, or None.
 
     Counts only for a click whose named control is visible, sits outside the pop-up, and fails
-    the browser's trial click (nothing is clicked). A control that is not on the page yet, or
-    that is inside the dialog, is never a reason to close anything (W-080, W-083).
+    the browser's trial click (nothing is clicked): that is the W-080 modal miss, which the
+    caller's _popup_retry closes. A control that is not on the page yet, or that is inside the
+    dialog, is never a reason to close anything (W-080, W-083). When the covered control has a
+    visible namesake inside the modal, the modal is the step's own dialog (a form with its own
+    Save): it is never closed and neither control is clicked, so the step is NEEDS_REVIEW.
     """
     if intent.kind != "click":
         return None
@@ -7202,8 +7205,26 @@ def _popup_over_control(state: WalkState, step: GuideStep, intent: _Intent) -> s
     try:
         control.click(trial=True, timeout=1000)
     except Exception:
-        return found[1]
-    return None
+        pass
+    else:
+        return None
+    nth = getattr(loc, "nth", None)
+    for index in range(min(_count(loc), 8) if callable(nth) else 0):
+        match = nth(index)
+        try:
+            inside = match.is_visible() and _holds_element(found[0], match)
+        except Exception:
+            inside = True  # unreadable: never close what may be the step's own dialog
+        if inside:
+            return CheckResult(
+                "NEEDS_REVIEW",
+                f'{intent.target} is covered by the "{found[1]}" dialog, which has its own '
+                f"{intent.target}. The walk did not close the dialog or click either one; "
+                "check which control the guide means.",
+                (),
+                freeze=True,
+            )
+    return _modal_result(found[1])
 
 
 def _finish_attempt(
@@ -7221,8 +7242,8 @@ def _finish_attempt(
             # W-080 (V44): a pop-up that covers the visible control is a miss now, not after the
             # wait; the caller's _popup_retry closes it and runs only this action again.
             covering = _popup_over_control(state, step, intent)
-            if covering:
-                return _modal_result(covering)
+            if covering is not None:
+                return covering
             result = _try_named(state, step, intent, intent.target, opened)
             if result is not None:
                 return result
