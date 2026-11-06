@@ -149,6 +149,13 @@ def shadow_bidi_html():
 REVIEW_NOTE = ("Record Variable option recThing was clicked and a selected pill labelled recThing "
                "appears near the field, but the validator cannot prove the pill belongs to this field; "
                "please confirm.")
+# W-112 (b): a new pill labelled the pick anywhere on the page, outside the field's own elements.
+PAGE_REVIEW_NOTE = ("Record Variable option recThing was clicked and a new selected pill labelled recThing "
+                    "appears on the page, but the validator cannot prove the pill belongs to this field; "
+                    "please confirm.")
+# W-112 (c): the box shows only the text it showed before the click; nothing names the pick.
+UNCONFIRMED_NOTE = ("Record Variable option recThing was clicked. The field shows the typed text; nothing "
+                    "on the page confirms the pick, so please confirm.")
 
 
 def make_step(step_id, text):
@@ -259,8 +266,10 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
     def test_two_pills_inside_shadow_root_are_not_pass(self):
         result = self.fill(shadow_html(pill_markup=pill() + pill()))
         self.assertNotEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.status, "UI_MISMATCH", result.note)
-        self.assertIn("Record Variable did not show recThing", result.note)
+        # Two pills are never "the field's pill"; the page-wide search still sees a new pill
+        # labelled recThing (W-112): review with the page note.
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, PAGE_REVIEW_NOTE)
 
     def test_lightning_pill_host_with_nested_slds_pill_gives_review_not_mismatch(self):
         # M1: A lightning-pill host with .slds-pill in its open shadow root must count as 1 pill (NEEDS_REVIEW),
@@ -422,8 +431,11 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
 </script>
 """
         result = self.fill(ancestor_pill_html)
-        self.assertEqual(result.status, "UI_MISMATCH", result.note)
-        self.assertIn("Record Variable did not show recThing", result.note)
+        # The combobox wrapper never holds the new pill, so it is not "near the field"; the
+        # page-wide search still sees a new pill labelled recThing (W-112): review, never PASS.
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, PAGE_REVIEW_NOTE)
+        self.assertFalse(result.freeze)
 
     def test_pill_moved_into_field_after_click_is_not_evidence(self):
         # M3 only (W-108): the pill is on the page before the click, in another section, so the
@@ -528,8 +540,11 @@ class ShadowRootPillBrowserTests(unittest.TestCase):
         state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=2, page_poll_s=0.2)
         guide_walk._open_guide_dialog(state, "Sample Screen")
         result = guide_walk.attempt_step(state, make_step("rv", STEP))
-        self.assertEqual(result.status, "UI_MISMATCH", result.note)
-        self.assertEqual(result.note, "Record Variable did not show recThing after its option was clicked.")
+        # Not recorded as a container, so the new pill is not "near the field" (REVIEW_NOTE); the
+        # page-wide search sees it (W-112): review with the page note, never PASS.
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, PAGE_REVIEW_NOTE)
+        self.assertFalse(result.freeze)
         self.assertEqual(page.evaluate("window.chosen"), ["opt1"])
         self.assertFalse(page.locator("#old-wrap .slds-pill").is_visible())
         self.assertEqual(page.locator("#new-field .slds-pill__label").inner_text(), "recThing")
@@ -607,6 +622,8 @@ def unreadable_expanded_html(how):
     the box's value in the page throw (aria-expanded is "false")."""
     if how == "missing":
         spoil = 'box.removeAttribute("aria-expanded");'
+    elif how == "missing-locked":
+        spoil = 'box.removeAttribute("aria-expanded"); box.readOnly = true;'
     elif how == "throws":
         spoil = ('box.setAttribute("aria-expanded", "false"); '
                  'box.getAttribute = () => { throw new Error("unreadable"); };')
@@ -701,9 +718,10 @@ class _ReadBox:
 
     def evaluate(self, script, arg=None):
         assert script is guide_walk._BOX_STATE_JS
-        now, first = arg
+        now, first, _option = arg
         if isinstance(self.read, dict) and "same" not in self.read:
-            return dict({"kept": first is None or first is self}, **self.read, same=now is self)
+            base = {"kept": first is None or first is self, "connected": True, "wrapped": False}
+            return dict(base, **self.read, same=now is self)
         return self.read
 
     def dispose(self):
@@ -713,8 +731,9 @@ class _ReadBox:
 class ListClosedReadTests(unittest.TestCase):
     """The one-evaluate read fails closed on anything it cannot read as expected."""
 
-    def closed(self, read):
-        return guide_walk._list_closed(None, _ReadBox(read), "recThing")
+    def closed(self, read, box=None, want="recThing"):
+        held, _read = guide_walk._closed_read(None, _ReadBox(read) if box is None else box, want)
+        return held is not None
 
     def test_value_and_closed_state_read_from_the_same_box_count_as_closed(self):
         self.assertTrue(self.closed({"value": "recThing", "expanded": "false"}))
@@ -725,14 +744,19 @@ class ListClosedReadTests(unittest.TestCase):
                      {"value": "recThing", "expanded": "true"}, {"value": "recThing", "expanded": False},
                      {"value": "recThing", "expanded": "false", "same": False},
                      {"value": "recThing", "expanded": "false", "same": 1},
+                     {"value": "recThing", "expanded": "false", "connected": False},
+                     {"value": "recThing", "expanded": "false", "connected": 1},
+                     {"value": "recThing", "expanded": "false", "wrapped": True},
+                     {"value": "recThing", "expanded": "false", "wrapped": None},
+                     {"value": "recThing", "expanded": "false", "kept": None},
                      {"value": "", "expanded": "false"}, {"expanded": "false"}):
             with self.subTest(read=read):
                 self.assertFalse(self.closed(read))
 
     def test_a_read_that_is_not_a_record_or_a_missing_box_is_never_closed(self):
-        self.assertFalse(guide_walk._list_closed(None, _ReadBox(["recThing"]), "recThing"))
-        self.assertFalse(guide_walk._list_closed(None, None, "recThing"))
-        self.assertFalse(guide_walk._list_closed(None, _ReadBox({"value": "", "expanded": "false"}), ""))
+        self.assertFalse(self.closed(["recThing"]))
+        self.assertEqual(guide_walk._closed_read(None, None, "recThing"), (None, None))
+        self.assertFalse(self.closed({"value": "", "expanded": "false"}, want=""))
 
 
 @unittest.skipUnless(SMOKE, SMOKE_REASON)
@@ -831,12 +855,22 @@ class ListClosedReadRaceBrowserTests(unittest.TestCase):
 
     def test_box_with_no_expanded_attribute_and_no_shown_option_is_closed_as_before(self):
         # Chosen: a missing aria-expanded is read as not expanded (base behavior, which the fake-page
-        # lookup tests rely on). PASS still needs the value read from the same box and no shown option.
-        result = self.fill(unreadable_expanded_html("missing"))
+        # lookup tests rely on). PASS still needs the value read from the same box, no shown option,
+        # and a W-112 signal: here the box turns read-only after the click.
+        result = self.fill(unreadable_expanded_html("missing-locked"))
         self.assertEqual(self.box_value(), "recThing")
         self.assertIsNone(self.page.locator("#rv").get_attribute("aria-expanded"))
         self.assertEqual(result.status, "PASS", result.note)
-        self.assertEqual(result.note, "Record Variable is recThing. The field shows it and its list closed.")
+        self.assertEqual(result.note,
+                         "Record Variable is recThing. The field shows it, its list closed and it became read-only.")
+
+    def test_box_with_no_expanded_attribute_and_only_its_old_text_is_review_not_pass(self):
+        # W-112: the box showed recThing before the click and still does; nothing names the pick.
+        result = self.fill(unreadable_expanded_html("missing"))
+        self.assertEqual(self.box_value(), "recThing")
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertEqual(result.note, UNCONFIRMED_NOTE)
+        self.assertFalse(result.freeze)
 
     def test_walk_goes_on_after_a_swap_between_reads_and_run_is_inconclusive(self):
         page = self.open(race_html(PILL_FIELD), swap_after_read=True)

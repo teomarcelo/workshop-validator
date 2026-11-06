@@ -437,7 +437,10 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
                  '.attachShadow({mode: "open"}).innerHTML = "<style>:host { color: navy; }</style><slot></slot>";'
                  '</script>' + CLOSE_ON_PICK)
         result = self.pick(inner, "varSampleRec")
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Record Variable option varSampleRec was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
 
     def test_text_cut_away_by_an_overflow_clip_is_never_clicked(self):
@@ -472,7 +475,10 @@ class OptionInnerTextBrowserTests(unittest.TestCase):
         self.assertEqual(guide_walk._option_lines(page.locator("#o")), ["varSampleRec", "Sample description"])
         result = self.pick('<div>varSampleRec</div>' + CLOSE_ON_PICK, "varSampleRec",
                            css=ASSISTIVE_CSS + '<div style="height:3000px"></div>')
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Record Variable option varSampleRec was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
 
     def test_resource_type_miss_saves_the_option_structure_with_no_text(self):

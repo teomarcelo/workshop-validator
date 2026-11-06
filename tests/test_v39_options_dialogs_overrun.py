@@ -345,7 +345,10 @@ class OwnedOptionBrowserTests(unittest.TestCase):
 
     def test_object_option_is_picked_by_its_first_line_inside_its_own_list(self):
         result = self.fill(lookup_html(OBJECTS, outside=DECOY_OUTSIDE), "Object: Opportunity")
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Object option Opportunity was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
         self.assertEqual(self.page.locator("#ob-box").input_value(), "Opportunity")
@@ -377,7 +380,10 @@ class OwnedOptionBrowserTests(unittest.TestCase):
     def test_page_lookup_named_by_its_combobox_ancestor_is_picked_in_that_list(self):
         html = page_lookup_html(OBJECTS, owner="ancestor", pill=False)
         result = self.fill(html, "Object: Opportunity")
-        self.assertEqual(result.status, "PASS")
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Object option Opportunity was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
 
@@ -402,9 +408,12 @@ class OwnedOptionBrowserTests(unittest.TestCase):
 
     def test_pill_in_another_field_is_not_evidence(self):
         result = self.fill(page_lookup_html(OBJECTS, pill_outside=True), "Object: Opportunity")
-        self.assertEqual(result.status, "UI_MISMATCH")
-        self.assertTrue(result.freeze)
-        self.assertIn("Object did not show Opportunity", result.note)
+        # W-112 (b): a new pill labelled Opportunity anywhere on the page is review, never PASS.
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        self.assertFalse(result.freeze)
+        self.assertEqual(result.note, "Object option Opportunity was clicked and a new selected pill labelled "
+                                      "Opportunity appears on the page, but the validator cannot prove the pill "
+                                      "belongs to this field; please confirm.")
 
     def test_page_lookup_that_names_no_list_is_refused_without_a_click(self):
         result = self.fill(page_lookup_html(OBJECTS, owner="none"), "Object: Opportunity")
@@ -427,7 +436,10 @@ class OwnedOptionBrowserTests(unittest.TestCase):
             '  function attach() { if (!list.isConnected) document.getElementById("pl-home").appendChild(list); }',
         ).replace('box.addEventListener("click", openList);', "")
         result = self.fill(html, "Object: Opportunity")
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Object option Opportunity was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["Opportunity"])
         self.assertEqual(self.page.evaluate("window.decoyClicks"), 0)
 

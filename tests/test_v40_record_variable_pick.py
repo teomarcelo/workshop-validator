@@ -241,8 +241,11 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
 
     def test_option_with_screen_reader_text_is_picked_by_its_visible_line(self):
         result = self.fill(screen_html())
-        self.assertEqual(result.status, "PASS", result.note)
-        self.assertTrue(result.evidence_ids)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Record Variable option varWidgetRec was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
+        self.assertEqual(result.evidence_ids, ())
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
         self.assertEqual(self.page.locator("#rv").input_value(), "varWidgetRec")
         self.assertEqual(self.page.evaluate("window.escapes"), 0)
@@ -254,7 +257,10 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
 
     def test_named_list_with_no_options_falls_back_to_the_dialog(self):
         result = self.fill(screen_html(controls="lb-empty"))
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Record Variable option varWidgetRec was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
         self.assertEqual(self.page.locator("#rv").input_value(), "varWidgetRec")
 
@@ -367,7 +373,10 @@ class RecordVariablePickBrowserTests(unittest.TestCase):
         inner = ('<strong style="display:block">varWidgetRec</strong>'
                  '<span style="display:block">Sample record row</span>')
         result = self.fill(screen_html(option_html=inner))
-        self.assertEqual(result.status, "PASS", result.note)
+        self.assertEqual(result.status, "NEEDS_REVIEW", result.note)
+        # W-112: the box shows only the text the walk typed; nothing names the pick.
+        self.assertEqual(result.note, 'Record Variable option varWidgetRec was clicked. The field shows the typed text; nothing on the page confirms the pick, so please confirm.')
+        self.assertFalse(result.freeze)
         self.assertEqual(self.page.evaluate("window.chosen"), ["opt1"])
         self.assertEqual(self.page.locator("#rv").input_value(), "varWidgetRec")
 
