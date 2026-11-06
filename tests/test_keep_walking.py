@@ -14,10 +14,11 @@ from workshop_validator.automate import (
     FAILED, _summary, gate_outcome_of, load_gate, main as automate_main, outcome_of, save_gate,
 )
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
-from workshop_validator.guide_walk import AFTER_FAILURE_FLAG, CheckResult, GuideCheck, walk_guide
+from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.report import ReportStep
 from workshop_validator.step_board import (
-    build_board, main as board_main, outcomes_from_report_steps, write_run_report,
+    build_board, main as board_main, outcomes_from_report_steps, render_board, write_results_pdf,
+    write_run_report,
 )
 
 from tests.test_guide_walk import Clock, Page
@@ -25,6 +26,7 @@ from tests.test_guide_walk import Clock, Page
 EX_A = "Exercise 1: Sample Alpha"
 EX_B = "Exercise 2: Sample Beta"
 HOME = "https://example.lightning.force.com/lightning/page/home"
+AFTER_FAILURE_FLAG = "after-earlier-failure"  # the suspect token the report and quick-mode verifier read
 
 
 def _step(step_id, exercise, task, number):
@@ -110,7 +112,7 @@ class KeepWalkingTests(unittest.TestCase):
             ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
                        note=outcome.notes.get(item.step_id, ""))
             for item in TWO_TASKS
-        )
+        ) + (ReportStep("z9", 1, "Outside step", "NOT_RUN", note="Sample step outside the browser."),)
         summary = _summary(SimpleNamespace(signed_in=True, report_steps=steps), 0, 3, FAILED, "x", Path("r"))
         self.assertEqual(summary["failures"], [
             {"step_id": "a2", "status": "UI_MISMATCH", "note": "First sample miss."},
@@ -193,27 +195,38 @@ class TaskBoundaryPopupTests(unittest.TestCase):
             self.assertEqual(outcome.statuses[later], "NOT_RUN")
             self.assertIn('"Sample Tip" still covered the page after the failure in a2', outcome.notes[later])
 
-    def test_guide_dialog_left_open_by_the_failed_task_stops_and_is_not_closed(self):
-        page = Page(HOME, body="Home")
-
-        class Modal:
+    def walk_with_guide_dialog(self, items, modal=True):
+        class Dialog:
             def get_attribute(self, name, timeout=None):
-                return "true" if name == "aria-modal" else None
+                return "true" if modal and name == "aria-modal" else None
 
             def is_visible(self):
                 return True
 
-        modal = Modal()
-        scan = lambda _page: [(modal, "Sample Editor", "sample editor fields")]
+        dialog = Dialog()
+        scan = lambda _page: [(dialog, "Sample Editor", "sample editor fields")]
 
         def fail(state, step):
             guide_walk._open_guide_dialog(state, "Sample Editor")
             return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
 
         with patch.object(guide_walk, "_visible_dialogs", scan):
-            outcome, calls = _walk(page, TWO_TASKS, {"a2": fail})
+            return _walk(Page(HOME, body="Home"), items, {"a2": fail})
+
+    def test_guide_dialog_left_open_by_the_failed_task_stops_and_is_not_closed(self):
+        outcome, calls = self.walk_with_guide_dialog(TWO_TASKS)
         self.assertEqual(calls, ["a1", "a2"])
         self.assertIn('"Sample Editor" still covered the page after the failure in a2', outcome.notes["b1"])
+
+    def test_guide_dialog_that_is_not_modal_does_not_stop(self):
+        _outcome, calls = self.walk_with_guide_dialog(TWO_TASKS, modal=False)
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+
+    def test_guide_dialog_the_next_step_names_does_not_stop(self):
+        named = GuideStep("b1", 1, EX_A, "Task 2: Sample two", "1", "In the Sample Editor, click Done.",
+                          (90.0, 10.0, 400.0, 24.0), None, ())
+        _outcome, calls = self.walk_with_guide_dialog((*TWO_TASKS[:3], named, TWO_TASKS[4]))
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
 
     def test_unreadable_page_after_a_failure_stops_with_a_note(self):
         def broken(*_args, **_kwargs):
@@ -302,6 +315,14 @@ class KeepOrgTests(unittest.TestCase):
             self.assertEqual(code, 2)
             self.assertIn("failure step s4 is REAL", out)
 
+    def test_empty_failures_judge_the_stop_step(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_root(folder, failures=[], stop="s2",
+                                       verdicts=[("s2", "FALSE_FAILURE")])
+            code, out = self.keep(root, run_dir)
+            self.assertEqual(code, 0, out)
+            self.assertEqual(load_gate(root)["kept_org_reason"]["step_id"], "s2")
+
     def test_malformed_failures_refuse(self):
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_root(folder, failures=[{"status": "UI_MISMATCH"}], stop="s1",
@@ -336,6 +357,11 @@ class ReportTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(board_main(["--render", str(run_dir)]), 0)
             html = (run_dir / "report.html").read_text(encoding="utf-8")
+            write_results_pdf(board, run_dir / "results.pdf")
+            self.assertTrue((run_dir / "results.pdf").read_bytes().startswith(b"%PDF"))
+        page = render_board(board)
+        self.assertIn("After an earlier failure in this exercise", page)
+        self.assertIn("<strong>2</strong>", page.split("passes need a check")[0][-200:])
         self.assertIn("All Failures (1)", html)
         self.assertIn("<span class='stat-value'>1</span><span class='stat-label'>Blocked by a failure", html)
         self.assertIn("After an earlier failure in this exercise", html)
