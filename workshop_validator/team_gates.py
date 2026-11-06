@@ -55,6 +55,11 @@ def _redact_stderr(stderr: str) -> str:
     return "\n".join(lines) if lines else ""
 
 
+def _printable_name(name: str) -> str:
+    """Folder name for printing: control characters stripped, emails and tokens redacted."""
+    return _redact_stderr(name.replace("\t", " "))
+
+
 def _git(repo: Path, *args: str, check=True, runner=None) -> str:
     """Run git through `runner(cmd, cwd)` (tests inject a fake); raise on failure when check."""
     result = (runner or _default_runner)(["git", *args], Path(repo))
@@ -510,7 +515,6 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         keep_reason = None
         remove_reason = None
 
-        # Check for stale lock (lock with dead PID)
         if lock_reason:
             if isinstance(lock_reason, str):
                 pid_match = re.search(r'\bpid (\d+)\b', lock_reason)
@@ -529,7 +533,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
                         keep_reason = "locked"
                     except ProcessLookupError:
                         keep_reason = "stale-lock"
-                        print(f"  stale-lock {path.name} (pid {pid} not running)")
+                        print(f"  stale-lock {_printable_name(path.name)} (pid {pid} not running)")
                     except PermissionError:
                         keep_reason = "locked"
                     except (OSError, ValueError, OverflowError):
@@ -541,8 +545,8 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
 
         if keep_reason:
             kept_reasons[keep_reason] = kept_reasons.get(keep_reason, 0) + 1
-            if dry_run and keep_reason != "locked":
-                print(f"  keep {path.name}: {keep_reason}")
+            if dry_run:
+                print(f"  keep {_printable_name(path.name)}: {keep_reason}")
             continue
 
         if dirty:
@@ -602,30 +606,27 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         if keep_reason:
             kept_reasons[keep_reason] = kept_reasons.get(keep_reason, 0) + 1
             if dry_run:
-                print(f"  keep {path.name}: {keep_reason}")
+                print(f"  keep {_printable_name(path.name)}: {keep_reason}")
             continue
 
         if not dry_run:
-            # Try to remove the worktree
             run = runner or _default_runner
             remove_result = run(["git", "worktree", "remove", str(path)], repo)
             if remove_result.returncode == 0:
-                # Worktree removed successfully, now delete the branch
                 _git(repo, "branch", "-D", branch, check=False, runner=runner)
                 removed.append(path.name)
                 if remove_reason:
                     removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
             else:
-                # Removal failed, count as kept with remove-failed reason
                 kept_reasons["remove-failed"] = kept_reasons.get("remove-failed", 0) + 1
                 redacted = _redact_stderr(remove_result.stderr) if remove_result.stderr else ""
-                lines = redacted.splitlines()
-                stderr_first = lines[0] if lines else "unknown error"
-                print(f"  remove-failed {path.name}: {stderr_first}")
+                stderr_first = next((line for line in redacted.splitlines() if line.strip()),
+                                    "unknown error")
+                print(f"  remove-failed {_printable_name(path.name)}: {stderr_first}")
         else:
             # In dry-run, print worktrees that would be removed
             if remove_reason:
-                print(f"  remove {path.name}: {remove_reason}")
+                print(f"  remove {_printable_name(path.name)}: {remove_reason}")
             removed.append(path.name)
             if remove_reason:
                 removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
