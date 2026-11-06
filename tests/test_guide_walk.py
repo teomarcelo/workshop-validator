@@ -135,7 +135,20 @@ class Clock:
         self.now += seconds
 
 
+class _NoPills:
+    """The page-script result for a pill search on the fake page: an empty array."""
+
+    def get_properties(self):
+        return {}
+
+
 class Loc:
+    def evaluate_handle(self, script, arg=None):
+        """The fake page shows no pills: the page-wide and container pill searches find none."""
+        if script in (guide_walk._PAGE_PILLS_JS, guide_walk._NEW_PAGE_PILLS_JS, guide_walk._FIELD_CONTAINERS_JS):
+            return _NoPills()
+        raise NotImplementedError(script)
+
     def __init__(self, page, kind, name=""):
         self.page = page
         self.kind = kind
@@ -179,6 +192,9 @@ class Loc:
 
     def is_checked(self):
         return str(self.get_attribute("aria-checked")).lower() == "true"
+
+    def hover(self, timeout=None):
+        """The walk hovers an option before its pre-click read (W-115); the fake changes nothing."""
 
     def click(self, timeout=None):
         self.page.events.append(("click", self.kind, self.name))
@@ -228,6 +244,32 @@ class Loc:
             return {"text": text, "total": len("".join(text.split())), "parts": []}
         if script is guide_walk._FOCUS_INSIDE_JS:
             return getattr(self.page, "focus_inside", True)
+        if script is guide_walk._BOX_STATE_JS:
+            # One read of the box: ARG is [current handle, first held handle or None, clicked
+            # option or None]; is it this element, is it the first one (the fake is keyed by
+            # (kind, name)), its value, aria-expanded, read-only (page.locked) and whether the
+            # option reads aria-selected "true" (page.aria_states). The fake box is never in a pill.
+            now, first, option = arg
+            kept = first is None or (first.kind, first.name) == (self.kind, self.name)
+            selected = option is not None and option.get_attribute("aria-selected") == "true"
+            return {"same": now is self, "connected": True, "kept": kept, "wrapped": False,
+                    "value": self.input_value() or self.inner_text() or "",
+                    "expanded": self.get_attribute("aria-expanded"),
+                    "locked": (self.kind, self.name) in getattr(self.page, "locked", ()),
+                    "selected": selected}
+        if script is guide_walk._HOLD_JS:
+            # The W-115 hold: ARG is [option, kind, mode]. The fake watches nothing between
+            # polls; "watch" and "read" give whether the signal KIND reads on now.
+            option, kind, mode = arg[:3]
+            if mode == "stop":
+                return None
+            if kind == "locked":
+                return (self.kind, self.name) in getattr(self.page, "locked", ())
+            if kind == "selected":
+                return option is not None and option.get_attribute("aria-selected") == "true"
+            return kind == "value"
+        if script is guide_walk._LOOKUP_MARKS_JS:
+            return (self.kind, self.name) in getattr(self.page, "lookup_marked", ())
         if "tagName" in script:
             return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
         if "data-wv-popup" not in script:
@@ -1551,7 +1593,8 @@ class WalkTests(unittest.TestCase):
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["type"], "PASS")
-        self.assertEqual(clock.now, 0)
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn("Data Type is Record", outcome.notes["type"])
         self.assertIn(("click", "combobox", "Data Type"), page.events)
         self.assertIn(("click", "option", "Record"), page.events)
@@ -1617,7 +1660,8 @@ class WalkTests(unittest.TestCase):
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["variable"], "PASS")
-        self.assertEqual(clock.now, 0)
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn(("click", "tab", "Fields"), page.events)
         self.assertIn(("click", "option", "varWidgetRec"), page.events)
 
@@ -1668,24 +1712,50 @@ class WalkTests(unittest.TestCase):
             [("click", "button", "Done"), ("click", "button", "Screen")],
         )
 
-    def test_object_lookup_chooses_the_matching_record(self):
+    def object_lookup_page(self, mark_selected):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
         page.roles.add(("combobox", "Object"))
         page.values["Object"] = ""
-        page.on_click = owned_option(page, ("combobox", "Object"), "New Resource", "Opportunity")
+        chosen = owned_option(page, ("combobox", "Object"), "New Resource", "Opportunity")
+
+        def clicked(kind, name):
+            chosen(kind, name)
+            if mark_selected and (kind, name) == ("option", "Opportunity"):
+                page.aria_states[("option", "Opportunity", "aria-selected")] = "true"
 
         def filled(name, value):
             if name == "Object" and value == "Opportunity":
                 page.roles.add(("option", "Opportunity"))
 
+        page.on_click = clicked
         page.on_fill = filled
+        return page
+
+    def test_object_lookup_that_shows_only_the_typed_text_is_review_not_pass(self):
+        # W-112: the walk typed Opportunity, so the box showing it after the click is not evidence.
+        page = self.object_lookup_page(mark_selected=False)
+        item = step(
+            "object", "Exercise 2: Flows", "Task 1: Screen.", "c",
+            "Object: Opportunity",
+        )
+        clock, outcome = self.attempt(page, (item,))
+        self.assertEqual(outcome.statuses["object"], "NEEDS_REVIEW")
+        self.assertEqual(outcome.notes["object"], guide_walk._unconfirmed_pick_note("Object", "Opportunity"))
+        self.assertEqual(tuple(outcome.evidence.get("object", ())), ())
+        self.assertIn(("click", "option", "Opportunity"), page.events)
+
+    def test_object_lookup_chooses_the_matching_record(self):
+        # The clicked option reads as selected after the click: a signal that names the pick.
+        page = self.object_lookup_page(mark_selected=True)
         item = step(
             "object", "Exercise 2: Flows", "Task 1: Screen.", "c",
             "Object: Opportunity",
         )
         clock, outcome = self.attempt(page, (item,))
         self.assertEqual(outcome.statuses["object"], "PASS")
-        self.assertEqual(clock.now, 0)
+        self.assertIn("the clicked option reads as selected", outcome.notes["object"])
+        # The pick passes on its second closed read, one poll (1 s) after the first, never on one read.
+        self.assertEqual(clock.now, 1)
         self.assertIn(("click", "option", "Opportunity"), page.events)
 
     def test_auto_layout_plus_adds_the_screen(self):
