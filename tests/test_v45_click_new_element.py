@@ -30,12 +30,7 @@ PAGE = """<!DOCTYPE html><html><head><style>
   .picked { background: #cde; }
 </style></head><body>
 <div role="dialog" aria-label="Edit Sample Screen" id="shell">
-  <div id="palette">
-    <ul role="list" id="fields">
-      <li><button type="button" id="f-name">Name</button></li>
-      <li><button type="button" id="f-stage">Stage</button></li>
-    </ul>
-  </div>
+  <div id="palette">__PALETTE__</div>
   <div id="canvas">__CANVAS__</div>
   <div id="props">__PROPS__</div>
 </div>
@@ -69,12 +64,20 @@ PAGE = """<!DOCTYPE html><html><head><style>
     transparent: () => add(canvas, '<span style="color:transparent">Name</span>'),
     offscreen: () => add(canvas, '<span style="position:absolute;left:-9999px">Name</span>'),
     tooltip: () => add(document.body, '<div role="tooltip"><span>Name</span></div>'),
+    rerendercanvas: () => { canvas.innerHTML = canvas.innerHTML; },
+    clonecanvas: () => { const box = document.getElementById('canvas'); box.replaceWith(box.cloneNode(true)); },
+    rerenderprops: () => { props.innerHTML = props.innerHTML; },
+    laterrerender: () => setTimeout(() => { canvas.innerHTML = canvas.innerHTML; }, 1500),
+    hover: () => {},
     rerender: () => {
       const list = document.getElementById('fields');
       list.replaceWith(list.cloneNode(true));
       place();
     },
   };
+  document.getElementById('f-name').addEventListener('mouseenter', () => {
+    if (window.mode === 'hover') add(canvas, '<span>Name</span>');
+  });
   document.getElementById('f-name').addEventListener('click', (event) => {
     event.currentTarget.classList.add('picked');
     actions[window.mode]();
@@ -82,10 +85,26 @@ PAGE = """<!DOCTYPE html><html><head><style>
 </script>
 </body></html>"""
 
+LIST_PALETTE = """<ul role="list" id="fields">
+      <li><button type="button" id="f-name">Name</button></li>
+      <li><button type="button" id="f-stage">Stage</button></li>
+    </ul>"""
+
+# The same palette with no list role or list tag around the buttons.
+DIV_PALETTE = """<div id="fields">
+      <div><button type="button" id="f-name">Name</button></div>
+      <div><button type="button" id="f-stage">Stage</button></div>
+    </div>"""
+
+# One button alone: no list and no ancestor with two controls of its role.
+LONE_PALETTE = """<div id="fields"><button type="button" id="f-name">Name</button></div>"""
+
+NO_SOURCE_NOTE = "No source region was found around the clicked control"
+
 
 def _click_step():
     return step("P1N1", "Exercise 1: Sample", "Task 1: Sample", "1",
-                "Scroll to find the Name field. Click it once to place it in the middle panel.")
+                "Click Name once to add it to the board.")
 
 
 def _gate(status, note):
@@ -113,10 +132,11 @@ class ClickNewElementBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def click(self, mode, canvas="", props=""):
+    def click(self, mode, canvas="", props="", palette=LIST_PALETTE):
         page = self.browser.new_page()
         self.addCleanup(page.close)
-        page.set_content(PAGE.replace("__CANVAS__", canvas).replace("__PROPS__", props))
+        page.set_content(PAGE.replace("__PALETTE__", palette).replace("__CANVAS__", canvas)
+                         .replace("__PROPS__", props))
         page.evaluate("(mode) => { window.mode = mode; }", mode)
         state = guide_walk.WalkState(page=page, timeout_s=3, interval_s=0.2, page_wait_s=3, page_poll_s=0.2)
         state.step_deadline = state.clock() + 60
@@ -191,6 +211,46 @@ class ClickNewElementBrowserTests(unittest.TestCase):
     def test_source_list_re_rendered_needs_review(self):
         self.assert_needs_review(self.click("rerender"))
 
+    # Fails on 0dbccac (PASS there): new nodes, old text.
+    def test_canvas_showing_the_name_re_rendered_needs_review(self):
+        canvas = '<div class="cmp"><span class="lbl">Name</span></div>'
+        self.assert_needs_review(self.click("rerendercanvas", canvas=canvas))
+
+    # Fails on 0dbccac (PASS there).
+    def test_canvas_showing_the_name_replaced_by_a_clone_needs_review(self):
+        canvas = '<div class="cmp"><span class="lbl">Name</span></div>'
+        self.assert_needs_review(self.click("clonecanvas", canvas=canvas))
+
+    # Fails on 0dbccac (PASS there).
+    def test_props_panel_showing_the_name_re_rendered_needs_review(self):
+        props = '<label for="fl">Field Label</label><input id="fl" type="text" value="Name">'
+        self.assert_needs_review(self.click("rerenderprops", props=props))
+
+    # Fails on 0dbccac (PASS there): the poll must not take an unrelated later re-render.
+    def test_click_does_nothing_and_a_timer_re_renders_later_needs_review(self):
+        canvas = '<div class="cmp"><span class="lbl">Name</span></div>'
+        self.assert_needs_review(self.click("laterrerender", canvas=canvas))
+
+    # Fails on 0dbccac (PASS there): what the hover added is before-state.
+    def test_hover_added_name_and_click_places_nothing_needs_review(self):
+        self.assert_needs_review(self.click("hover"))
+
+    def test_real_placement_from_a_plain_div_palette_passes(self):
+        self.assert_new_element_pass(self.click("place", palette=DIV_PALETTE))
+
+    def test_plain_div_palette_click_that_does_nothing_needs_review(self):
+        self.assert_needs_review(self.click("nothing", palette=DIV_PALETTE))
+
+    def test_no_source_region_needs_review_with_a_diagnostic(self):
+        result = self.click("place", palette=LONE_PALETTE)
+        self.assert_needs_review(result)
+        self.assertIn(NO_SOURCE_NOTE, result.note)
+
+    def test_list_palette_has_no_source_diagnostic(self):
+        result = self.click("nothing")
+        self.assert_needs_review(result)
+        self.assertNotIn(NO_SOURCE_NOTE, result.note)
+
 
 class NewElementReadFailsClosedTests(unittest.TestCase):
     """The reader never passes on a failed, missing or odd read (no browser needed)."""
@@ -204,30 +264,52 @@ class NewElementReadFailsClosedTests(unittest.TestCase):
                 raise RuntimeError("read failed")
             return self.raw
 
+    GOOD = {"text": "Name", "total": 4, "unclear": False, "parts": []}
+
+    def text(self, raw=None, fresh=True):
+        return {"kind": "text", "raw": self.GOOD if raw is None else raw, "fresh": fresh}
+
+    def value(self, value="Name", fresh=True):
+        return {"kind": "value", "value": value, "fresh": fresh}
+
+    def read(self, after, before=()):
+        return self.Handle(raw={"state": "read", "before": list(before), "after": list(after)})
+
     def test_unreadable_reads_are_false(self):
-        good_text = {"text": "Name", "total": 4, "unclear": False, "parts": []}
+        good = self.text()
         cases = [
             (None, "tok"),
             (self.Handle(error=True), "tok"),
             (self.Handle(raw={"state": "unproven"}), "tok"),
-            (self.Handle(raw={"state": "gone", "texts": [good_text]}), "tok"),
+            (self.Handle(raw={"state": "gone", "before": [], "after": [good]}), "tok"),
             (self.Handle(raw="read"), "tok"),
-            (self.Handle(raw={"state": "read", "texts": [good_text]}), ""),
-            (self.Handle(raw={"state": "read", "texts": [dict(good_text, unclear=True)]}), "tok"),
-            (self.Handle(raw={"state": "read", "texts": [{"text": "Name\nStage", "total": 9,
-                                                          "unclear": False, "parts": []}]}), "tok"),
-            (self.Handle(raw={"state": "read", "values": ["Account Name"]}), "tok"),
+            (self.read([good]), ""),
+            (self.read([self.text(dict(self.GOOD, unclear=True))]), "tok"),
+            (self.read([self.text({"text": "Name\nStage", "total": 9, "unclear": False, "parts": []})]), "tok"),
+            (self.read([self.value("Account Name")]), "tok"),
+            # The count cannot be read: fail closed.
+            (self.Handle(raw={"state": "read", "after": [good]}), "tok"),
+            (self.Handle(raw={"state": "read", "before": None, "after": [good]}), "tok"),
+            (self.Handle(raw={"state": "read", "before": [], "after": None}), "tok"),
+            (self.Handle(raw={"state": "read", "before": "0", "after": [good]}), "tok"),
+            # A re-render: new nodes, same count.
+            (self.read([good], before=[self.text(fresh=False)]), "tok"),
+            (self.read([self.value()], before=[self.value(fresh=False)]), "tok"),
+            # The count went up, but no element is new by identity.
+            (self.read([self.text(fresh=False)]), "tok"),
+            (self.read([self.text(fresh="yes")]), "tok"),
+            # The only new element does not show the name exactly.
+            (self.read([self.text(fresh=False), self.value("Account Name")]), "tok"),
         ]
         for handle, token in cases:
             with self.subTest(raw=getattr(handle, "raw", None), token=token):
                 self.assertFalse(guide_walk._new_element_shows(handle, token, "Name"))
 
     def test_exact_reads_are_true(self):
-        good_text = {"text": "Name", "total": 4, "unclear": False, "parts": []}
+        self.assertTrue(guide_walk._new_element_shows(self.read([self.text()]), "tok", "Name"))
+        self.assertTrue(guide_walk._new_element_shows(self.read([self.value()]), "tok", "Name"))
         self.assertTrue(guide_walk._new_element_shows(
-            self.Handle(raw={"state": "read", "texts": [good_text]}), "tok", "Name"))
-        self.assertTrue(guide_walk._new_element_shows(
-            self.Handle(raw={"state": "read", "values": ["Name"]}), "tok", "Name"))
+            self.read([self.text(fresh=False), self.text()], before=[self.text(fresh=False)]), "tok", "Name"))
 
 
 if __name__ == "__main__":
