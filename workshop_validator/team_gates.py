@@ -491,6 +491,7 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
     for item in parse_worktrees(_git(repo, "worktree", "list", "--porcelain", runner=runner)):
         path = Path(item.get("worktree", ""))
         branch = str(item.get("branch", "")).removeprefix("refs/heads/")
+        lock_reason = item.get("locked", "")
         if path.resolve() == main_tree or not branch:
             continue
         dirty = _git(path, "status", "--porcelain", check=False, runner=runner).strip() if path.is_dir() else ""
@@ -508,6 +509,31 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
         safe_to_delete = False
         keep_reason = None
         remove_reason = None
+
+        # Check for stale lock (lock with dead PID)
+        if lock_reason and isinstance(lock_reason, str):
+            import re
+            pid_match = re.search(r'\b(\d+)\b', lock_reason)
+            if pid_match:
+                pid = int(pid_match.group(1))
+                # Check if process is running
+                try:
+                    import os
+                    os.kill(pid, 0)  # Signal 0 checks existence without killing
+                    # Process exists, keep it locked
+                    keep_reason = None  # Will fall through to other checks
+                except (OSError, ProcessLookupError):
+                    # Process not running - stale lock
+                    keep_reason = "stale-lock"
+                    if dry_run:
+                        print(f"  stale-lock {path.name} ({lock_reason}, pid {pid} not running)")
+
+        if keep_reason:
+            kept_reasons[keep_reason] = kept_reasons.get(keep_reason, 0) + 1
+            if not dry_run and keep_reason == "stale-lock":
+                # Print stale lock info in non-dry-run too
+                print(f"  stale-lock {path.name} ({lock_reason}, pid {pid_match.group(1) if pid_match else 'unknown'} not running)")
+            continue
 
         if dirty:
             keep_reason = "dirty"
@@ -570,15 +596,28 @@ def worktree_cleanup(repo: Path, dry_run: bool = False, idle_hours: float = 1.0,
             continue
 
         if not dry_run:
-            _git(repo, "worktree", "remove", str(path), check=False, runner=runner)
-            _git(repo, "branch", "-D", branch, check=False, runner=runner)
+            # Try to remove the worktree
+            run = runner or _default_runner
+            remove_result = run(["git", "worktree", "remove", str(path)], repo)
+            if remove_result.returncode == 0:
+                # Worktree removed successfully, now delete the branch
+                _git(repo, "branch", "-D", branch, check=False, runner=runner)
+                removed.append(path.name)
+                if remove_reason:
+                    removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
+            else:
+                # Removal failed, count as kept with remove-failed reason
+                kept_reasons["remove-failed"] = kept_reasons.get("remove-failed", 0) + 1
+                # Print path and first line of stderr
+                stderr_first = _redact_stderr(remove_result.stderr).splitlines()[0] if remove_result.stderr else "unknown error"
+                print(f"  remove-failed {path.name}: {stderr_first}")
         else:
             # In dry-run, print worktrees that would be removed
             if remove_reason:
                 print(f"  remove {path.name}: {remove_reason}")
-        removed.append(path.name)
-        if remove_reason:
-            removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
+            removed.append(path.name)
+            if remove_reason:
+                removed_reasons[remove_reason] = removed_reasons.get(remove_reason, 0) + 1
     _git(repo, "worktree", "prune", check=False, runner=runner)
     verb = "would remove" if dry_run else "removed"
     reason_str = ", ".join(f"{n} {r}" for r, n in sorted(kept_reasons.items())) if kept_reasons else "none"
