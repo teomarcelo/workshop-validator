@@ -6885,6 +6885,59 @@ def _step_error(exc: BaseException) -> CheckResult:
     )
 
 
+# W-117: a stopping real failure blocks only the rest of its task; the walk goes on at the next task.
+_TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
+BLOCKED_BY_PREFIX = "blocked by "
+AFTER_FAILURE_FLAG = "after-earlier-failure"
+
+
+def _task_key(step: GuideStep) -> tuple:
+    return (getattr(step, "exercise", None), getattr(step, "task", None))
+
+
+def _covering_modal_title(state: WalkState, step: GuideStep) -> str | None:
+    """Title of a modal dialog still over the page that STEP does not name, or None.
+
+    A dialog an earlier guide step opened counts too: after a failure it is no longer in use,
+    and it is never closed as a pop-up (it is the guide's own).
+    """
+    found = _unnamed_modal(state.page, step.text or "", state=state)
+    if found:
+        return found[1]
+    step_norm = norm(step.text or "")
+    recorded = _recorded_dialogs(state.page, state)
+    for item, title, _text in _visible_dialogs(state.page):
+        if title and norm(title) not in step_norm and _is_recorded(title, recorded) \
+                and _read_attr(item, "aria-modal") == "true":
+            return title
+    return None
+
+
+def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[list[str], str]:
+    """Before STEP starts the next task after FAILED: close unrelated pop-ups (W-080, W-081).
+
+    Returns (closing notes, stop note). The stop note is empty when the page is usable.
+    Only a pop-up's own dismiss control or Escape is used; nothing else is clicked.
+    """
+    if not _page_open(state):
+        return [], f"The browser closed after the failure in {failed}, so the following steps were not run."
+    closed: list[str] = []
+    try:
+        for _ in range(_POPUP_CLOSE_LIMIT):
+            title, _attempt = _close_unrelated_popup(state, step)
+            if title is None:
+                break
+            closed.append(_popup_note(title))
+        covering = _covering_modal_title(state, step)
+    except Exception as exc:
+        return closed, (f"The page could not be read after the failure in {failed} "
+                        f"({type(exc).__name__}), so the following steps were not run.")
+    if covering:
+        return closed, (f'"{covering}" still covered the page after the failure in {failed}; '
+                        "the walk could not close it, so the following steps were not run.")
+    return closed, ""
+
+
 def walk_guide(
     page,
     inventory,
@@ -6906,8 +6959,10 @@ def walk_guide(
 ) -> WalkOutcome:
     """Run steps in printed order.
 
-    The next step is not started while this one is still waiting. A freeze,
-    a blocked session, or a closed browser leaves every later step NOT RUN.
+    The next step is not started while this one is still waiting. A frozen real failure
+    leaves the rest of its task NOT RUN ("blocked by <step id>"); the walk closes unrelated
+    pop-ups and goes on at the next task, flagging later passes in that exercise (W-117).
+    Any other freeze, a blocked session, or a closed browser leaves every later step NOT RUN.
     """
     catalog = tuple(builtin_checks() if checks is None else checks)
     steps = tuple(getattr(inventory, "steps", ()) or ())
@@ -6940,10 +6995,24 @@ def walk_guide(
         progress("running", f"Running all {total} guide steps in printed order.")
     blocked = ""
     password_form: str | None = None
+    failed_task: tuple | None = None  # W-117: the task a stopping real failure ended
+    failed_step = ""
+    failed_in: dict[object, set] = {}  # exercise -> tasks with a real failure
+    boundary_notes: list[str] = []
     for index, step in enumerate(steps, 1):
         label = (step.text or "").strip().replace("\n", " ")
         if len(label) > 140:
             label = label[:137] + "..."
+        if not blocked and failed_task is not None:
+            if _task_key(step) == failed_task:
+                statuses[step.step_id] = "NOT_RUN"
+                notes[step.step_id] = f"{BLOCKED_BY_PREFIX}{failed_step}"
+                if heartbeat is not None:
+                    heartbeat("", index, total, step.step_id, "NOT_RUN", _clock())
+                continue
+            failed_task = None
+            password_form = None
+            boundary_notes, blocked = _clear_before_task(state, step, failed_step)
         if blocked:
             statuses[step.step_id] = "NOT_RUN"
             notes[step.step_id] = blocked
@@ -7012,6 +7081,17 @@ def walk_guide(
             result = replace(
                 result, note=" ".join([*popup_notes, result.note or ""]).strip(),
             )
+        if boundary_notes:
+            # Pop-ups closed before this task started (W-117); never evidence either.
+            result = replace(result, note=" ".join([*boundary_notes, result.note or ""]).strip())
+            boundary_notes = []
+        failed_tasks = failed_in.get(getattr(step, "exercise", None), set())
+        if result.status == "PASS" and failed_tasks - {_task_key(step)} \
+                and AFTER_FAILURE_FLAG not in result.suspect:
+            # W-117: a later task of an exercise that already failed may depend on it.
+            result = replace(result, suspect=(*result.suspect, AFTER_FAILURE_FLAG))
+        if result.status in _TASK_BLOCKING:
+            failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step))
         if skipped is None:
             _forget_closed_dialogs(state)
         t_end = _clock()
@@ -7043,7 +7123,10 @@ def walk_guide(
         executed.append(step.step_id)
         if heartbeat is not None:
             heartbeat("", index, total, step.step_id, result.status, t_end)
-        if result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
+        if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step):
+            # W-117: the rest of this task is NOT_RUN; the walk resumes at the next task.
+            failed_task, failed_step = _task_key(step), step.step_id
+        elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
             if result.freeze:
                 blocked = result.note or "The following steps were not run."
             else:
