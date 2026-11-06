@@ -126,11 +126,11 @@ class RunOperatorEmailRedactionTests(unittest.TestCase):
         sed_pattern = sed_match.group(1)
 
         # Test with synthetic email addresses
-        test_input = "Error for jane.doe+x@example.co.uk at foo\nuser admin@corp-test.example.com failed"
+        test_input = "Error for jane.doe+x@mail.example.org at foo\nuser admin@corp-test.example.com failed"
         expected_output = "Error for [email] at foo\nuser [email] failed"
 
-        # Use system sed if available, otherwise skip
-        sed_path = shutil.which("sed")
+        # Use /usr/bin/sed if available, otherwise fall back to shutil.which
+        sed_path = "/usr/bin/sed" if Path("/usr/bin/sed").exists() else shutil.which("sed")
         if not sed_path:
             self.skipTest("sed not found in PATH")
 
