@@ -4704,7 +4704,7 @@ _HOLD_JS = r"""(el, arg) => {
   let timer = null;
   const check = () => {
     const now = performance.now();
-    if (hold.broke || !on() || now - began > cap) { hold.broke = true; clearInterval(timer); return; }
+    if (!on() || now - began > cap) { hold.broke = true; clearInterval(timer); return; }
     hold.last = now;
   };
   timer = setInterval(check, 50);
