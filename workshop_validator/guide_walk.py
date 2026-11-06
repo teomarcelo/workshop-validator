@@ -135,6 +135,9 @@ class WalkState:
     # Per step: when a lookup or Resource Type miss freezes, up to 3 options' structures with no
     # text (_option_shapes), saved into the failure snapshot so the next miss shows the real DOM.
     option_shapes: list = field(default_factory=list)
+    # W-119: (step id, normalized label) of every lookup the walk typed into. After typing, a
+    # value that changes to the picked name is never a pick signal, in any later poll of the step.
+    lookup_typed: set = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -4652,15 +4655,15 @@ _PICK_SIGNAL_NOTES = {
 }
 
 
-def _pick_signal(before: dict | None, read: dict, want: str) -> str:
+def _pick_signal(before: dict | None, read: dict, want: str, typed: bool = True) -> str:
     """Which W-115 signal, read after the click on the same element as READ, names the pick; ""
     if none. Each is a change from BEFORE, the read after the hover and right before the click:
-    the value went from other text to WANT ("value"), the box became readOnly or aria-readonly
-    ("locked"), or the clicked option, by identity, became aria-selected ("selected"). The text
-    the walk typed is never one."""
+    the value went from other text to WANT ("value", only when TYPED is False: W-119, a page's
+    autocomplete can rewrite and restore typed text), the box became readOnly or aria-readonly
+    ("locked"), or the clicked option, by identity, became aria-selected ("selected")."""
     if not isinstance(before, dict) or not isinstance(read, dict):
         return ""
-    if _plain(before.get("value")) != want and _plain(read.get("value")) == want:
+    if typed is False and _plain(before.get("value")) != want and _plain(read.get("value")) == want:
         return "value"
     if before.get("locked") is False and read.get("locked") is True:
         return "locked"
@@ -4669,20 +4672,24 @@ def _pick_signal(before: dict | None, read: dict, want: str) -> str:
     return ""
 
 
-# W-115 hold: a signal must hold from the first steady read of the box to the last, on that one
-# element. ARG is [option, kind, mode]. "watch" (on the first read) records the signal KIND and
+# W-115 hold: a signal must hold from the first signaled steady read of the box to the last, on
+# that one element. ARG is [option, kind, mode, cap, fresh]. "watch" records the signal KIND and
 # reads it on the element (and the clicked OPTION) every 50 ms; the hold breaks the first time
 # the signal reads off, so a signal that flickers or turns off between two polls is caught.
-# "read" (on the last read) is true only when a watch is on the element and it never broke;
+# W-119: a broken watch stops its own timer, and a watch older than CAP ms breaks and stops.
+# "read" (on every later read) is true only when a watch is on the element, it never broke, and
+# its timer ran in the last FRESH ms (a page that pauses or replaces setInterval is not watched).
 # "stop" ends the watch. Anything unread is not a hold.
+_HOLD_CAP_MS = 30000
+_HOLD_FRESH_MS = 750
 _HOLD_JS = r"""(el, arg) => {
-  const [option, kind, mode] = arg;
+  const [option, kind, mode, cap, fresh] = arg;
   const key = Symbol.for('workshop-validator.pick-hold');
   const old = el[key];
   if (mode !== 'watch') {
     if (!old) return null;
     if (mode === 'stop') { old.stop(); delete el[key]; return null; }
-    return old.broke === false;
+    return old.broke === false && performance.now() - old.last < fresh;
   }
   if (old) { old.stop(); delete el[key]; }
   const field = el.matches('input, textarea, select');
@@ -4692,9 +4699,15 @@ _HOLD_JS = r"""(el, arg) => {
     : kind === 'locked' ? (el.readOnly === true || el.getAttribute('aria-readonly') === 'true')
     : kind === 'selected' ? (!!option && option.isConnected && option.getAttribute('aria-selected') === 'true')
     : false;
-  const hold = {broke: false};
-  const check = () => { if (!on()) hold.broke = true; };
-  const timer = setInterval(check, 50);
+  const began = performance.now();
+  const hold = {broke: false, last: began};
+  let timer = null;
+  const check = () => {
+    const now = performance.now();
+    if (hold.broke || !on() || now - began > cap) { hold.broke = true; clearInterval(timer); return; }
+    hold.last = now;
+  };
+  timer = setInterval(check, 50);
   hold.stop = () => clearInterval(timer);
   el[key] = hold;
   check();
@@ -4705,7 +4718,7 @@ _HOLD_JS = r"""(el, arg) => {
 def _hold(held, option, kind: str, mode: str) -> bool:
     """Run _HOLD_JS on HELD; True only for a hold that is watched (watch) or never broke (read)."""
     try:
-        return held.evaluate(_HOLD_JS, [option, kind, mode]) is True
+        return held.evaluate(_HOLD_JS, [option, kind, mode, _HOLD_CAP_MS, _HOLD_FRESH_MS]) is True
     except Exception:
         return False
 
@@ -5168,9 +5181,11 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
     if box is None or not want:
         return None
     picks = _matching_options(root, box, want, empty_falls_back=True)
+    typed_key = (step.step_id, norm(label))
     if not picks:
         if _shown_value(box) != want:
-            _fill_labeled(state, label, value)
+            if _fill_labeled(state, label, value):
+                state.lookup_typed.add(typed_key)  # W-119: the walk typed in this step.
             root, _role, box = _labeled_box(state.page, label, _LOOKUP_ROLES)
             if box is None:
                 return None
@@ -5240,31 +5255,37 @@ def _pick_lookup_option(state: WalkState, step: GuideStep, label: str, value: st
             _forget(steady)
             return False
         seen.append(True)
-        if not steady or read.get("kept") is not True:
-            # First closed read, or the box re-rendered: (re)start the hold on this element. The
-            # signal it shows now is the one that must hold to the last read (W-115).
+        signal = _pick_signal(prior, read, want, typed_key in state.lookup_typed)
+        late = bool(steady) and read.get("kept") is True and not steady[2] and bool(signal)
+        if not steady or read.get("kept") is not True or late:
+            # First closed read, the box re-rendered, or (W-119) the first read of this element
+            # with a signal on: (re)start the hold and its steady window here. The signal it
+            # shows now is the one that must hold to the last read (W-115).
+            if late:
+                unsigned.append(True)  # Earlier reads showed only the typed text (the review note).
             _forget(steady)
-            kind = _pick_signal(prior, read, want)
-            if kind:
-                # A watch that fails to start leaves no hold, so the last read's check fails.
-                _hold(held, option, kind, "watch")
-            steady.extend((held, state.clock(), kind))
+            if signal:
+                # A watch that fails to start leaves no hold, so the next read's check fails.
+                _hold(held, option, signal, "watch")
+            steady.extend((held, state.clock(), signal, False))
             return False
         _dispose(held)
+        kind = steady[2]
+        if kind and (steady[3] or signal != kind or not _hold(steady[0], option, kind, "read")):
+            # W-119: on every kept read after the hold started, the same signal reads on and the
+            # watch never broke. A break is final for this element.
+            steady[3] = True
+            broken.append(True)
+            return False
         if state.clock() - steady[1] < _PICK_STEADY_S:
             return False
         if anywhere is not False:
             # A new pill on the page whose label cannot be read (or a search that failed).
             unread.append(True)
             return False
-        kind = steady[2]
         if not kind:
-            # No signal on the first steady read: only the typed text. Never PASS on this element.
+            # No signal on any steady read: only the typed text. Never PASS on this element.
             unsigned.append(True)
-            return False
-        if _pick_signal(prior, read, want) != kind or not _hold(steady[0], option, kind, "read"):
-            # The first read's signal is gone on the last read, or it broke in between.
-            broken.append(True)
             return False
         signals.append(_PICK_SIGNAL_NOTES[kind])
         return True

@@ -260,7 +260,7 @@ class Loc:
         if script is guide_walk._HOLD_JS:
             # The W-115 hold: ARG is [option, kind, mode]. The fake watches nothing between
             # polls; "watch" and "read" give whether the signal KIND reads on now.
-            option, kind, mode = arg
+            option, kind, mode = arg[:3]
             if mode == "stop":
                 return None
             if kind == "locked":
