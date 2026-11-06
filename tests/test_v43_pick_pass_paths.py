@@ -692,6 +692,10 @@ class PickPassPathBrowserTests(unittest.TestCase):
         self.assert_review(self.fill(typed_html(SEL_ON + flip(SEL_OFF, SEL_ON, 500, 1200)), poll=2.0),
                            UNSTEADY_NOTE)
 
+    def test_a_picked_value_that_changes_and_comes_back_between_reads_is_never_pass_at_2_s(self):
+        after = SHOWS + flip("rv.value = 'recOther';", "rv.value = 'recThing';", 500, 1200)
+        self.assert_review(self.fill(typed_html(after, list_shown=True), poll=2.0), UNSTEADY_NOTE)
+
     def test_read_only_that_flickers_every_300_ms_is_never_pass_at_0_2_s(self):
         after = RO_ON + "setInterval(() => { rv.readOnly = !rv.readOnly; }, 300);"
         self.assert_review(self.fill(typed_html(after)), UNSTEADY_NOTE)

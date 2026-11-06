@@ -4671,11 +4671,10 @@ def _pick_signal(before: dict | None, read: dict, want: str) -> str:
 
 # W-115 hold: a signal must hold from the first steady read of the box to the last, on that one
 # element. ARG is [option, kind, mode]. "watch" (on the first read) records the signal KIND and
-# watches the element (and the clicked OPTION) with a MutationObserver and a 50 ms timer; the
-# hold breaks the moment the signal reads off or the element leaves the page, so a signal that
-# flickers or turns off between two polls is caught. "read" (on the last read) is true only when
-# the same KIND and OPTION are watched and the hold never broke; "stop" ends the watch. Anything
-# unread is not a hold.
+# reads it on the element (and the clicked OPTION) every 50 ms; the hold breaks the first time
+# the signal reads off, so a signal that flickers or turns off between two polls is caught.
+# "read" (on the last read) is true only when a watch is on the element and it never broke;
+# "stop" ends the watch. Anything unread is not a hold.
 _HOLD_JS = r"""(el, arg) => {
   const [option, kind, mode] = arg;
   const key = Symbol.for('workshop-validator.pick-hold');
@@ -4683,7 +4682,7 @@ _HOLD_JS = r"""(el, arg) => {
   if (mode !== 'watch') {
     if (!old) return null;
     if (mode === 'stop') { old.stop(); delete el[key]; return null; }
-    return old.kind === kind && old.option === option && old.broke === false;
+    return old.broke === false;
   }
   if (old) { old.stop(); delete el[key]; }
   const field = el.matches('input, textarea, select');
@@ -4693,13 +4692,10 @@ _HOLD_JS = r"""(el, arg) => {
     : kind === 'locked' ? (el.readOnly === true || el.getAttribute('aria-readonly') === 'true')
     : kind === 'selected' ? (!!option && option.isConnected && option.getAttribute('aria-selected') === 'true')
     : false;
-  const hold = {kind, option, broke: false};
-  const check = () => { if (!el.isConnected || !on()) hold.broke = true; };
-  const seen = new MutationObserver(check);
-  seen.observe(el, {attributes: true, childList: true, subtree: true, characterData: true});
-  if (option) seen.observe(option, {attributes: true});
+  const hold = {broke: false};
+  const check = () => { if (!on()) hold.broke = true; };
   const timer = setInterval(check, 50);
-  hold.stop = () => { seen.disconnect(); clearInterval(timer); };
+  hold.stop = () => clearInterval(timer);
   el[key] = hold;
   check();
   return hold.broke === false;
