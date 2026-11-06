@@ -2677,16 +2677,17 @@ def _click_locator(loc) -> bool:
 
 
 def _fill_labeled(state: WalkState, step: GuideStep, label: str, value: str) -> bool:
-    """Type VALUE into the field labelled LABEL. The (step, label) key goes into
-    state.lookup_typed before anything is tried, so a fill that writes and then raises, or
-    fails, still counts as typed in this step (W-119: the value signal is then off)."""
-    state.lookup_typed.add((step.step_id, norm(label)))
+    """Type VALUE into the field labelled LABEL. Once a visible field is found, the (step, label)
+    key goes into state.lookup_typed before the fill is tried, so a fill that writes and then
+    raises still counts as typed in this step (W-119: the value signal is then off). With no
+    visible field nothing can be typed, so nothing is recorded."""
     try:
         loc = state.page.get_by_label(label)
     except Exception:
         return False
     if not _visible(loc):
         return False
+    state.lookup_typed.add((step.step_id, norm(label)))
     try:
         _first(loc).fill(value)
     except Exception:
