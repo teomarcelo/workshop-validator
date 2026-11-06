@@ -6901,36 +6901,94 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
 TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
 
 
-# W-116: read the selected value from a select/picklist control after the click. For a native
-# <select>, the selected option's text; for a button or combobox, the shown value (input_value or
-# inner_text). Returns the plain value, or None when it cannot be read.
-_SELECT_VALUE_JS = r"""(el) => {
-  if (el.tagName === 'SELECT') {
-    const option = el.options[el.selectedIndex];
-    return option ? String(option.textContent || '').replace(/\s+/g, ' ').trim() : '';
+# W-116: one read of a labelled select control, on the element held before its option was
+# clicked. ARG is [now, option]: NOW the element the box locator resolves to now, OPTION the clicked
+# option's element. It reads whether the element is NOW and still connected; whether it now reads as
+# a lookup (role combobox or searchbox, its own or a dropdown select's, or a text field); and the
+# value it shows. A native select or a listbox shows its one selected option's first line, only when
+# that option is the clicked one, by identity; any other control shows its own text. The value is
+# null when it cannot be read.
+_SELECT_READ_JS = r"""(el, arg) => {
+  const [now, option] = arg;
+  const line = (n) => String(n.innerText || n.textContent || '').split('\n')
+    .map((s) => s.replace(/\s+/g, ' ').trim()).filter(Boolean)[0] || '';
+  const native = el.tagName === 'SELECT';
+  const own = native && !el.multiple && el.size <= 1 ? 'combobox' : (native ? 'listbox' : '');
+  const role = String(el.getAttribute('role') || own).toLowerCase();
+  const lookup = role === 'combobox' || role === 'searchbox'
+    || el.matches('input, textarea, [contenteditable], [role="textbox"]');
+  let value = null;
+  if (native || role === 'listbox') {
+    const chosen = native ? [...el.selectedOptions]
+      : [...el.querySelectorAll('[role="option"][aria-selected="true"]')];
+    if (chosen.length === 1 && option && chosen[0] === option) value = line(chosen[0]);
+  } else {
+    value = String(el.innerText || '');
   }
-  const field = el.matches('input, textarea, select');
-  return String((field ? el.value : '') || el.innerText || '');
+  return { same: el === now, connected: el.isConnected === true, lookup, value };
 }"""
 
 
-def _read_select_value(box) -> str | None:
-    """The value shown by a select/picklist control; None when it cannot be read. W-116."""
-    if box is None:
-        return None
+def _select_read(box, held, option):
+    """(kept, value) of one _SELECT_READ_JS read of HELD. KEPT is False when the box locator no
+    longer resolves to HELD, HELD left the page, now reads as a lookup, or the read failed; VALUE
+    is the plain shown value, or None when it cannot be read."""
+    now = None
     try:
-        read = box.evaluate(_SELECT_VALUE_JS)
-        return _plain(read) if isinstance(read, str) else None
+        now = box.element_handle(timeout=1000)
+        read = held.evaluate(_SELECT_READ_JS, [now, option])
     except Exception:
-        return None
+        return False, None
+    finally:
+        _dispose(now)
+    if not isinstance(read, dict) or read.get("same") is not True or read.get("connected") is not True:
+        return False, None
+    if read.get("lookup") is not False:
+        return False, None
+    value = read.get("value")
+    return True, (_plain(value) if isinstance(value, str) else None)
 
 
-def _select_labeled(state: WalkState, label: str, value: str, notes: list | None = None) -> bool:
+def _select_shown(state: WalkState, box, held, option, want: str) -> bool:
+    """W-116: True only when HELD, read after the click, shows WANT on at least two polls at least
+    _PICK_STEADY_S apart with no other read between them, and stays the same connected, non-lookup
+    element throughout. A value not shown yet is polled for up to the page wait."""
+    if held is None or option is None or not want:
+        return False
+    interval = state.interval_s if state.interval_s > 0 else _PICK_STEADY_S
+    limit = max(state.page_wait_s, _PICK_STEADY_S + 2 * interval)
+    start = state.clock()
+    first, reads = None, 0
+    while True:
+        _sleep(state, interval)
+        kept, value = _select_read(box, held, option)
+        if not kept:
+            return False
+        if value == want:
+            if first is None:
+                first, reads = state.clock(), 0
+            reads += 1
+            if reads >= 2 and state.clock() - first >= _PICK_STEADY_S:
+                return True
+        else:
+            first, reads = None, 0
+        if state.clock() - start >= limit:
+            return False
+
+
+def _select_unshown_note(label: str, value: str) -> str:
+    return (f"{label} option {value} was clicked, but the control did not show {value} steadily "
+            "afterwards; please confirm.")
+
+
+def _select_labeled(state: WalkState, label: str, value: str, notes: list | None = None) -> str:
     """Lightning dropdowns such as Data Type are choices, not text fields.
 
     A dropdown found only by its visible text (LABEL is not its accessible name) owns no
     list the walk can read, so no option is clicked; a note for triage is added to NOTES.
-    W-116: PASS only when the value is read back after the click and holds on two polls.
+    Returns "" when no option was clicked, "lookup" when the control is a combobox (it became
+    one after _is_lookup read it), "shown" when the control read back after the click shows VALUE
+    (_select_shown), and "unshown" when an option was clicked but that read never held (W-116).
     """
     page = state.page
     opened = (
@@ -6944,44 +7002,36 @@ def _select_labeled(state: WalkState, label: str, value: str, notes: list | None
         if loc is not None and _visible(loc):
             opened = by_text = _click_locator(loc)
     if not opened and not present(page, "option", value):
-        return False
-    # W-116 race: re-check the box's role right before acting. If it became a lookup, hand off to
-    # the lookup pick path by returning False here; _act_fill will try the lookup path next.
+        return ""
+    # Only an option in the list this control owns, matched by its first line, is clicked.
     root, role, box = _labeled_box(page, label, ("combobox", "button", "listbox"))
     if box is None:
         if by_text and notes is not None and TEXT_ONLY_DROPDOWN_NOTE not in notes:
             notes.append(TEXT_ONLY_DROPDOWN_NOTE)
-        return False
-    # If the control is now a combobox with lookup marks, it's a lookup, not a select.
+        return ""
+    # W-116 race: _is_lookup read no combobox, but the control is one now: it is a lookup.
     if role == "combobox":
-        try:
-            is_lookup = box.evaluate(_LOOKUP_MARKS_JS)
-            if is_lookup is True:
-                return False
-        except Exception:
-            pass
+        return "lookup"
     if role == "listbox":
         picks = [option for option, text, shown in _scoped_options(box) if shown and text == _plain(value)]
     else:
         picks = _matching_options(root, box, value)
     if len(picks) != 1:
-        return False
+        return ""
+    held = option = None
     try:
-        picks[0].click(timeout=8000)
+        held = box.element_handle(timeout=1000)
+        option = picks[0].element_handle(timeout=1000)
     except Exception:
-        return False
-    # W-116: read the value back after the click. PASS only when it equals VALUE and holds on
-    # two polls (at 0.2 s and 2 s). If it cannot be read, or does not match, return False so
-    # the caller can try other paths or report NEEDS_REVIEW.
-    want = _plain(value)
-    for wait_s in (0.2, 2.0):
-        _sleep(state, wait_s)
-        # Re-find the box on each poll.
-        _root, _role, box_now = _labeled_box(page, label, ("combobox", "button", "listbox"))
-        read_value = _read_select_value(box_now)
-        if read_value != want:
-            return False
-    return True
+        pass
+    try:
+        try:
+            picks[0].click(timeout=8000)
+        except Exception:
+            return ""
+        return "shown" if _select_shown(state, box, held, option, _plain(value)) else "unshown"
+    finally:
+        _dispose(held, option)
 
 
 def _is_lookup(page, label: str) -> bool:
@@ -7074,8 +7124,14 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         return CheckResult("NEEDS_REVIEW", _marked_lookup_note(label), ())
     if _field_value(state, label) == value:
         return passed(step, "filled", f"{label} is {value}.")
-    if _select_labeled(state, label, value, state.step_notes):
-        return passed(step, "filled", f"{label} is {value}.")
+    chosen = _select_labeled(state, label, value, state.step_notes)
+    if chosen == "lookup":
+        return _pick_lookup_option(state, step, label, value)
+    if chosen == "shown":
+        return passed(step, "filled", f"{label} is {value}. The control shows {value} after its option was clicked.")
+    if chosen == "unshown":
+        # Never typed into: the click may have changed the choice, and a select takes no text.
+        return CheckResult("NEEDS_REVIEW", _select_unshown_note(label, value), ())
     field_el = _labeled_field(state.page, label)
     try:
         before = _page_pills(field_el)

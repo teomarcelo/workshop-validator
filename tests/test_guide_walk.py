@@ -270,14 +270,6 @@ class Loc:
             return kind == "value"
         if script is guide_walk._LOOKUP_MARKS_JS:
             return (self.kind, self.name) in getattr(self.page, "lookup_marked", ())
-        if script is guide_walk._SELECT_VALUE_JS:
-            # W-116: read the selected value from a select/picklist control.
-            # For a native SELECT (page.tags), read from selected option; otherwise read value or text.
-            if getattr(self.page, "tags", {}).get((self.kind, self.name)) == "SELECT":
-                # Native select: return the "selected option" value.
-                return self.page.values.get(self.name, "")
-            # Button/combobox: return input_value or inner_text.
-            return self.input_value() or self.inner_text() or ""
         if "tagName" in script:
             return getattr(self.page, "tags", {}).get((self.kind, self.name), "")
         if "data-wv-popup" not in script:
