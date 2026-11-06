@@ -1,16 +1,15 @@
-"""V44 / W-080: close an unrelated covering pop-up as soon as it blocks a control.
+"""V44 / W-080: close an unrelated covering pop-up as soon as it blocks the step's control.
 
-P004N001 run 20261106T114653Z-org7: a "Meet the new Guidance Center" dialog (Step 1 of 2)
-covered the Save button. The walk waited about 30 s for Save while the dialog covered it,
-until the step cap ran out. Then _popup_retry was called but its first check
-(if _time_left(state) <= 0) returned before _close_unrelated_popup ever ran.
+A tour dialog (aria-modal, a title, "Step 1 of 2", buttons Dismiss, Next and an X named
+Close) covered a visible Save button. The walk tried to click Save until the wait ran out,
+and then the pop-up retry returned at its time check before any close was tried.
 
-Fix: Close the popup early (while waiting for the control), not after the timeout expires.
-And _popup_retry makes at least one close attempt even when time is up, if a covering
-pop-up was the cause.
+Real browser only, synthetic HTML. The step's own popup (opened by Save, with OK) is the
+guide's and is never closed by the W-080 closer.
 """
 
 import os
+import time
 import unittest
 
 try:
@@ -19,15 +18,73 @@ except ImportError:
     sync_playwright = None
 
 from workshop_validator import guide_walk
-from tests.test_guide_walk import Clock, Page, step
+from tests.test_guide_walk import step
 
+SMOKE = sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1"
+PAGE_URL = "https://example.lightning.force.com/lightning/setup/SampleSettings/home"
+TOUR_TITLE = "Welcome to the Sample Tour"
+PAGE_WAIT_S = 20
+STEP_CAP_S = 30
+# Well inside the wait: the old code spends the whole wait on the covered Save.
+EARLY_S = 12
 
-def state_for(page):
-    clock = Clock()
-    return guide_walk.WalkState(
-        page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
-        page_wait_s=10, page_poll_s=0.5,
-    )
+TOUR_BUTTONS = (
+    '<button onclick="tour(\'Dismiss\')">Dismiss</button>'
+    '<button onclick="tour(\'Next\')">Next</button>'
+    '<button aria-label="Close" onclick="tour(\'Close\')">X</button>'
+)
+NEXT_ONLY = '<button onclick="tour(\'Next\')">Next</button>'
+
+PAGE_HTML = """<!doctype html><html><head><title>Sample Settings</title></head><body>
+<main><h1>Sample Settings</h1><p>Made-up settings page.</p>
+<button id="save" style="{save_style}" onclick="save()">Save</button></main>
+<div id="tour" role="dialog" aria-modal="true" aria-labelledby="tour-title" style="{tour_style}">
+  <h2 id="tour-title">{tour_title}</h2>
+  <p id="tour-step">Step 1 of 2</p>
+  <p>Made-up help text for a tour the guide does not mention.</p>
+  {tour_buttons}
+</div>
+<script>
+  window.clicked = [];
+  const TOUR_STYLE = "position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:50;display:block";
+  function tour(name) {{
+    window.clicked.push('tour:' + name);
+    if (name === 'Next') {{ document.getElementById('tour-step').textContent = 'Step 2 of 2'; return; }}
+    document.getElementById('tour').remove();
+    {after_tour}
+  }}
+  function save() {{
+    window.clicked.push('Save');
+    const box = document.createElement('div');
+    box.id = 'stored';
+    box.setAttribute('role', 'dialog');
+    box.setAttribute('aria-modal', 'true');
+    box.setAttribute('aria-labelledby', 'stored-title');
+    box.style.cssText = 'position:fixed;top:20%;left:20%;padding:20px;background:#fff;z-index:60';
+    box.innerHTML = '<h2 id="stored-title">Changes Stored</h2><p>Made-up result text.</p>' +
+      '<button aria-label="Close" onclick="stored(\\'Close\\')">X</button>';
+    document.body.appendChild(box);
+    setTimeout(() => {{
+      const ok = document.createElement('button');
+      ok.textContent = 'OK';
+      ok.onclick = () => stored('OK');
+      box.appendChild(ok);
+    }}, {ok_delay_ms});
+  }}
+  function stored(name) {{
+    window.clicked.push('stored:' + name);
+    document.getElementById('stored').remove();
+    if (name === 'OK') {{
+      const toast = document.createElement('div');
+      toast.setAttribute('role', 'status');
+      toast.textContent = 'Sample settings successfully saved.';
+      document.body.appendChild(toast);
+    }}
+  }}
+  {setup}
+</script></body></html>"""
+
+SHOWN = "position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:50;display:block"
 
 
 def save_step():
@@ -35,184 +92,16 @@ def save_step():
                 "Click Save, then read the popup and click OK")
 
 
-def guidance_page(has_save=False, dialog=True, buttons=("Dismiss", "Next", "Close")):
-    """A page with an optional Save button and an optional Guidance Center dialog."""
-    page = Page("https://example.lightning.force.com/setup/Sample/home")
-    if has_save:
-        page.roles.add(("button", "Save"))
-    if dialog:
-        dialog_text = "Meet the new Guidance Center\nStep 1 of 2"
-        page.roles.add(("dialog", dialog_text))
-        inside = []
-        for name in buttons:
-            page.roles.add(("button", name))
-            inside.append(("button", name))
-        page.children[("dialog", dialog_text)] = inside
-    return page
+def page_html(tour_buttons=TOUR_BUTTONS, tour_style=SHOWN, save_style="", after_tour="",
+              ok_delay_ms=0, setup=""):
+    return PAGE_HTML.format(
+        tour_title=TOUR_TITLE, tour_buttons=tour_buttons, tour_style=tour_style,
+        save_style=save_style, after_tour=after_tour, ok_delay_ms=ok_delay_ms, setup=setup,
+    )
 
 
-def clicks(page):
-    return [event[1:] for event in page.events if event[0] == "click"]
-
-
-GUIDANCE_DIALOG = "Meet the new Guidance Center\nStep 1 of 2"
-CLOSED_NOTE = "Environment: closed a promotional pop-up the guide does not mention (owner rule W-080)."
-
-
-class PopupCloseEarlyTests(unittest.TestCase):
-    def test_popup_covering_save_at_start_is_closed_early_and_save_is_clicked(self):
-        """The dialog is present before the step starts, blocking Save. It is closed
-        right away (not after the full timeout) and Save is clicked."""
-        page = guidance_page(has_save=False, dialog=True)
-
-        def reveal(kind, name):
-            if name in ("Close", "Dismiss"):
-                page.roles.discard(("dialog", GUIDANCE_DIALOG))
-            if name != "Next" and ("dialog", GUIDANCE_DIALOG) not in page.roles:
-                page.roles.add(("button", "Save"))
-
-        page.on_click = reveal
-        state = state_for(page)
-        state.step_deadline = state.clock() + 40  # 40 s cap
-        result = guide_walk.attempt_step(state, save_step())
-        # The close happens early: elapsed time should be much less than the cap.
-        self.assertLess(state.clock(), 10, "popup should be closed early, not after full timeout")
-        # A popup close note was added (the exact title may vary based on extraction)
-        self.assertEqual(len(state.popup_notes), 1)
-        self.assertIn("closed", state.popup_notes[0])
-        self.assertIn("W-080", state.popup_notes[0])
-        # Save should have been clicked
-        self.assertIn(("button", "Save"), clicks(page))
-        # Close or Dismiss was used, not Next
-        close_clicks = [c for c in clicks(page) if c[1] in ("Close", "Dismiss")]
-        self.assertEqual(len(close_clicks), 1)
-        self.assertNotIn(("button", "Next"), clicks(page))
-
-    def test_popup_appearing_during_wait_is_closed_and_save_is_clicked(self):
-        """The dialog appears 2 s after the step starts, covering Save. It is closed
-        and Save is clicked."""
-        page = guidance_page(has_save=False, dialog=False)
-        state = state_for(page)
-        state.step_deadline = state.clock() + 40
-        dialog_added = False
-
-        def sleep_and_add(seconds):
-            nonlocal dialog_added
-            state.clock.sleep(seconds)
-            if not dialog_added and state.clock() >= 2:
-                dialog_added = True
-                page.roles.add(("dialog", GUIDANCE_DIALOG))
-                for name in ("Dismiss", "Next", "Close"):
-                    page.roles.add(("button", name))
-                page.children[("dialog", GUIDANCE_DIALOG)] = [
-                    ("button", "Dismiss"), ("button", "Next"), ("button", "Close")
-                ]
-
-        def reveal(kind, name):
-            if name in ("Close", "Dismiss"):
-                page.roles.discard(("dialog", GUIDANCE_DIALOG))
-            if name != "Next" and ("dialog", GUIDANCE_DIALOG) not in page.roles:
-                page.roles.add(("button", "Save"))
-
-        page.on_click = reveal
-        state.sleeper = sleep_and_add
-        result = guide_walk.attempt_step(state, save_step())
-        self.assertLess(state.clock(), 15, "popup should be closed promptly after appearing")
-        self.assertEqual(len(state.popup_notes), 1)
-        self.assertIn("closed", state.popup_notes[0])
-        self.assertIn("W-080", state.popup_notes[0])
-        self.assertIn(("button", "Save"), clicks(page))
-
-    def test_popup_found_after_deadline_still_gets_one_close_attempt(self):
-        """The step deadline already passed when the miss is found. One close attempt
-        still happens (_popup_retry always tries at least once)."""
-        page = guidance_page(has_save=False, dialog=True)
-
-        def reveal(kind, name):
-            if name in ("Close", "Dismiss"):
-                page.roles.discard(("dialog", GUIDANCE_DIALOG))
-                page.roles.add(("button", "Save"))
-
-        page.on_click = reveal
-        state = state_for(page)
-        # Set deadline in the past
-        state.step_deadline = -1
-        result = guide_walk.attempt_step(state, save_step())
-        # At least one close attempt was made, even though time was up
-        close_clicks = [c for c in clicks(page) if c[1] in ("Close", "Dismiss")]
-        self.assertEqual(len(close_clicks), 1, "one close attempt should happen even when time is up")
-
-    def test_guide_named_popup_is_never_closed_by_w080(self):
-        """A dialog the guide names (the step's own popup with OK) is never closed
-        by the W-080 closer. It is the guide's own dialog."""
-        page = guidance_page(has_save=True, dialog=False)
-
-        def reveal(kind, name):
-            if name == "Save":
-                # Save shows the popup with OK
-                page.roles.add(("dialog", "Sample Popup\nOK"))
-                page.roles.add(("button", "OK"))
-                page.children[("dialog", "Sample Popup\nOK")] = [("button", "OK")]
-            elif name == "OK":
-                page.roles.discard(("dialog", "Sample Popup\nOK"))
-
-        page.on_click = reveal
-        state = state_for(page)
-        result = guide_walk.attempt_step(state, save_step())
-        # Both Save and OK should be clicked (Save first, then OK)
-        self.assertIn(("button", "Save"), clicks(page))
-        self.assertIn(("button", "OK"), clicks(page))
-        # The guide's own dialog is never counted as a W-080 popup close
-        # (it's opened by the walk, so it's recorded as a guide dialog)
-        self.assertEqual(len([n for n in state.popup_notes if "W-080" in n]), 0)
-
-    def test_popup_with_only_next_button_is_not_clicked_and_step_blocks(self):
-        """A dialog with only a Next button and no dismiss control is not clicked.
-        The step stops with ENV_BLOCKED and a clear note."""
-        page = guidance_page(has_save=False, dialog=True, buttons=("Next",))
-        page.on_key = lambda key: None  # Escape does not close
-        state = state_for(page)
-        result = guide_walk.attempt_step(state, save_step())
-        self.assertEqual(result.status, "ENV_BLOCKED")
-        self.assertTrue(result.freeze)
-        self.assertIn("covered the page", result.note)
-        # Next should never be clicked
-        self.assertNotIn(("button", "Next"), clicks(page))
-        # Escape should have been tried (may be multiple times as the walk polls)
-        self.assertGreater(len(page.keys), 0)
-        self.assertTrue(all(k == "Escape" for k in page.keys))
-
-
-POPUP_HTML = """
-<button id="save-btn" onclick="window.clicked.push('Save')"
-        style="display:none">Save</button>
-<div role="dialog" aria-modal="true" id="guidance"
-     style="position:fixed;inset:0;background:#fff;z-index:9999">
-  <h2>Meet the new Guidance Center</h2>
-  <p>Step 1 of 2</p>
-  {buttons}
-</div>
-<script>
-  window.clicked = [];
-  document.addEventListener('click', e => {{
-    const text = e.target.textContent;
-    if (text === 'Dismiss' || text === 'X') {{
-      document.getElementById('guidance').remove();
-      document.getElementById('save-btn').style.display = 'block';
-    }} else if (text === 'Next') {{
-      // Next does nothing
-    }}
-  }});
-</script>
-"""
-
-
-@unittest.skipUnless(
-    sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1",
-    "Browser smoke only (requires Chromium)",
-)
+@unittest.skipUnless(SMOKE, "Browser smoke only (RUN_BROWSER_SMOKE=1 and Chromium)")
 class PopupCloseEarlyBrowserTests(unittest.TestCase):
-    """Real browser tests for popup close early."""
 
     @classmethod
     def setUpClass(cls):
@@ -226,66 +115,81 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         cls.browser.close()
         cls.pw.stop()
 
-    def test_popup_covering_save_is_closed_early_in_real_browser(self):
-        """In a real browser, the popup covering Save is closed early (not after timeout),
-        and Save is then clicked."""
+    def open(self, html):
         page = self.browser.new_page()
         self.addCleanup(page.close)
-        buttons = '<button onclick="window.clicked.push(\'Dismiss\')">Dismiss</button>'
-        buttons += '<button>Next</button>'
-        buttons += '<button aria-label="Close" onclick="window.clicked.push(\'Close\')">X</button>'
-        page.set_content(POPUP_HTML.format(buttons=buttons))
+        page.route("**/*", lambda route: route.fulfill(status=200, content_type="text/html", body=html))
+        page.goto(PAGE_URL)
+        page.wait_for_timeout(100)
+        return page
 
-        clock = Clock()
+    def walk(self, page, deadline_s=STEP_CAP_S, page_wait_s=PAGE_WAIT_S):
         state = guide_walk.WalkState(
-            page=page, timeout_s=2, interval_s=0.2, clock=clock, sleeper=clock.sleep,
-            page_wait_s=10, page_poll_s=0.5,
+            page=page, timeout_s=2, interval_s=0.2, page_wait_s=page_wait_s, page_poll_s=0.5,
         )
-        state.step_deadline = clock() + 30
-
+        start = time.monotonic()
+        state.step_deadline = start + deadline_s
         result = guide_walk.attempt_step(state, save_step())
+        return state, result, time.monotonic() - start, page.evaluate("window.clicked")
 
-        # The popup should be closed early (well before the 30s cap)
-        self.assertLess(clock(), 15, "popup should be closed early in real browser")
-        self.assertEqual(len(state.popup_notes), 1)
+    def assert_closed_once(self, state, clicked):
+        tour_clicks = [name for name in clicked if name.startswith("tour:")]
+        self.assertEqual(len(tour_clicks), 1, clicked)
+        self.assertIn(tour_clicks[0], ("tour:Dismiss", "tour:Close"), clicked)
+        self.assertNotIn("tour:Next", clicked)
+        self.assertEqual(state.popup_notes, [guide_walk._popup_note(TOUR_TITLE)])
         self.assertIn("W-080", state.popup_notes[0])
-        clicked = page.evaluate("window.clicked")
+
+    def test_tour_present_before_step_is_closed_early_then_save_and_ok(self):
+        page = self.open(page_html())
+        state, result, elapsed, clicked = self.walk(page)
+        self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
+        self.assert_closed_once(state, clicked)
+        self.assertEqual(clicked[1:], ["Save", "stored:OK"], clicked)
+        self.assertEqual(result.status, "PASS", result.note)
+        # Closing is never evidence: the PASS rests on the clicks, not on the close.
+        self.assertNotIn("W-080", result.note)
+
+    def test_tour_that_appears_two_seconds_in_is_closed_early(self):
+        setup = ("setTimeout(() => { document.getElementById('save').style.display = '';"
+                 " document.getElementById('tour').style.cssText = TOUR_STYLE; }, 2000);")
+        page = self.open(page_html(tour_style="display:none", save_style="display:none", setup=setup))
+        state, result, elapsed, clicked = self.walk(page)
+        self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
+        self.assert_closed_once(state, clicked)
+        self.assertEqual(clicked[1:], ["Save", "stored:OK"], clicked)
+        self.assertEqual(result.status, "PASS", result.note)
+
+    def test_deadline_already_passed_still_makes_one_close_attempt(self):
+        # Save shows only after the tour is gone, so the miss reaches the pop-up retry at the end.
+        after = "document.getElementById('save').style.display = '';"
+        page = self.open(page_html(save_style="display:none", after_tour=after))
+        state, result, _elapsed, clicked = self.walk(page, deadline_s=-1, page_wait_s=2)
+        self.assert_closed_once(state, clicked)
         self.assertIn("Save", clicked)
-        # Either Dismiss or Close was used, not Next
-        self.assertTrue("Dismiss" in clicked or "Close" in clicked)
-        self.assertNotIn("Next", clicked)
+        self.assertEqual(result.status, "PASS", result.note)
 
-    def test_popup_delayed_appearance_is_handled_in_real_browser(self):
-        """The popup appears after a delay, is detected and closed, then Save is clicked."""
-        page = self.browser.new_page()
-        self.addCleanup(page.close)
-        buttons = '<button aria-label="Close" onclick="window.clicked.push(\'Close\')">X</button>'
-        buttons += '<button>Next</button>'
-        html = POPUP_HTML.format(buttons=buttons)
-        # Start with the dialog hidden
-        html = html.replace('id="guidance"', 'id="guidance" style="display:none"')
-        page.set_content(html)
+    def test_guide_popup_opened_by_save_is_never_closed_by_w080(self):
+        # The step's own popup has an X named Close, and its OK shows a second later.
+        page = self.open(page_html(ok_delay_ms=1000))
+        state, result, elapsed, clicked = self.walk(page)
+        self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
+        self.assert_closed_once(state, clicked)
+        self.assertNotIn("stored:Close", clicked)
+        self.assertEqual(clicked[1:], ["Save", "stored:OK"], clicked)
+        self.assertEqual(result.status, "PASS", result.note)
 
-        # Show the dialog after 1 second
-        page.evaluate("""
-            setTimeout(() => {
-                document.getElementById('guidance').style.display = 'block';
-            }, 1000);
-        """)
-
-        clock = Clock()
-        state = guide_walk.WalkState(
-            page=page, timeout_s=2, interval_s=0.2, clock=clock, sleeper=clock.sleep,
-            page_wait_s=10, page_poll_s=0.5,
-        )
-        state.step_deadline = clock() + 30
-
-        result = guide_walk.attempt_step(state, save_step())
-
-        clicked = page.evaluate("window.clicked")
-        self.assertIn("Save", clicked)
-        self.assertEqual(len(state.popup_notes), 1)
-        self.assertIn("W-080", state.popup_notes[0])
+    def test_tour_with_only_next_is_never_clicked_and_stops_with_a_note(self):
+        page = self.open(page_html(tour_buttons=NEXT_ONLY))
+        state, result, elapsed, clicked = self.walk(page)
+        self.assertEqual(clicked, [])
+        self.assertEqual(state.popup_notes, [])
+        self.assertEqual(result.status, "ENV_BLOCKED", result.note)
+        self.assertTrue(result.freeze)
+        self.assertIn(f'"{TOUR_TITLE}" modal covered the page', result.note)
+        self.assertIn("Escape pressed yes", result.note)
+        self.assertIn("still visible yes", result.note)
+        self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
 
 
 if __name__ == "__main__":

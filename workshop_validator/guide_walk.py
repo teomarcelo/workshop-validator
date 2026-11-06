@@ -7184,6 +7184,29 @@ def _finish_clicks(state: WalkState, step: GuideStep, names: list[str]) -> Check
     return passed(step, "clicked", "Clicked " + " then ".join(done) + ".")
 
 
+def _popup_over_control(state: WalkState, step: GuideStep, intent: _Intent) -> str | None:
+    """Title of an unnamed modal pop-up that keeps the step's own visible control from a click, or None.
+
+    Counts only for a click whose named control is visible, sits outside the pop-up, and fails
+    the browser's trial click (nothing is clicked). A control that is not on the page yet, or
+    that is inside the dialog, is never a reason to close anything (W-080, W-083).
+    """
+    if intent.kind != "click" or not intent.target:
+        return None
+    found = _unnamed_modal(state.page, step.text or "", state=state)
+    if not found or _read_attr(found[0], "aria-modal") != "true":
+        return None
+    loc = _locator_for_name(state.page, intent.target)
+    control = None if loc is None else _visible_match(loc)
+    if control is None or _holds_element(found[0], control):
+        return None
+    try:
+        control.click(trial=True, timeout=1000)
+    except Exception:
+        return found[1]
+    return None
+
+
 def _finish_attempt(
     state: WalkState, step: GuideStep, intent: _Intent, opened: dict | None = None,
 ) -> CheckResult:
@@ -7196,6 +7219,11 @@ def _finish_attempt(
     while True:
         loading = _loading(state.page)
         if not loading:
+            # W-080 (V44): a pop-up that covers the visible control is a miss now, not after the
+            # wait; the caller's _popup_retry closes it and runs only this action again.
+            covering = _popup_over_control(state, step, intent)
+            if covering:
+                return _modal_result(covering)
             result = _try_named(state, step, intent, intent.target, opened)
             if result is not None:
                 return result
@@ -7206,14 +7234,6 @@ def _finish_attempt(
                     return _alias_result(intent, alias, result)
                 if result is not None:
                     return result
-            # W-080: close an unrelated covering pop-up early, before the timeout expires.
-            title = _unnamed_modal_title(state.page, step.text or "")
-            if title:
-                popup_title, attempt = _close_unrelated_popup(state, step)
-                if popup_title:
-                    state.popup_notes.append(_popup_note(popup_title))
-                    # Resume waiting for the control after the close
-                    continue
             _consult(state, step, lookup, memory)
         if loading and _wait_done(state, start) and not memory.pending:
             return CheckResult("NOT_RUN", LOADING_NOTE, ())
