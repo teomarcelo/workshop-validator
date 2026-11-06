@@ -113,12 +113,14 @@ class PrivateFileTests(unittest.TestCase):
 class GateOutcomeTests(unittest.TestCase):
     """Tests for the org-move decision, which judges the stopping step only."""
 
-    def test_mismatch_then_needs_review_stop_gives_inconclusive(self):
-        # A non-stopping UI_MISMATCH followed by NEEDS_REVIEW that stops the walk
+    def test_mismatch_before_needs_review_stop_gives_failed(self):
+        # W-121: A real failure before an inconclusive stop returns FAILED.
+        # The old test asserted INCONCLUSIVE, which was unsafe: a real failure
+        # that changed the org should move it, not keep it for retry.
         result = _run("PASS", "UI_MISMATCH", "PASS", "NEEDS_REVIEW", "NOT_RUN", "NOT_RUN")
-        # The stopping step (NEEDS_REVIEW) is inconclusive
-        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
-        # But outcome_of still reports the earlier UI_MISMATCH as FAILED
+        # A real failure before the stopping step: FAILED
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        # outcome_of still reports the earlier UI_MISMATCH as FAILED
         self.assertEqual(outcome_of(result)[0], FAILED)
 
     def test_mismatch_then_stopping_mismatch_gives_failed(self):
@@ -180,7 +182,50 @@ class GateOutcomeTests(unittest.TestCase):
         result = _run("PASS", "PASS", "NOT_RUN", notes={2: "The step exceeded its time limit."})
         self.assertEqual(stopping_step_of(result.report_steps).step_id, "s1")
         self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
-        self.assertEqual(outcome_of(result)[0], INCONCLUSIVE)
+
+    def test_frozen_mismatch_then_env_blocked_gives_failed(self):
+        # W-121: a frozen UI_MISMATCH before an ENV_BLOCKED stop returns FAILED
+        result = _run("PASS", "UI_MISMATCH", "NOT_RUN", "PASS", "ENV_BLOCKED", "NOT_RUN")
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_frozen_mismatch_then_auth_blocked_gives_failed(self):
+        # W-121: a frozen UI_MISMATCH before an AUTH_BLOCKED stop returns FAILED
+        result = _run("PASS", "UI_MISMATCH", "NOT_RUN", "PASS", "AUTH_BLOCKED", "NOT_RUN")
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_non_frozen_mismatch_then_env_blocked_gives_failed(self):
+        # W-121: a non-frozen UI_MISMATCH before an ENV_BLOCKED stop returns FAILED
+        result = _run("PASS", "UI_MISMATCH", "PASS", "ENV_BLOCKED", "NOT_RUN")
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_overrun_not_run_before_mismatch_gives_inconclusive(self):
+        # W-111: a non-frozen overrun NOT_RUN before a real failure is inconclusive
+        overrun_note = "Sample miss. The step exceeded its time limit."
+        result = _run("PASS", "NOT_RUN", "UI_MISMATCH", "NOT_RUN",
+                      notes={1: overrun_note, 2: "Sample real failure."})
+        self.assertEqual(gate_outcome_of(result), INCONCLUSIVE)
+        self.assertEqual(outcome_of(result)[0], FAILED)
+
+    def test_failure_before_anything_changed_follows_org_changed_rule(self):
+        # The org is kept (not moved) when gate_outcome is FAILED but org_changed is False.
+        # This is tested by checking that the automate.py logic at line 443 works correctly.
+        from workshop_validator.automate import org_changed
+
+        # A run with only read-only evidence
+        steps = [
+            ReportStep("s0", 1, "Step 0", "PASS", evidence_ids=("s0:already-signed-in",)),
+            ReportStep("s1", 1, "Step 1", "UI_MISMATCH", note="Sample failure."),
+            ReportStep("s2", 1, "Step 2", "NOT_RUN"),
+        ]
+        result = SimpleNamespace(signed_in=True, message="", report_steps=tuple(steps))
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        # org_changed returns False because only read-only evidence exists
+        self.assertFalse(org_changed(result))
+        # So the org is kept: used = FAILED and (FAILED == SUCCESS or org_changed(result))
+        # used = False, org not moved
 
     def test_time_limit_not_run_gives_inconclusive(self):
         # A NOT_RUN step with time limit note

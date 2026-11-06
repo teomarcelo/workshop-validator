@@ -6891,8 +6891,21 @@ BLOCKED_BY_PREFIX = "blocked by "
 AFTER_FAILURE_FLAG = "after-earlier-failure"
 
 
-def _task_key(step: GuideStep) -> tuple:
-    return (getattr(step, "exercise", None), getattr(step, "task", None))
+def _task_key(step: GuideStep, task_positions: dict | None = None) -> tuple:
+    """Return a unique key for the task this step belongs to.
+
+    Uses the task's position (first step index) in the inventory, not just its label,
+    so repeated task labels get different keys.
+    """
+    if task_positions is None:
+        # Fallback for tests that don't provide positions
+        return (getattr(step, "exercise", None), getattr(step, "task", None))
+
+    exercise = getattr(step, "exercise", None)
+    task = getattr(step, "task", None)
+    # Look up the position of this task occurrence
+    position = task_positions.get((exercise, task, step.step_id))
+    return (exercise, task, position)
 
 
 def _covering_modal_title(state: WalkState, step: GuideStep) -> str | None:
@@ -6966,6 +6979,20 @@ def walk_guide(
     catalog = tuple(builtin_checks() if checks is None else checks)
     steps = tuple(getattr(inventory, "steps", ()) or ())
     _clock = clock or time.monotonic
+
+    # Build task positions: map each step to its task's first occurrence index.
+    # When the (exercise, task) label changes from the previous step, it's a new task occurrence.
+    task_positions: dict = {}
+    prev_key = None
+    current_task_start = 0
+    for idx, s in enumerate(steps):
+        key = (getattr(s, "exercise", None), getattr(s, "task", None))
+        if key != prev_key:
+            # New task starts here
+            current_task_start = idx
+            prev_key = key
+        task_positions[(key[0], key[1], s.step_id)] = current_task_start
+
     state = WalkState(
         page=page,
         home=str(getattr(page, "url", "") or ""),
@@ -7004,9 +7031,12 @@ def walk_guide(
         if len(label) > 140:
             label = label[:137] + "..."
         if not blocked and failed_task is not None:
-            if _task_key(step) == failed_task:
+            if _task_key(step, task_positions) == failed_task:
                 statuses[step.step_id] = "NOT_RUN"
-                notes[step.step_id] = f"{BLOCKED_BY_PREFIX}{failed_step}: {failed_note}".rstrip(": ")
+                parts = [BLOCKED_BY_PREFIX + failed_step]
+                if failed_note:
+                    parts.append(failed_note)
+                notes[step.step_id] = ": ".join(parts)
                 if heartbeat is not None:
                     heartbeat("", index, total, step.step_id, "NOT_RUN", _clock())
                 continue
@@ -7086,12 +7116,12 @@ def walk_guide(
             result = replace(result, note=" ".join([*boundary_notes, result.note or ""]).strip())
             boundary_notes = []
         failed_tasks = failed_in.get(getattr(step, "exercise", None), set())
-        if result.status == "PASS" and failed_tasks - {_task_key(step)} \
+        if result.status == "PASS" and failed_tasks - {_task_key(step, task_positions)} \
                 and AFTER_FAILURE_FLAG not in result.suspect:
             # W-117: a later task of an exercise that already failed may depend on it.
             result = replace(result, suspect=(*result.suspect, AFTER_FAILURE_FLAG))
         if result.status in _TASK_BLOCKING:
-            failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step))
+            failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
         if skipped is None:
             _forget_closed_dialogs(state)
         t_end = _clock()
@@ -7125,7 +7155,7 @@ def walk_guide(
             heartbeat("", index, total, step.step_id, result.status, t_end)
         if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step):
             # W-117: the rest of this task is NOT_RUN; the walk resumes at the next task.
-            failed_task, failed_step = _task_key(step), step.step_id
+            failed_task, failed_step = _task_key(step, task_positions), step.step_id
             failed_note = result.note or ""
         elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
             if result.freeze:

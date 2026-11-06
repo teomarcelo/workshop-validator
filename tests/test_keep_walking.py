@@ -239,6 +239,34 @@ class TaskBoundaryPopupTests(unittest.TestCase):
         self.assertEqual(calls, ["a1", "a2"])
         self.assertIn("could not be read after the failure in a2", outcome.notes["b1"])
 
+    def test_repeated_task_label_gets_unique_keys(self):
+        # Two tasks with the same label but different positions get different keys,
+        # so the second task's steps get the suspect flag when the first task fails.
+        REPEATED_TASKS = (
+            _step("t1a1", EX_A, "Task 1: Shared name", "1"),
+            _step("t1a2", EX_A, "Task 1: Shared name", "2"),
+            _step("t2b1", EX_A, "Task 2: Different", "1"),  # Intervening task
+            _step("t3a1", EX_A, "Task 1: Shared name", "1"),  # Same label as task 1, new occurrence
+            _step("t3a2", EX_A, "Task 1: Shared name", "2"),
+        )
+        outcome, calls = _walk(Page(HOME), REPEATED_TASKS, {"t1a2": _frozen("UI_MISMATCH")})
+        self.assertEqual(outcome.statuses["t1a1"], "PASS")
+        self.assertEqual(outcome.statuses["t1a2"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["t2b1"], "PASS")
+        # t3a1 and t3a2 are in a different task occurrence (after task 2), so they run
+        self.assertEqual(outcome.statuses["t3a1"], "PASS")
+        # And they get the suspect flag because an earlier task in the same exercise failed
+        self.assertIn(AFTER_FAILURE_FLAG, outcome.suspects.get("t3a1", ()))
+
+    def test_blocked_note_preserves_failure_note_ending(self):
+        # The rstrip fix: a failure note that ends with ":" or space is not trimmed
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult("UI_MISMATCH", "Sample miss:", (), freeze=True)
+        })
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        # The ":" at the end of "Sample miss:" should be preserved
+        self.assertEqual(outcome.notes["a3"], "blocked by a2: Sample miss:")
+
 
 def _run(*statuses, notes=None):
     notes = notes or {}

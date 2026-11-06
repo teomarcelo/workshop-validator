@@ -221,10 +221,10 @@ def stopping_step_of(steps):
 
 
 def gate_outcome_of(result) -> str:
-    """Classify for the org-move decision, judging only the stopping step.
-
-    The stopping step is the first non-PASS step after which every later step is NOT_RUN.
-    If there is no stopping step (the walk ran to completion), use the overall outcome.
+    """Classify for the org-move decision. W-121: return FAILED when a real failure
+    (UI_MISMATCH or FUNCTIONAL_FAIL), frozen or not, comes before the stopping step.
+    W-111: if a non-frozen overrun NOT_RUN or inconclusive step comes before that
+    first real failure, return inconclusive.
     """
     steps = result.report_steps
     if not steps:
@@ -235,6 +235,30 @@ def gate_outcome_of(result) -> str:
     # No stopping step means the walk ran to the end
     if stopping_step is None:
         return outcome_of(result)[0]
+
+    # Find the first real failure before or at the stopping step
+    first_real_failure = None
+    for step in steps:
+        if step.status in _REAL_FAIL:
+            first_real_failure = step
+            break
+        # If we reached the stopping step without finding a real failure, stop looking
+        if step is stopping_step:
+            break
+
+    # W-111: if a non-frozen overrun NOT_RUN comes before the first real failure
+    if first_real_failure is not None:
+        for step in steps:
+            if step is first_real_failure:
+                break
+            # Non-frozen overrun NOT_RUN
+            if step.status == "NOT_RUN" and _OVERRUN_MARK in (getattr(step, "note", "") or ""):
+                if not _frozen_not_run(step):
+                    return INCONCLUSIVE
+
+    # W-121: a real failure before the stopping step returns FAILED
+    if first_real_failure is not None and first_real_failure is not stopping_step:
+        return FAILED
 
     # Judge based on the stopping step
     if stopping_step.status in _REAL_FAIL:
