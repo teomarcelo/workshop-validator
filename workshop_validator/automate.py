@@ -24,7 +24,7 @@ import time
 import webbrowser
 
 from .guide_inventory import extract_inventory
-from .guide_walk import OUT_OF_TIME_NOTE
+from .guide_walk import BLOCKED_BY_PREFIX, OUT_OF_TIME_NOTE
 from .lessons import record_lessons
 from .private_runner import run_uploaded_guide
 from .step_board import (
@@ -221,10 +221,14 @@ def stopping_step_of(steps):
 
 
 def gate_outcome_of(result) -> str:
-    """Classify for the org-move decision, judging only the stopping step.
+    """Classify a run for the org-move decision.
 
-    The stopping step is the first non-PASS step after which every later step is NOT_RUN.
-    If there is no stopping step (the walk ran to completion), use the overall outcome.
+    It looks for the first real failure (UI_MISMATCH or FUNCTIONAL_FAIL) at or before the
+    stopping step. W-111: if a non-frozen NOT_RUN whose note says the step exceeded its
+    time limit (an overrun) comes before that first real failure, the result is
+    inconclusive. Otherwise, W-121: a real failure, frozen or not, before the stopping
+    step gives FAILED. With no such failure, the stopping step is judged, and a walk with
+    no stopping step uses outcome_of.
     """
     steps = result.report_steps
     if not steps:
@@ -235,6 +239,30 @@ def gate_outcome_of(result) -> str:
     # No stopping step means the walk ran to the end
     if stopping_step is None:
         return outcome_of(result)[0]
+
+    # Find the first real failure before or at the stopping step
+    first_real_failure = None
+    for step in steps:
+        if step.status in _REAL_FAIL:
+            first_real_failure = step
+            break
+        # If we reached the stopping step without finding a real failure, stop looking
+        if step is stopping_step:
+            break
+
+    # W-111: if a non-frozen overrun NOT_RUN comes before the first real failure
+    if first_real_failure is not None:
+        for step in steps:
+            if step is first_real_failure:
+                break
+            # Non-frozen overrun NOT_RUN
+            if step.status == "NOT_RUN" and _OVERRUN_MARK in (getattr(step, "note", "") or ""):
+                if not _frozen_not_run(step):
+                    return INCONCLUSIVE
+
+    # W-121: a real failure before the stopping step returns FAILED
+    if first_real_failure is not None and first_real_failure is not stopping_step:
+        return FAILED
 
     # Judge based on the stopping step
     if stopping_step.status in _REAL_FAIL:
@@ -269,6 +297,15 @@ def org_changed(result) -> bool:
     return False
 
 
+def org_used(result, gate_outcome: str) -> bool:
+    """True when this run used up its org, so the next run moves to the next org.
+
+    A success always uses the org. A real failure uses it only once a step changed
+    the org (org_changed). An inconclusive run keeps the org.
+    """
+    return gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
+
+
 def org_key(username: str) -> str:
     """Folder name per org, so a saved session is never reused for another user."""
     return "org-" + sha256(username.strip().lower().encode("utf-8")).hexdigest()[:10]
@@ -300,6 +337,15 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
             "step_id": first.step_id, "page": first.page, "status": first.status,
         },
         "stop_step": None if stop is None else stop.step_id,
+        # W-100, W-117: every real failure in printed order; the first one is judged (W-111).
+        "failures": [
+            {"step_id": s.step_id, "status": s.status, "note": s.note or ""}
+            for s in result.report_steps if s.status in _REAL_FAIL
+        ],
+        "blocked_steps": sum(
+            1 for s in result.report_steps
+            if s.status == "NOT_RUN" and (s.note or "").startswith(BLOCKED_BY_PREFIX)
+        ),
         # W-105: PASS steps (with evidence) that carry a "Guide differs" note.
         "passes_with_guide_note": sum(
             1 for s in result.report_steps
@@ -429,9 +475,10 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
         write_results_pdf(board, output / "results.pdf")
     record_lessons(private_root, [(s.title, s.status, s.note) for s in result.report_steps])
     # A success or a real failure used this org, unless nothing in it changed.
-    # Inconclusive runs keep it. The org decision judges the stopping step only.
+    # Inconclusive runs keep it. gate_outcome_of judges the first real failure before
+    # the stop as well as the stopping step (W-121), unless an overrun came first (W-111).
     gate_outcome = gate_outcome_of(result)
-    used = gate_outcome in {SUCCESS, FAILED} and (gate_outcome == SUCCESS or org_changed(result))
+    used = org_used(result, gate_outcome)
     def finish(gate: dict) -> None:
         # Read-modify-write under the gate lock: a claim that ran during this walk
         # keeps its floor and pointer (W-099), and keys this run does not own stay.
@@ -493,6 +540,25 @@ def _board_stop_step(run_dir: Path) -> str | None:
     return None if stop is None else stop.step_id
 
 
+def _judged_steps(summary: dict, stop) -> list[tuple[str, str]]:
+    """Steps keep-org must see verified FALSE_FAILURE, as (kind, step_id), first one first.
+
+    A summary that lists real failures (W-100) is judged on every one of them, the first
+    first (W-111): one REAL failure after a change uses the org. Older summaries keep the
+    stop step.
+    """
+    failures = summary.get("failures")
+    if failures is None:
+        return [("stop step", stop)]
+    if not isinstance(failures, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("step_id"), str) or not row["step_id"]
+            for row in failures):
+        raise ValueError("malformed summary.json")
+    if not failures:
+        return [("stop step", stop)]
+    return [("failure step", row["step_id"]) for row in failures]
+
+
 def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
     """Read verdicts.json as {step_id: every verdict given to that step}.
 
@@ -545,10 +611,11 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
                 or not isinstance(summary.get("org"), int) or summary["org"] < 1:
             raise ValueError("malformed summary.json")
         stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
+        judged = _judged_steps(summary, stop)
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
-        # Every verdict on the stop step must be FALSE_FAILURE; a mixed record keeps the move.
-        found = verdicts.get(stop)
+        # Every verdict on each judged step must be FALSE_FAILURE; a mixed record keeps the move.
+        found = [(kind, step_id, verdicts.get(step_id)) for kind, step_id in judged]
     except ValueError as error:
         return refuse(str(error))
     except (OSError, TypeError):
@@ -558,9 +625,11 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     kept = gate.get("kept_org_reason")
     if isinstance(kept, dict) and kept.get("run_id") == run_id:
         return refuse("this run already kept its org")
-    if found != {"FALSE_FAILURE"}:
-        return refuse(f"stop step {stop} is {'/'.join(sorted(found or ())) or 'not verified'}, "
-                      "not FALSE_FAILURE")
+    for kind, step_id, given in found:
+        if given != {"FALSE_FAILURE"}:
+            return refuse(f"{kind} {step_id} is {'/'.join(sorted(given or ())) or 'not verified'}, "
+                          "not FALSE_FAILURE")
+    stop = judged[0][1]
     run_index = summary["org"] - 1
     if run_index < gate_floor(gate):
         return refuse("that run used a retired org (W-098)")
@@ -573,7 +642,7 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         "kept_org_reason": {"step_id": str(stop), "verdict": "FALSE_FAILURE", "run_id": run_id},
     })
     _save_gate_locked(private_root, gate)
-    print(f"Gate open. Org kept: stop step {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
+    print(f"Gate open. Org kept: {judged[0][0]} {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
     return 0
 
 

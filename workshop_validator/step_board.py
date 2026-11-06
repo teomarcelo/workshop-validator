@@ -469,7 +469,7 @@ def build_board(
         if step.status == "PASS" and any(
             flag in step.chips for flag in (
                 "presence-only", "no-screen-change", "weak-evidence",
-                "url-only-evidence", "unexpected-change"
+                "url-only-evidence", "unexpected-change", "after-earlier-failure",
             )
         )
     )
@@ -1058,6 +1058,11 @@ def _render_step(step: StepView) -> str:
                     "<span class='chip suspect' title='The page changed in an unexpected way'>"
                     "Unexpected page change</span>"
                 )
+            elif chip == "after-earlier-failure":
+                chip_items.append(
+                    "<span class='chip suspect' title='A task before this one in the same exercise failed'>"
+                    "After an earlier failure in this exercise</span>"
+                )
         if chip_items:
             chips_html = f"<div class='chips'>{''.join(chip_items)}</div>"
     return (
@@ -1224,7 +1229,7 @@ def render_run_report(
         if step.status == "PASS" and any(
             flag in step.chips for flag in (
                 "presence-only", "no-screen-change", "weak-evidence",
-                "url-only-evidence", "unexpected-change"
+                "url-only-evidence", "unexpected-change", "after-earlier-failure",
             )
         )
     )
@@ -1237,6 +1242,14 @@ def render_run_report(
         f"<div class='stat'><span class='stat-value'>{blocked_count}</span><span class='stat-label'>Blocked</span></div>",
         f"<div class='stat'><span class='stat-value'>{not_run_count}</span><span class='stat-label'>Not run</span></div>",
     ]
+
+    blocked_by_failure = summary.get("blocked_steps")
+    if isinstance(blocked_by_failure, int) and not isinstance(blocked_by_failure, bool) \
+            and blocked_by_failure > 0:
+        stats_parts.append(
+            f"<div class='stat'><span class='stat-value'>{blocked_by_failure}</span>"
+            "<span class='stat-label'>Blocked by a failure</span></div>"
+        )
 
     if already_set_count > 0:
         stats_parts.append(
@@ -1279,6 +1292,15 @@ def render_run_report(
             f"({escape(first_failure.get('status', 'FAIL'))})</p>"
             "</div>"
         )
+    # W-100: every real failure of the run, in printed order.
+    failures = summary.get("failures")
+    if isinstance(failures, list) and failures:
+        rows = "".join(
+            f"<li><a href='#{escape(str(row.get('step_id', '')), quote=True)}'>"
+            f"{escape(str(row.get('step_id', '')))}</a> ({escape(str(row.get('status', 'FAIL')))})</li>"
+            for row in failures if isinstance(row, dict)
+        )
+        first_failure_card += f"<div class='card'><h3>All Failures ({len(failures)})</h3><ul>{rows}</ul></div>"
 
     # Sections with progress bars
     sections_html = []
@@ -1419,6 +1441,8 @@ def render_run_report(
                             chips_html.append("<span class='chip' title='The walk closed a pop-up the guide does not mention, then retried the step'>Environment: pop-up closed</span>")
                         elif chip == "unexpected-change":
                             chips_html.append("<span class='chip suspect' title='The page changed in an unexpected way'>Unexpected page change</span>")
+                        elif chip == "after-earlier-failure":
+                            chips_html.append("<span class='chip suspect' title='A task before this one in the same exercise failed'>After an earlier failure in this exercise</span>")
                     if chips_html:
                         sections_html.append("<div class='chips'>" + "".join(chips_html) + "</div>")
 
