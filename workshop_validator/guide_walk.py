@@ -6901,12 +6901,183 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
 TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
 
 
-def _select_labeled(page, label: str, value: str, notes: list | None = None) -> bool:
+# W-116: one read of a labelled select control, on the element held before its option was
+# clicked. ARG is [now, option]: NOW the element the box locator (its role and name) resolves to
+# now, OPTION the clicked option's element. It returns "gone" when the held element is not NOW (it
+# lost that role or name, or another control took them) or left the page. Otherwise it returns the
+# element that shows the value: for a listbox its one selected option, only when that option is
+# OPTION, by identity; for any other control the control itself. It returns "unclear" when there is
+# no such element or its text cannot be proven visible: not rendered, not visibility:visible, text
+# under a cumulative opacity below 0.1 (shadow hosts crossed), or CSS ::before / ::after content
+# anywhere in it. The text itself is read by _option_lines (the PR 61 visible-text rules).
+_SELECT_READ_JS = r"""(el, arg) => {
+  const [now, option] = arg;
+  if (el !== now || el.isConnected !== true) return 'gone';
+  let target = el;
+  if (String(el.getAttribute('role') || '').toLowerCase() === 'listbox') {
+    const chosen = [...el.querySelectorAll('[role="option"][aria-selected="true"]')];
+    if (!(chosen.length === 1 && option && chosen[0] === option)) return 'unclear';
+    target = chosen[0];
+  }
+  if (!target.isConnected || target.getClientRects().length === 0) return 'unclear';
+  if (getComputedStyle(target).visibility !== 'visible') return 'unclear';
+  const up = (n) => n.parentElement || (n.getRootNode() instanceof ShadowRoot ? n.getRootNode().host : null);
+  const pseudo = (e) => ['::before', '::after'].some((at) => {
+    const content = getComputedStyle(e, at).content;
+    return !!content && !['none', 'normal', '""', "''"].includes(content);
+  });
+  if (pseudo(target) || [...target.querySelectorAll('*')].some(pseudo)) return 'unclear';
+  const texts = document.createTreeWalker(target, NodeFilter.SHOW_TEXT);
+  for (let node = texts.nextNode(); node; node = texts.nextNode()) {
+    if (!node.data.trim() || !node.parentElement) continue;
+    let alpha = 1;
+    for (let n = node.parentElement; n; n = up(n)) alpha *= parseFloat(getComputedStyle(n).opacity);
+    if (!(alpha >= 0.1)) return 'unclear';
+  }
+  return target;
+}"""
+
+
+def _select_read(box, held, option):
+    """(kept, value) of one _SELECT_READ_JS read of HELD. KEPT is False when BOX, the locator by
+    role and name, no longer resolves to HELD (so a control that turned into a combobox or was
+    re-rendered is never read as the pick), HELD left the page, or the read failed. VALUE is the
+    shown value read with the visible-text rules (_option_lines): a listbox's selected option by
+    its first line, any other control only when it shows exactly one line. None when unreadable."""
+    now = read = target = None
+    try:
+        now = box.element_handle(timeout=1000)
+        read = held.evaluate_handle(_SELECT_READ_JS, [now, option])
+        target = read.as_element()
+        if target is None:
+            return read.json_value() == "unclear", None
+        listbox = _read_attr(held, "role").lower() == "listbox"
+        lines = _option_lines(target)
+    except Exception:
+        return False, None
+    finally:
+        _dispose(now, read)
+    if listbox:
+        return True, (lines[0] if lines else None)
+    return True, (lines[0] if len(lines) == 1 else None)
+
+
+def _select_interval(state: WalkState) -> float:
+    return state.interval_s if state.interval_s > 0 else _PICK_STEADY_S
+
+
+def _select_limit(state: WalkState) -> float:
+    """The read-back's time limit: the page wait, capped by _RESOURCE_PICK_WAIT_S and the step's time left."""
+    return min(state.page_wait_s, _RESOURCE_PICK_WAIT_S, _time_left(state))
+
+
+def _select_hold_fits(state: WalkState) -> bool:
+    """True when the hold window (_PICK_STEADY_S plus one poll) fits in the read-back's limit."""
+    return _select_limit(state) >= _PICK_STEADY_S + _select_interval(state)
+
+
+def _select_shown(state: WalkState, box, held, option, want: str, before: bool = False):
+    """W-116: True only when HELD shows WANT on at least two polls at least _PICK_STEADY_S apart
+    with no other read between them, and stays the same connected element, with the same role and
+    name, throughout. A value not shown yet is polled for within _select_limit; False when the hold
+    window cannot fit there. BEFORE is the read before any click: its first read is taken at once,
+    and None is returned when that read does not show WANT (the pick goes ahead); a value that
+    shows and then breaks is False."""
+    if held is None or (option is None and not before) or not want:
+        return False
+    interval = _select_interval(state)
+    limit = _select_limit(state)
+    if limit < _PICK_STEADY_S + interval:
+        return False
+    start = state.clock()
+    first, reads = None, 0
+    while True:
+        if not before or first is not None:
+            _sleep(state, interval)
+        kept, value = _select_read(box, held, option)
+        if before and first is None and (not kept or value != want):
+            return None
+        if not kept:
+            return False
+        if value == want:
+            if first is None:
+                first, reads = state.clock(), 0
+            reads += 1
+            if reads >= 2 and state.clock() - first >= _PICK_STEADY_S:
+                return True
+        else:
+            if before:
+                return False
+            first, reads = None, 0
+        if state.clock() - start >= limit:
+            return False
+
+
+def _select_unshown_note(label: str, value: str) -> str:
+    return (f"{label} option {value} was clicked, but the control did not show {value} steadily "
+            "afterwards; please confirm.")
+
+
+def _select_unsteady_note(label: str, value: str) -> str:
+    return (f"{label} showed {value} before any click, but did not hold it, so nothing was clicked; "
+            "please confirm.")
+
+
+def _select_no_time_note(label: str, value: str) -> str:
+    return (f"Too little time was left in the step to read {label} back, so option {value} was not "
+            "clicked; please confirm.")
+
+
+def _select_click_failed_note(label: str, value: str) -> str:
+    return (f"{label} option {value} could not be clicked, and nothing was typed into {label}; "
+            "please confirm.")
+
+
+def _select_before(state: WalkState, role: str, box, value: str):
+    """The read of BOX before any click (W-116, CLAUDE.md already-set): True when it already shows
+    VALUE steadily, False when it showed VALUE and then broke, None when it does not show VALUE or
+    cannot be read. A listbox is read by its one option labelled VALUE, by identity."""
+    held = option = None
+    try:
+        held = box.element_handle(timeout=1000)
+        if role == "listbox":
+            picks = [item for item, text, shown in _scoped_options(box) if shown and text == _plain(value)]
+            if len(picks) != 1:
+                return None
+            option = picks[0].element_handle(timeout=1000)
+    except Exception:
+        _dispose(held, option)
+        return None
+    try:
+        return _select_shown(state, box, held, option, _plain(value), before=True)
+    finally:
+        _dispose(held, option)
+
+
+def _select_labeled(state: WalkState, label: str, value: str, notes: list | None = None) -> str:
     """Lightning dropdowns such as Data Type are choices, not text fields.
 
     A dropdown found only by its visible text (LABEL is not its accessible name) owns no
     list the walk can read, so no option is clicked; a note for triage is added to NOTES.
+    Returns "" when no option was clicked, "lookup" when the control is a combobox (it became
+    one after _is_lookup read it), "already" when the control, read before any click, already
+    shows VALUE steadily, "unsteady" when that read showed VALUE and then broke, "late" when the
+    read-back cannot fit in the step's time left (nothing is clicked in these three),
+    "clickfailed" when the option click threw, "shown" when the control read back after the click
+    shows VALUE (_select_shown), and "unshown" when an option was clicked but that read never
+    held (W-116).
     """
+    page = state.page
+    roles = ("combobox", "button", "listbox")
+    _root, role, box = _labeled_box(page, label, roles)
+    if box is not None and role != "combobox":
+        if not _select_hold_fits(state):
+            return "late"
+        before = _select_before(state, role, box, value)
+        if before is True:
+            return "already"
+        if before is False:
+            return "unsteady"
     opened = (
         click_role(page, "combobox", label)
         or click_role(page, "button", label)
@@ -6918,24 +7089,36 @@ def _select_labeled(page, label: str, value: str, notes: list | None = None) -> 
         if loc is not None and _visible(loc):
             opened = by_text = _click_locator(loc)
     if not opened and not present(page, "option", value):
-        return False
+        return ""
     # Only an option in the list this control owns, matched by its first line, is clicked.
-    root, role, box = _labeled_box(page, label, ("combobox", "button", "listbox"))
+    root, role, box = _labeled_box(page, label, roles)
     if box is None:
         if by_text and notes is not None and TEXT_ONLY_DROPDOWN_NOTE not in notes:
             notes.append(TEXT_ONLY_DROPDOWN_NOTE)
-        return False
+        return ""
+    # W-116 race: _is_lookup read no combobox, but the control is one now: it is a lookup.
+    if role == "combobox":
+        return "lookup"
     if role == "listbox":
         picks = [option for option, text, shown in _scoped_options(box) if shown and text == _plain(value)]
     else:
         picks = _matching_options(root, box, value)
     if len(picks) != 1:
-        return False
+        return ""
+    held = option = None
     try:
-        picks[0].click(timeout=8000)
+        held = box.element_handle(timeout=1000)
+        option = picks[0].element_handle(timeout=1000)
     except Exception:
-        return False
-    return True
+        pass
+    try:
+        try:
+            picks[0].click(timeout=8000)
+        except Exception:
+            return "clickfailed"
+        return "shown" if _select_shown(state, box, held, option, _plain(value)) else "unshown"
+    finally:
+        _dispose(held, option)
 
 
 def _is_lookup(page, label: str) -> bool:
@@ -7028,9 +7211,22 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
         return CheckResult("NEEDS_REVIEW", _marked_lookup_note(label), ())
     if _field_value(state, label) == value:
         return passed(step, "filled", f"{label} is {value}.")
-    if _select_labeled(state.page, label, value, state.step_notes):
-        return passed(step, "filled", f"{label} is {value}.")
-    field_el = _labeled_field(state.page, label)
+    chosen = _select_labeled(state, label, value, state.step_notes)
+    if chosen == "lookup":
+        return _pick_lookup_option(state, step, label, value)
+    if chosen == "shown":
+        return passed(step, "filled", f"{label} is {value}. The control shows {value} after its option was clicked.")
+    if chosen == "unshown":
+        # Never typed into: the click may have changed the choice, and a select takes no text.
+        return CheckResult("NEEDS_REVIEW", _select_unshown_note(label, value), ())
+    if chosen == "already":
+        return passed(step, f"already-set:{label}",
+                      f"{label} already showed {value} before any click, so it was not clicked.")
+    if chosen in ("unsteady", "late", "clickfailed"):
+        note = {"unsteady": _select_unsteady_note, "late": _select_no_time_note,
+                "clickfailed": _select_click_failed_note}[chosen]
+        return CheckResult("NEEDS_REVIEW", note(label, value), ())
+    field_el =_labeled_field(state.page, label)
     try:
         before = _page_pills(field_el)
     finally:
