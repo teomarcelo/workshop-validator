@@ -2,7 +2,8 @@
 
 A tour dialog (aria-modal, a title, "Step 1 of 2", buttons Dismiss, Next and an X named
 Close) covered a visible Save button. The walk tried to click Save until the wait ran out,
-and then the pop-up retry returned at its time check before any close was tried.
+and only then reached the pop-up retry, with no time left to close anything. Now a covered
+visible control hands the miss to the retry at once, while the step still has time.
 
 Real browser only, synthetic HTML. The step's own popup (opened by Save, with OK) is the
 guide's and is never closed by the W-080 closer.
@@ -51,7 +52,6 @@ PAGE_HTML = """<!doctype html><html><head><title>Sample Settings</title></head><
     window.clicked.push('tour:' + name);
     if (name === 'Next') {{ document.getElementById('tour-step').textContent = 'Step 2 of 2'; return; }}
     document.getElementById('tour').remove();
-    {after_tour}
   }}
   function save() {{
     window.clicked.push('Save');
@@ -94,11 +94,11 @@ def save_step():
                 "Click Save, then read the popup and click OK")
 
 
-def page_html(tour_buttons=TOUR_BUTTONS, tour_style=SHOWN, save_style="", after_tour="",
+def page_html(tour_buttons=TOUR_BUTTONS, tour_style=SHOWN, save_style="",
               ok_delay_ms=0, ok_disabled_ms=0, setup="", tour_modal='aria-modal="true"'):
     return PAGE_HTML.format(
         tour_title=TOUR_TITLE, tour_buttons=tour_buttons, tour_style=tour_style,
-        save_style=save_style, after_tour=after_tour, ok_delay_ms=ok_delay_ms,
+        save_style=save_style, ok_delay_ms=ok_delay_ms,
         ok_disabled_ms=ok_disabled_ms, setup=setup, tour_modal=tour_modal,
     )
 
@@ -126,12 +126,12 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         page.wait_for_timeout(100)
         return page
 
-    def walk(self, page, deadline_s=STEP_CAP_S, page_wait_s=PAGE_WAIT_S):
+    def walk(self, page):
         state = guide_walk.WalkState(
-            page=page, timeout_s=2, interval_s=0.2, page_wait_s=page_wait_s, page_poll_s=0.5,
+            page=page, timeout_s=2, interval_s=0.2, page_wait_s=PAGE_WAIT_S, page_poll_s=0.5,
         )
         start = time.monotonic()
-        state.step_deadline = start + deadline_s
+        state.step_deadline = start + STEP_CAP_S
         result = guide_walk.attempt_step(state, save_step())
         return state, result, time.monotonic() - start, page.evaluate("window.clicked")
 
@@ -163,19 +163,10 @@ class PopupCloseEarlyBrowserTests(unittest.TestCase):
         self.assertEqual(clicked[1:], ["Save", "stored:OK"], clicked)
         self.assertEqual(result.status, "PASS", result.note)
 
-    def test_deadline_already_passed_still_makes_one_close_attempt(self):
-        # Save shows only after the tour is gone, so the miss reaches the pop-up retry at the end.
-        after = "document.getElementById('save').style.display = '';"
-        page = self.open(page_html(save_style="display:none", after_tour=after))
-        state, result, _elapsed, clicked = self.walk(page, deadline_s=-1, page_wait_s=2)
-        self.assert_closed_once(state, clicked)
-        self.assertIn("Save", clicked)
-        self.assertEqual(result.status, "PASS", result.note)
-
     def test_guide_popup_opened_by_save_is_never_closed_by_w080(self):
         # The step's own popup has an X named Close. Its OK shows a second later and stays
-        # disabled one more second: neither a missing nor an unclickable OK closes the popup.
-        page = self.open(page_html(ok_delay_ms=1000, ok_disabled_ms=1000))
+        # disabled three more seconds: neither a missing nor an unclickable OK closes the popup.
+        page = self.open(page_html(ok_delay_ms=1000, ok_disabled_ms=3000))
         state, result, elapsed, clicked = self.walk(page)
         self.assertLess(elapsed, EARLY_S, (elapsed, result.note))
         self.assert_closed_once(state, clicked)

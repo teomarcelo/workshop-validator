@@ -3988,9 +3988,8 @@ def _popup_retry(state: WalkState, step: GuideStep, blocked: CheckResult, rerun)
     """
     last_attempt = None
     loop_count = 0
-    for attempt_num in range(_POPUP_CLOSE_LIMIT):
-        # W-080: always try at least once, even when time is up, if a popup blocked the control.
-        if _time_left(state) <= 0 and attempt_num > 0:
+    for _ in range(_POPUP_CLOSE_LIMIT):
+        if _time_left(state) <= 0:
             return blocked
         title, attempt = _close_unrelated_popup(state, step)
         last_attempt = attempt
