@@ -674,7 +674,9 @@ class PickPassPathBrowserTests(unittest.TestCase):
     # W-115, hold: the signal must read on the first and the last steady read, unbroken.
 
     def test_read_only_that_turns_on_late_then_off_is_never_pass_at_0_2_s(self):
-        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 1500))), UNCONFIRMED_NOTE)
+        # W-119 (2): the hold starts on the first read with the signal on (after 300 ms) and needs
+        # a full second from there, so the signal turns off inside that window (at 1000 ms).
+        self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 1000))), UNCONFIRMED_NOTE)
 
     def test_read_only_that_turns_on_late_then_off_is_never_pass_at_2_s(self):
         self.assert_review(self.fill(typed_html(flip(RO_ON, RO_OFF, 300, 3000)), poll=2.0), UNCONFIRMED_NOTE)
@@ -686,7 +688,8 @@ class PickPassPathBrowserTests(unittest.TestCase):
         self.assert_review(self.fill(typed_html(RO_ON + flip(RO_OFF, RO_ON, 500, 1200)), poll=2.0), UNSTEADY_NOTE)
 
     def test_selected_that_turns_on_late_then_off_is_never_pass_at_0_2_s(self):
-        self.assert_review(self.fill(typed_html(flip(SEL_ON, SEL_OFF, 300, 1500))), UNCONFIRMED_NOTE)
+        # W-119 (2): off inside the window that restarts on the first read with the signal on.
+        self.assert_review(self.fill(typed_html(flip(SEL_ON, SEL_OFF, 300, 1000))), UNCONFIRMED_NOTE)
 
     def test_selected_that_turns_on_late_then_off_is_never_pass_at_2_s(self):
         self.assert_review(self.fill(typed_html(flip(SEL_ON, SEL_OFF, 300, 3000)), poll=2.0), UNCONFIRMED_NOTE)
