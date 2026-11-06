@@ -6533,8 +6533,8 @@ def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
 # there are too many matches; "gone" when the clicked control left the page (who owns a new
 # element cannot be read); "late" more than 5 s after the mark; else "read" with BEFORE (the
 # marked matches) and AFTER (the matches now, each with FRESH true when not in the mark).
-_CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
-  const [token, want, mode] = arg;
+_CLICK_NEW_SHOWS_JS = r"""async (el, arg) => {
+  const [token, want, mode, deadline] = arg;
   const visibleLines = __VISIBLE_LINES__;
   const win = el.ownerDocument.defaultView;
   const up = (n) => n.parentElement || (n.getRootNode() instanceof ShadowRoot ? n.getRootNode().host : null);
@@ -6547,6 +6547,7 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
     for (let a = up(el); a; a = up(a)) if (a.matches && a.matches("main,[role='main']")) return a;
     return null;
   };
+  const once = (mode) => {
   let mark = null, source = null, scope = null;
   if (mode === 'read') {
     mark = win && win.__wvBeforeClick;
@@ -6666,56 +6667,61 @@ _CLICK_NEW_SHOWS_JS = r"""(el, arg) => {
     return { state: 'marked', count: items.length };
   }
   return { state: 'read', before: mark.before, after: items };
-}""".replace("__VISIBLE_LINES__", _VISIBLE_LINES_JS.strip())
+  };
+  if (mode === 'read') return once('read');
+  if (mode !== 'mark' || typeof deadline !== 'number') return { state: 'unproven' };
+  let last = null, since = 0;
+  for (;;) {
+    const got = once('mark');
+    if (got.state !== 'marked') return got;
+    const now = performance.now();
+    if (got.count !== last) { last = got.count; since = now; }
+    else if (now - since >= __STABLE_MS__) return got;
+    if (now >= deadline) { win.__wvBeforeClick = null; return { state: 'moving' }; }
+    await new Promise((done) => setTimeout(done, Math.min(__STEP_MS__, deadline - now)));
+  }
+}""".replace("__VISIBLE_LINES__", _VISIBLE_LINES_JS.strip()).replace(
+    "__STABLE_MS__", "500").replace("__STEP_MS__", "100")
 
 _CLICK_NO_SOURCE_NOTE = " No source region was found around the clicked control, so a new element could not be read."
 _CLICK_NO_SCOPE_NOTE = " No dialog or main region was found around the clicked control, so a new element could not be read."
 _CLICK_MOVING_NOTE = " The name count was still changing after the hover, so a new element could not be read."
-# W-132: after the hover, the mark waits until the in-scope name count has not changed for
-# _CLICK_SETTLE_STABLE_S, read every _CLICK_SETTLE_STEP_S. The hover and the settle together end
-# by _CLICK_SETTLE_CAP_S; a count still moving then is never marked.
-_CLICK_SETTLE_STEP_S = 0.1
-_CLICK_SETTLE_STABLE_S = 0.5
-_CLICK_SETTLE_CAP_S = 2.0
+# W-132: "mark" mode, run once after the hover, reads the in-scope name count every 100 ms in the
+# page and marks once it has not changed for 500 ms. The hover and the settle end by
+# _CLICK_SETTLE_CAP_MS after the read just before the hover; a count still moving then is state
+# "moving" and is never marked. The page's own clock is used, never the walk's.
+_CLICK_SETTLE_CAP_MS = 2000
+_CLICK_TOKENS = itertools.count(1)
+_CLICK_MARK_NOTES = {
+    "no-scope": _CLICK_NO_SCOPE_NOTE,
+    "no-source": _CLICK_NO_SOURCE_NOTE,
+    "moving": _CLICK_MOVING_NOTE,
+}
 
 
 def _mark_before_click(loc, name: str):
-    """(held, token, diag): V45, W-132. Hovers the control (the click then presses at the same
-    point, so the hover is not repeated), waits for the in-scope name count to settle, and takes
-    the identity mark on the element about to be clicked. (None, "", diag) when no mark is taken;
+    """(held, token, diag): V45, W-132. Hovers the element about to be clicked (the click then
+    presses at the same point, so the hover is not repeated), lets the page wait for the in-scope
+    name count to settle, and takes the identity mark. (None, "", diag) when no mark is taken;
     DIAG says why when there is no scope, no source region, or the count kept changing. The hover
-    and the settle add at most _CLICK_SETTLE_CAP_S before the click."""
+    and the settle add at most _CLICK_SETTLE_CAP_MS before the click."""
     held = None
     want = norm(name)
     if not want:
         return None, "", ""
-    start = time.monotonic()
     try:
-        target = _first(loc)
-        target.hover(timeout=1000)
-        held = target.element_handle(timeout=500)
+        held = _first(loc).element_handle(timeout=1000)
         if held is not None:
-            token = f"wv-{time.monotonic_ns()}-{id(held)}"
-            last, since = None, start
-            while True:
-                raw = held.evaluate(_CLICK_NEW_SHOWS_JS, [token, want, "mark"])
+            start = held.evaluate("() => performance.now()")
+            if isinstance(start, (int, float)) and not isinstance(start, bool):
+                held.hover(timeout=1000)
+                token = f"wv-{next(_CLICK_TOKENS)}"
+                raw = held.evaluate(_CLICK_NEW_SHOWS_JS, [token, want, "mark", start + _CLICK_SETTLE_CAP_MS])
                 status = raw.get("state") if isinstance(raw, dict) else None
-                if status in ("no-scope", "no-source"):
-                    _dispose(held)
-                    return None, "", _CLICK_NO_SCOPE_NOTE if status == "no-scope" else _CLICK_NO_SOURCE_NOTE
-                count = raw.get("count") if status == "marked" else None
-                if not isinstance(count, int) or isinstance(count, bool):
-                    break
-                now = time.monotonic()
-                if count != last:
-                    last, since = count, now
-                elif now - since >= _CLICK_SETTLE_STABLE_S:
+                if status == "marked":
                     return held, token, ""
-                left = start + _CLICK_SETTLE_CAP_S - now
-                if left <= 0:
-                    _dispose(held)
-                    return None, "", _CLICK_MOVING_NOTE
-                time.sleep(min(_CLICK_SETTLE_STEP_S, left))
+                _dispose(held)
+                return None, "", _CLICK_MARK_NOTES.get(status, "")
     except Exception:
         pass
     _dispose(held)

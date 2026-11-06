@@ -411,81 +411,61 @@ class NewElementSuspectFlagTests(unittest.TestCase):
         self.assertNotIn("new-element-click", flags)
 
 
-class MarkSettleTests(unittest.TestCase):
-    """W-132: the mark is taken only once the in-scope name count has settled after the hover."""
+class MarkStateTests(unittest.TestCase):
+    """W-132: only a "marked" read from the settled page script is a mark; the rest say why."""
 
     class Held:
-        def __init__(self, counts):
-            self.counts, self.reads = list(counts), 0
+        def __init__(self, raw, now=1000.0):
+            self.raw, self.now, self.calls, self.hovers = raw, now, [], []
 
         def evaluate(self, script, arg=None):
-            index = min(self.reads, len(self.counts) - 1)
-            self.reads += 1
-            count = self.counts[index]
-            if isinstance(count, str):
-                return {"state": count}
-            return {"state": "marked", "count": count}
+            self.calls.append(arg)
+            return self.now if arg is None else self.raw
+
+        def hover(self, timeout=None):
+            self.hovers.append(timeout)
 
         def dispose(self):
             pass
 
     class Target:
         def __init__(self, held):
-            self.held, self.hovers = held, 0
-
-        def hover(self, timeout=None):
-            self.hovers += 1
+            self.held = held
 
         def element_handle(self, timeout=None):
             return self.held
 
-    def mark(self, counts):
-        held = self.Held(counts)
-        target = self.Target(held)
-        started = guide_walk.time.monotonic()
-        result = guide_walk._mark_before_click(target, "Name")
-        self.assertEqual(target.hovers, 1, "one hover only")
-        self.assertLessEqual(guide_walk.time.monotonic() - started, 2.5, "at most about 2 s added")
-        return result, held
+    def mark(self, raw, now=1000.0):
+        held = self.Held(raw, now)
+        return guide_walk._mark_before_click(self.Target(held), "Name"), held
 
-    def test_stable_count_is_marked(self):
-        (held, token, diag), fake = self.mark([0])
+    def test_marked_read_is_the_mark_with_one_short_hover_and_a_2_s_deadline(self):
+        (held, token, diag), fake = self.mark({"state": "marked", "count": 0})
         self.assertIs(held, fake)
         self.assertTrue(token)
         self.assertEqual(diag, "")
-        self.assertGreaterEqual(fake.reads, 5, "the count was read for about 500 ms")
+        self.assertEqual(fake.hovers, [1000])
+        self.assertEqual(fake.calls[-1], [token, "name", "mark", 3000.0])
 
-    def test_count_that_changes_then_settles_is_marked_after_it_settles(self):
-        (held, token, diag), fake = self.mark([0, 0, 0, 1])
-        self.assertIs(held, fake)
-        self.assertGreaterEqual(fake.reads, 9, "500 ms of stable reads after the change")
-
-    def test_moving_count_is_never_marked(self):
-        (held, token, diag), _fake = self.mark(list(range(200)))
-        self.assertIsNone(held)
-        self.assertEqual(token, "")
-        self.assertIn("still changing after the hover", diag)
-
-    def test_no_scope_and_no_source_are_not_marked(self):
-        for state, words in (("no-scope", "No dialog or main region"), ("no-source", "No source region")):
+    def test_unsettled_or_unscoped_reads_are_not_marked_and_say_why(self):
+        for state, words in (("moving", "still changing after the hover"),
+                             ("no-scope", "No dialog or main region"),
+                             ("no-source", "No source region")):
             with self.subTest(state=state):
-                (held, token, diag), _fake = self.mark([state])
+                (held, token, diag), _fake = self.mark({"state": state})
                 self.assertIsNone(held)
+                self.assertEqual(token, "")
                 self.assertIn(words, diag)
 
     def test_odd_reads_are_not_marked(self):
-        class Raw(self.Held):
-            def __init__(self, raw):
-                super().__init__([0])
-                self.raw = raw
-
-            def evaluate(self, script, arg=None):
-                return self.raw
-
-        for raw in (None, "marked", {"state": "unproven"}, {"state": "marked"},
-                    {"state": "marked", "count": True}, {"state": "marked", "count": "0"}):
+        for raw in (None, "marked", {"state": "unproven"}, {"state": "late"}, {}):
             with self.subTest(raw=raw):
-                self.assertEqual(guide_walk._mark_before_click(self.Target(Raw(raw)), "Name"), (None, "", ""))
+                self.assertEqual(self.mark(raw)[0], (None, "", ""))
+        for now in (None, "1000", True):
+            with self.subTest(now=now):
+                (result, fake) = self.mark({"state": "marked", "count": 0}, now=now)
+                self.assertEqual(result, (None, "", ""))
+                self.assertEqual(fake.hovers, [])
 
 if __name__ == "__main__":
     unittest.main()
