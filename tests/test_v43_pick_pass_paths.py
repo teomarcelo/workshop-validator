@@ -645,6 +645,18 @@ class PickPassPathBrowserTests(unittest.TestCase):
         # result is a pill beside the field 3 s later. Never PASS on the hover mark.
         self.assert_review(self.fill(on_load(typed_html(pill_beside(3000)), HOVER_SELECTS), poll=2.0))
 
+    def test_a_hover_that_fails_leaves_no_before_read_and_a_real_pick_is_review(self):
+        # Without the hover the before-read could miss a hover mark, so nothing may PASS.
+        from playwright.sync_api import Locator
+
+        def fails(_self, *args, **kwargs):
+            raise RuntimeError("synthetic hover failure")
+
+        real = Locator.hover
+        Locator.hover = fails
+        self.addCleanup(setattr, Locator, "hover", real)
+        self.assert_review(self.fill(typed_html(LOCKS)), UNCONFIRMED_NOTE)
+
     # W-115, locked for another reason: disabled and aria-disabled are not signals.
 
     def test_a_box_disabled_while_saving_then_cleared_with_no_pick_is_review_at_2_s(self):
