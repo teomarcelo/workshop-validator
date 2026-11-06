@@ -81,6 +81,8 @@ def div_html(after_js, labelled=True):
 
 BARE_PILL = f"rv.innerHTML = {BARE!r};"
 NO_EXPANDED = 'rv.removeAttribute("aria-expanded");'
+# The box itself becomes the pill: its class is slds-pill and its text is recThing.
+BOX_IS_PILL = "rv.className = 'slds-pill'; rv.textContent = 'recThing';"
 # The box's own open shadow root holds the pill; its light text (slotted) is recThing.
 OWN_SHADOW_PILL = (f"rv.textContent = 'recThing'; rv.attachShadow({{mode: 'open'}}).innerHTML = "
                    f"'<slot></slot>' + {BARE!r};")
@@ -232,6 +234,9 @@ class PickPassPathBrowserTests(unittest.TestCase):
 
     def test_aria_label_div_holding_a_bare_pill_without_aria_expanded_is_a_miss_not_pass(self):
         self.assert_miss(self.fill(div_html(BARE_PILL + NO_EXPANDED, labelled=False)))
+
+    def test_aria_label_div_that_becomes_a_pill_itself_is_a_miss_not_pass(self):
+        self.assert_miss(self.fill(div_html(BOX_IS_PILL, labelled=False)))
 
     def test_aria_label_div_with_a_pill_in_its_own_shadow_root_is_a_miss_not_pass(self):
         self.assert_miss(self.fill(div_html(OWN_SHADOW_PILL, labelled=False)))
