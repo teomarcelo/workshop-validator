@@ -44,6 +44,43 @@ PASSWORD_NOTE = (
 WELCOME = "Hello! I'm a simple agent here to say hi."
 HELLO = "Hello there!"
 _LOADING_TEXT = re.compile(r"\bLoading\b|Loading assistant|Nothing here yet", re.I)
+# Allowlisted Chrome network error codes for ENV_BLOCKED detection
+_ALLOWED_ERROR_CODES = (
+    "ERR_NAME_NOT_RESOLVED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_TIMED_OUT",
+    "ERR_INTERNET_DISCONNECTED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_ADDRESS_UNREACHABLE",
+    "DNS_PROBE_FINISHED_NXDOMAIN",
+    "DNS_PROBE_FINISHED_NO_INTERNET",
+)
+
+
+def _browser_error_signal(page) -> str | None:
+    """Return the browser error code if a network error page is shown, or None.
+
+    Checks for Chrome error pages:
+    - URL starts with chrome-error://
+    - Main frame text contains a Chrome network error code from the allowlist
+      (case-insensitive, word boundary match)
+    - The exact heading "This site can't be reached" together with one of those codes
+    """
+    # Check if URL starts with chrome-error://
+    page_url = getattr(page, "url", "")
+    if page_url.startswith("chrome-error://"):
+        return "chrome-error://"
+
+    # Read page text once (normalized to lowercase)
+    page_text = norm(_read_page_text(page))
+
+    # Check for error codes with word boundaries (case-insensitive)
+    for code in _ALLOWED_ERROR_CODES:
+        if _re_mod.search(r'\b' + _re_mod.escape(code.lower()) + r'\b', page_text):
+            return code
+
+    return None
 
 
 class StillLoading(Exception):
@@ -6648,10 +6685,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         if before_parsed.netloc == after_parsed.netloc:
             # Check for error page indicators
             page_text_lower = norm(_read_page_text(state.page))
-            is_error = any(indicator in page_text_lower for indicator in (
-                "error", "404", "insufficient privileges", "access denied",
-                "permission denied", "unauthorized"
-            ))
+            is_error = (
+                any(indicator in page_text_lower for indicator in (
+                    "error", "404", "insufficient privileges", "access denied",
+                    "permission denied", "unauthorized"
+                ))
+                or _browser_error_signal(state.page) is not None
+            )
 
             if not is_error:
                 # Check if target name appears in new URL or page heading/title using whole-token matching
@@ -6802,10 +6842,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
                 if before_parsed.netloc == after_parsed.netloc:
                     page_text_lower = norm(_read_page_text(state.page))
-                    is_error = any(indicator in page_text_lower for indicator in (
-                        "error", "404", "insufficient privileges", "access denied",
-                        "permission denied", "unauthorized"
-                    ))
+                    is_error = (
+                        any(indicator in page_text_lower for indicator in (
+                            "error", "404", "insufficient privileges", "access denied",
+                            "permission denied", "unauthorized"
+                        ))
+                        or _browser_error_signal(state.page) is not None
+                    )
 
                     if not is_error:
                         # Only a real change counts: a new URL path (a query or fragment
@@ -7306,6 +7349,15 @@ def _freeze_result(state: WalkState, step: GuideStep, target: str, suggestion: s
         return CheckResult(
             "ENV_BLOCKED",
             f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+            (),
+            freeze=True,
+        )
+    # Check if a browser network error page is shown
+    browser_error = _browser_error_signal(state.page)
+    if browser_error:
+        return CheckResult(
+            "ENV_BLOCKED",
+            f"{note}. Browser network error: {browser_error}",
             (),
             freeze=True,
         )
