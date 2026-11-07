@@ -227,16 +227,21 @@ class TestOpenFlowAction(unittest.TestCase):
         self.assertTrue(opened["done"])
         self.assertTrue(opened["error"])
 
+    @patch('workshop_validator.guide_walk._first')
     @patch('workshop_validator.guide_walk._read_builder_flow_label')
     @patch('workshop_validator.guide_walk._focus_builder')
     @patch('workshop_validator.guide_walk._count')
     @patch('workshop_validator.guide_walk._roots')
-    def test_open_flow_clicks_exactly_once(self, mock_roots, mock_count, mock_focus, mock_read_label):
+    def test_open_flow_clicks_exactly_once(self, mock_roots, mock_count, mock_focus, mock_read_label, mock_first):
         """Opened dict prevents re-clicking on subsequent polls."""
         page = self._mock_page()
         state = WalkState(page=page)
         step = _step("Open the Flow Test Flow.")
         opened = {"done": False}
+
+        mock_loc = Mock()
+        mock_loc.click = Mock()
+        mock_first.return_value = mock_loc
 
         mock_roots.return_value = [page]
         mock_count.return_value = 1
@@ -247,13 +252,13 @@ class TestOpenFlowAction(unittest.TestCase):
         result1 = _act_open_flow(state, step, "Test Flow", opened)
         self.assertEqual(result1.status, "PASS")
         self.assertTrue(opened["done"])
-        click_count = page.get_by_role().first().click.call_count
+        self.assertEqual(mock_loc.click.call_count, 1)
 
         # Second call: should not click again
         result2 = _act_open_flow(state, step, "Test Flow", opened)
         self.assertEqual(result2.status, "PASS")
-        # Verify click wasn't called again
-        self.assertEqual(page.get_by_role().first().click.call_count, click_count)
+        # Verify click wasn't called again (still 1)
+        self.assertEqual(mock_loc.click.call_count, 1)
 
     @patch('workshop_validator.guide_walk._focus_builder')
     @patch('workshop_validator.guide_walk._count')
@@ -280,8 +285,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
     def test_open_flow_browser_passes_with_matching_label(self):
         """Real browser: flow list with named flow opens builder with matching label."""
         from playwright.sync_api import sync_playwright
-        from workshop_validator.guide_walk import attempt_step
-        from workshop_validator.guide_inventory import Guide
+        from workshop_validator.guide_walk import attempt_step, WalkState
 
         flows_html = """
         <!DOCTYPE html>
@@ -329,10 +333,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
                 page.evaluate("window.history.replaceState({}, '', '/setup/flows')")
 
                 step = _step("Open the Flow Test Flow Alpha.")
-                guide = Guide("test.pdf", "Test Guide", [step], [])
-
-                from workshop_validator.guide_walk import WalkState
-                state = WalkState(page=page, guide=guide)
+                state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
                 result = attempt_step(state, step, 0)
 
@@ -344,8 +345,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
     def test_open_flow_browser_needs_review_with_duplicate_rows(self):
         """Real browser: duplicate rows returns NEEDS_REVIEW."""
         from playwright.sync_api import sync_playwright
-        from workshop_validator.guide_walk import attempt_step
-        from workshop_validator.guide_inventory import Guide
+        from workshop_validator.guide_walk import attempt_step, WalkState
 
         flows_html = """
         <!DOCTYPE html>
@@ -378,10 +378,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
                 page.evaluate("window.history.replaceState({}, '', '/setup/flows')")
 
                 step = _step("Open the Flow Duplicate Flow.")
-                guide = Guide("test.pdf", "Test Guide", [step], [])
-
-                from workshop_validator.guide_walk import WalkState
-                state = WalkState(page=page, guide=guide)
+                state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
                 result = attempt_step(state, step, 0)
 
