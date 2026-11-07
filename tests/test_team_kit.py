@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -3056,6 +3057,108 @@ class VerdictHistoryRound4Tests(_NoSubprocessMixin, unittest.TestCase):
                     self.save(90, "APPROVE", role=role)
                 self.assertIn("role must be", str(cm.exception))
         self.assertEqual(list(self.reviews.iterdir()), [])
+
+    # -- rule audit: guards that need their own test --------------------------------
+
+    def bounded(self, fn, seconds=5):
+        """Run fn in a thread; fail (never hang) if it does not return in time. Returns (result, exc)."""
+        box = {}
+
+        def run():
+            try:
+                box["result"] = fn()
+            except BaseException as exc:  # handed back to the test thread
+                box["exc"] = exc
+
+        thread = threading.Thread(target=run, daemon=True)
+        thread.start()
+        thread.join(seconds)
+        self.assertFalse(thread.is_alive(), "call hung on a FIFO")
+        return box.get("result"), box.get("exc")
+
+    def test_symlink_to_valid_history_blocks_without_path(self):
+        self.save(95, "APPROVE")
+        history = _history_path(self.team, 95)
+        target = self.team / "elsewhere.history.md"
+        os.rename(history, target)
+        history.symlink_to(target)
+        problems = _gate(self.team, 95, self.HEAD)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith("review code-reviewer: BLOCKED: cannot read history: "), problems)
+        self.assertNotIn(str(self.reviews), problems[0])
+        self.assertNotIn(history.name, problems[0])
+        # Control: the same file at the real path passes.
+        history.unlink()
+        os.rename(target, history)
+        self.assertEqual(_gate(self.team, 95, self.HEAD), [])
+
+    def test_history_read_error_names_no_path(self):
+        self.save(96, "APPROVE")
+        history = _history_path(self.team, 96)
+        history.unlink()
+        history.symlink_to(self.team / "missing-target")
+        verdicts = review_verdicts(self.reviews, 96, self.HEAD)
+        self.assertTrue(verdicts["code-reviewer"].startswith("BLOCKED: cannot read history: "), verdicts)
+        self.assertNotIn(str(self.reviews), verdicts["code-reviewer"])
+        self.assertNotIn(str(self.team), verdicts["code-reviewer"])
+
+    def test_fifo_at_history_blocks_cleanly(self):
+        self.save(97, "APPROVE")
+        history = _history_path(self.team, 97)
+        history.unlink()
+        os.mkfifo(history, 0o600)
+        problems, exc = self.bounded(lambda: _gate(self.team, 97, self.HEAD))
+        self.assertIsNone(exc)
+        self.assertEqual(problems, ["review code-reviewer: BLOCKED: history path is not a regular file"])
+
+    def test_fifo_at_latest_copy_refused_by_save(self):
+        self.save(98, "VETO")
+        history = _history_path(self.team, 98)
+        before = history.read_bytes()
+        latest = self.reviews / "pr-98-code-reviewer.md"
+        latest.unlink()
+        os.mkfifo(latest, 0o600)
+        _, exc = self.bounded(lambda: self.save(98, "APPROVE"))
+        self.assertIsInstance(exc, ValueError)
+        self.assertIn("latest copy path is not a regular file", str(exc))
+        self.assertEqual(history.read_bytes(), before)
+
+    def test_fifo_at_history_refused_by_save(self):
+        self.save(99, "VETO")
+        latest = self.reviews / "pr-99-code-reviewer.md"
+        before = latest.read_bytes()
+        history = _history_path(self.team, 99)
+        history.unlink()
+        os.mkfifo(history, 0o600)
+        _, exc = self.bounded(lambda: self.save(99, "APPROVE"))
+        self.assertIsInstance(exc, ValueError)
+        self.assertIn("history path is not a regular file", str(exc))
+        self.assertEqual(latest.read_bytes(), before)
+
+    def test_non_utf8_legacy_veto_refused_and_still_blocks(self):
+        latest = self.reviews / "pr-100-code-reviewer.md"
+        raw = f"HEAD: {self.HEAD}\nFinding.\n".encode() + b"\xff\xfe bad bytes\n" + b"VERDICT: VETO\n"
+        latest.write_bytes(raw)
+        with self.assertRaises(ValueError) as cm:
+            self.save(100, "APPROVE")
+        self.assertIn("pr-100-code-reviewer.md is not valid UTF-8", str(cm.exception))
+        self.assertEqual(latest.read_bytes(), raw)
+        history = _history_path(self.team, 100)
+        # The history file may be created by the open, but no record is ever written.
+        self.assertEqual(history.read_bytes() if history.exists() else b"", b"")
+        problems = _gate(self.team, 100, self.HEAD)
+        self.assertEqual(len(problems), 1, problems)
+        self.assertTrue(problems[0].startswith("review code-reviewer: BLOCKED: "), problems)
+
+    def test_two_same_ts_vetoes_need_two_supersedes(self):
+        _write_latest(self.team, 101, self.HEAD, "APPROVE")
+        vetoes = [_record(self.HEAD, TS1, "VETO"), _record(self.HEAD, TS1, "VETO")]
+        first = _record(self.HEAD, TS2, "APPROVE", supersedes=TS1, reason="fixed one")
+        second = _record(self.HEAD, TS3, "APPROVE", supersedes=TS1, reason="fixed two")
+        _write_history(self.team, 101, vetoes + [first])
+        self.assertEqual(_gate(self.team, 101, self.HEAD), [_veto_problem(101, self.HEAD, TS1)])
+        _write_history(self.team, 101, vetoes + [first, second])
+        self.assertEqual(_gate(self.team, 101, self.HEAD), [])
 
 
 if __name__ == "__main__":

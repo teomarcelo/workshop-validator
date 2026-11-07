@@ -261,8 +261,11 @@ def _history_verdict(content: str | None, history_path: Path, head_oid: str) -> 
         return "BLOCKED: FORMAT: 2 requires history file"
     try:
         records = _read_review_history(history_path)
-    except (ValueError, OSError) as e:
+    except ValueError as e:
         return f"BLOCKED: {e}"
+    except OSError as e:
+        # strerror only: the exception text would print the private reviews path.
+        return f"BLOCKED: cannot read history: {e.strerror or type(e).__name__}"
     current = [record for record in records if record["head"] == head_oid]
     blocking = _check_blocking_verdicts(current)
     if blocking or content is None:
