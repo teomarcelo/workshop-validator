@@ -330,7 +330,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
             step = _step("Open the Flow Test Flow Alpha.")
             state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
-            result = attempt_step(state, step, 0)
+            result = attempt_step(state, step)
 
             browser.close()
 
@@ -367,7 +367,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
             step = _step("Open the Flow Duplicate Flow.")
             state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
-            result = attempt_step(state, step, 0)
+            result = attempt_step(state, step)
 
             browser.close()
 
