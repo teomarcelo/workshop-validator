@@ -3211,10 +3211,7 @@ def _click_last(page, role: str, name: str) -> bool:
 
 
 def _screen_flow_offered(state: WalkState) -> bool:
-    if _focus_named(state, "Screen Flow"):
-        return True
-    _click_last(state.page, "button", "New Flow")
-    return False
+    return _focus_named(state, "Screen Flow")
 
 
 def _focus_named(state: WalkState, name: str) -> bool:
