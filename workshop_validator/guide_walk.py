@@ -77,7 +77,7 @@ def _browser_error_signal(page) -> str | None:
 
     # Check for error codes with word boundaries (case-insensitive)
     for code in _ALLOWED_ERROR_CODES:
-        if _re_mod.search(r'\b' + _re_mod.escape(code.lower()) + r'\b', page_text):
+        if re.search(r'\b' + re.escape(code.lower()) + r'\b', page_text):
             return code
 
     return None
