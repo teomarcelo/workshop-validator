@@ -118,8 +118,9 @@ class FilesHomeNavTests(unittest.TestCase):
     def test_current_nav_item_files_after_opening_the_files_home_passes(self):
         page = files_page("Files")
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
-        self.assertEqual(outcome.statuses["f1"], "PASS")
-        self.assertEqual(outcome.evidence["f1"], ("f1:after-state:-files-nav-item-current",))
+        self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
+        self.assertIn("Opened the Files home", outcome.notes["f1"])
+        self.assertIn("step-verifier judges this step", outcome.notes["f1"])
         self.assertIn(("goto", "https://example.lightning.force.com/lightning/o/ContentDocument/home"), page.events)
         self.assertEqual(clicks(page), [("click", "text", "Files")])
 
@@ -130,19 +131,19 @@ class FilesHomeNavTests(unittest.TestCase):
                 outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
                 self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
                 self.assertEqual(outcome.evidence.get("f1", ()), ())
-                self.assertIn("Clicked element:", outcome.notes["f1"])
+                self.assertIn("Opened the Files home", outcome.notes["f1"])
 
     def test_hidden_current_nav_item_is_not_evidence(self):
         page = files_page("Files", hidden=True)
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
         self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
-        self.assertIn("Clicked element:", outcome.notes["f1"])
+        self.assertIn("Opened the Files home", outcome.notes["f1"])
 
     def test_files_nav_item_already_current_before_the_click_is_not_evidence(self):
         page = files_page("Files", before=True)
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
         self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
-        self.assertIn("Clicked element:", outcome.notes["f1"])
+        self.assertIn("Opened the Files home", outcome.notes["f1"])
 
     def test_current_nav_item_is_not_read_after_an_ordinary_click(self):
         page, _, _ = nav_page()

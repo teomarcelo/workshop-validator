@@ -1471,7 +1471,8 @@ class WalkTests(unittest.TestCase):
             "Click the Files tab.",
         )
         clock, outcome = self.attempt(page, (item,))
-        self.assertEqual(outcome.statuses["files"], "PASS")
+        self.assertEqual(outcome.statuses["files"], "NEEDS_REVIEW")
+        self.assertIn("Opened the Files home", outcome.notes["files"])
         self.assertEqual(clock.now, 0)
         self.assertIn("/lightning/o/ContentDocument/home", page.url)
         self.assertTrue(any(
