@@ -278,6 +278,25 @@ class TestOpenFlowAction(unittest.TestCase):
 
         self.assertIsNone(result)  # StillLoading
 
+    @patch('workshop_validator.guide_walk._read_builder_flow_label')
+    @patch('workshop_validator.guide_walk._focus_builder')
+    @patch('workshop_validator.guide_walk._roots')
+    def test_open_flow_skips_search_when_already_opened(self, mock_roots, mock_focus, mock_read_label):
+        """When opened['done'] is True, search and click are skipped."""
+        page = self._mock_page()
+        state = WalkState(page=page)
+        step = _step("Open the Flow Test Flow.")
+        opened = {"done": True}  # Already clicked
+
+        mock_focus.return_value = True
+        mock_read_label.return_value = "Test Flow"
+
+        result = _act_open_flow(state, step, "Test Flow", opened)
+
+        self.assertEqual(result.status, "PASS")
+        # _roots should not be called because search is skipped
+        mock_roots.assert_not_called()
+
 
 # Real-browser smoke test with synthetic HTML
 @unittest.skipIf(not os.getenv("RUN_BROWSER_SMOKE"), "RUN_BROWSER_SMOKE not set")
