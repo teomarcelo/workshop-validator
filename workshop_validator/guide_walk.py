@@ -2966,7 +2966,8 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
     # Empty field: check if mandatory
     step_text = step.text or ""
     if _is_field_mandatory(step_text, label):
-        return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), (), freeze=True)
+        note = MANDATORY_OWN_VALUE_PREFIX + OWN_VALUE_EMPTY.format(label=label)
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
     return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
@@ -7558,6 +7559,22 @@ def _session_blocked(state: WalkState, step: GuideStep) -> bool:
     return False
 
 
+def _should_stop_walk(result: CheckResult) -> bool:
+    """Check if a frozen NEEDS_REVIEW should stop the whole walk (W-135 exceptions).
+
+    Returns True if the walk should stop completely (mandatory own-value, ENV_BLOCKED,
+    AUTH_BLOCKED). Returns False if only the task should be blocked (W-117 path).
+    """
+    if result.status == "NEEDS_REVIEW" and result.note:
+        # Mandatory own-value NEEDS_REVIEW stops the walk
+        if result.note.startswith(MANDATORY_OWN_VALUE_PREFIX):
+            return True
+    # ENV_BLOCKED and AUTH_BLOCKED always stop
+    if result.status in ("ENV_BLOCKED", "AUTH_BLOCKED"):
+        return True
+    return False
+
+
 def _step_error(exc: BaseException) -> CheckResult:
     """Keep a step-specific reason. Do not hide it behind a generic mismatch."""
     if isinstance(exc, BrowserActionError):
@@ -7572,9 +7589,12 @@ def _step_error(exc: BaseException) -> CheckResult:
 
 
 # W-117: a stopping real failure blocks only the rest of its task; the walk goes on at the next task.
-_TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
+# W-135: a frozen NEEDS_REVIEW (except mandatory own-value, ENV_BLOCKED, AUTH_BLOCKED, password)
+# also blocks only its task.
+_TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL", "NEEDS_REVIEW")
 BLOCKED_BY_PREFIX = "blocked by "
 AFTER_FAILURE_FLAG = "after-earlier-failure"
+MANDATORY_OWN_VALUE_PREFIX = "mandatory-own-value: "
 
 
 def _task_key(step: GuideStep, task_positions: dict) -> tuple:
@@ -7835,8 +7855,9 @@ def walk_guide(
         executed.append(step.step_id)
         if heartbeat is not None:
             heartbeat("", index, total, step.step_id, result.status, t_end)
-        if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step):
-            # W-117: the rest of this task is NOT_RUN; the walk resumes at the next task.
+        if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step) \
+                and not _should_stop_walk(result):
+            # W-117/W-135: the rest of this task is NOT_RUN; the walk resumes at the next task.
             failed_task, failed_step = _task_key(step, task_positions), step.step_id
             failed_note = result.note or ""
         elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):

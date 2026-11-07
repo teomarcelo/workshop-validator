@@ -142,8 +142,15 @@ class StopBehaviorKeptTests(unittest.TestCase):
     def test_auth_blocked_stops(self):
         self.assertWalkStopped({"a2": _frozen("AUTH_BLOCKED")})
 
-    def test_needs_review_stop_still_stops(self):
-        self.assertWalkStopped({"a2": _frozen("NEEDS_REVIEW")})
+    def test_mandatory_own_value_needs_review_stops(self):
+        from workshop_validator.guide_walk import MANDATORY_OWN_VALUE_PREFIX
+        self.assertWalkStopped({
+            "a2": lambda state, step: CheckResult(
+                "NEEDS_REVIEW",
+                MANDATORY_OWN_VALUE_PREFIX + "Sample Field is empty. The guide asks for the learner's own value.",
+                (), freeze=True
+            )
+        })
 
     def test_failure_that_closed_the_browser_stops(self):
         def closed(state, step):

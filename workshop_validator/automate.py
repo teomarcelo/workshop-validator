@@ -337,10 +337,11 @@ def _summary(result, index: int, total: int, outcome: str, reason: str, run_dir:
             "step_id": first.step_id, "page": first.page, "status": first.status,
         },
         "stop_step": None if stop is None else stop.step_id,
-        # W-100, W-117: every real failure in printed order; the first one is judged (W-111).
+        # W-100, W-117, W-135: every real failure and NEEDS_REVIEW in printed order; the
+        # first real failure is judged (W-111, W-121). NEEDS_REVIEW is inconclusive for the gate.
         "failures": [
             {"step_id": s.step_id, "status": s.status, "note": s.note or ""}
-            for s in result.report_steps if s.status in _REAL_FAIL
+            for s in result.report_steps if s.status in _REAL_FAIL or s.status == "NEEDS_REVIEW"
         ],
         "blocked_steps": sum(
             1 for s in result.report_steps
