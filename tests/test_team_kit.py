@@ -2302,9 +2302,10 @@ class AppendOnlyVerdictTests(_NoSubprocessMixin, unittest.TestCase):
         """F18-r3: a short head is refused outright; gh is never asked to resolve it."""
         with tempfile.TemporaryDirectory() as tmp:
             for short in ("abc1234", "abc1234" * 5, "a" * 39, "a" * 41, "g" * 40, " "):
-                with self.subTest(head=short), self.assertRaises(ValueError) as cm:
-                    team_kit.save_review(Path(tmp), 999999, "code-reviewer", short, "Good\nVERDICT: APPROVE")
-                self.assertIn("full 40-hex headRefOid", str(cm.exception))
+                with self.subTest(head=short):
+                    with self.assertRaises(ValueError) as cm:
+                        team_kit.save_review(Path(tmp), 999999, "code-reviewer", short, "Good\nVERDICT: APPROVE")
+                    self.assertIn("full 40-hex headRefOid", str(cm.exception))
             self.assertEqual(list((Path(tmp) / "reviews").glob("*")) if (Path(tmp) / "reviews").exists() else [], [])
 
     def test_reply_with_fake_head_line_blocked(self):
@@ -2635,9 +2636,10 @@ class VerdictHistoryRound3Tests(_NoSubprocessMixin, unittest.TestCase):
         self.save(60, "VETO")
         veto_ts = _history_ts(self.team, 60)
         for short in (OTHER_HEAD[:7], self.HEAD[:7], self.HEAD[:39]):
-            with self.subTest(head=short), self.assertRaises(ValueError) as cm:
-                self.save(60, "APPROVE", head=short)
-            self.assertIn("pass the full 40-hex headRefOid", str(cm.exception))
+            with self.subTest(head=short):
+                with self.assertRaises(ValueError) as cm:
+                    self.save(60, "APPROVE", head=short)
+                self.assertIn("pass the full 40-hex headRefOid", str(cm.exception))
         self.assertEqual(len(_history_lines(self.team, 60)), 1)
         self.assertEqual(_gate(self.team, 60, self.HEAD), [_veto_problem(60, self.HEAD, veto_ts)])
 
@@ -2649,9 +2651,10 @@ class VerdictHistoryRound3Tests(_NoSubprocessMixin, unittest.TestCase):
                   "**Verdict:** approve\nVERDICT: VETO",
                   "VERDICT: VETO\nverdict: approve")
         for body in bodies:
-            with self.subTest(body=body), self.assertRaises(ValueError) as cm:
-                team_kit.save_review(self.team, 61, "code-reviewer", self.HEAD, body)
-            self.assertIn("exactly one VERDICT line", str(cm.exception))
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError) as cm:
+                    team_kit.save_review(self.team, 61, "code-reviewer", self.HEAD, body)
+                self.assertIn("exactly one VERDICT line", str(cm.exception))
         self.assertFalse(_history_path(self.team, 61).exists())
         self.assertEqual(_gate(self.team, 61, self.HEAD), ["review code-reviewer: MISSING"])
 
