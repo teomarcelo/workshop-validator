@@ -40,7 +40,7 @@ class ProveCommandTests(unittest.TestCase):
         self.repo = self.root / "repo"
         self.repo.mkdir()
 
-    def make_repo(self, base=BASE_CODE, head=HEAD_CODE, tests=TEST_CODE):
+    def make_repo(self, base=BASE_CODE, head=HEAD_CODE, tests=TEST_CODE, link=None):
         _git(self.repo, "init", "-q", "-b", "trunk")
         (self.repo / "m.py").write_text(base, encoding="utf-8")
         _git(self.repo, "add", "m.py")
@@ -49,6 +49,9 @@ class ProveCommandTests(unittest.TestCase):
         (self.repo / "m.py").write_text(head, encoding="utf-8")
         (self.repo / "test_m.py").write_text(tests, encoding="utf-8")
         _git(self.repo, "add", "m.py", "test_m.py")
+        if link is not None:  # a tracked symlink to a file outside the repo
+            os.symlink(link, self.repo / "link.py")
+            _git(self.repo, "add", "link.py")
         _git(self.repo, "commit", "-q", "-m", "head")
 
     def mutants(self, *items) -> str:
@@ -77,6 +80,21 @@ class ProveCommandTests(unittest.TestCase):
         self.make_repo(tests=SKIP_CODE)
         code, last, _ = self.prove()
         self.assertEqual((code, last), (1, "PROVE: FAIL 1 test(s) skipped on head: test_m.AddTests.test_skipped"))
+
+    def test_failing_test_on_head_fails(self):
+        self.make_repo(head=BASE_CODE)
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL 1 test(s) failed on head: test_m.AddTests.test_add"))
+
+    def test_test_module_that_does_not_load_fails(self):
+        self.make_repo()
+        code, last, _ = self.prove("--tests", "test_m", "test_missing")
+        self.assertEqual((code, last), (1, "PROVE: FAIL tests did not load on head: test_missing"))
+
+    def test_module_with_no_tests_fails(self):
+        self.make_repo(tests="import unittest\n")
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL no tests ran on head"))
 
     def test_tests_that_pass_on_base_fail(self):
         self.make_repo(base=HEAD_CODE)
@@ -110,16 +128,20 @@ class ProveCommandTests(unittest.TestCase):
         self.assertEqual((code, last), (1, "PROVE: FAIL mutant did not apply: 1"))
 
     def test_outside_mutant_paths_fail_and_write_nothing(self):
-        self.make_repo()
         outside = self.root / "outside.txt"
         outside.write_bytes(b"a + b\n")
-        for name in ("../outside.txt", str(outside), "untracked.py"):
+        self.make_repo(link=str(outside))
+        head_code = (self.repo / "m.py").read_bytes()
+        for name in ("../outside.txt", str(outside), str(self.repo / "m.py"), "sub/../m.py",
+                     "untracked.py", "link.py"):
             with self.subTest(name=name):
                 mutants = self.mutants({"file": name, "find": "a + b", "replace": "MUTATED"})
                 code, last, text = self.prove("--mutants", mutants)
                 self.assertEqual((code, last), (1, "PROVE: FAIL bad mutant path"))
                 self.assertEqual(outside.read_bytes(), b"a + b\n")
-                self.assertNotIn("prove: head", text)  # rejected before any phase ran
+                self.assertEqual((self.repo / "m.py").read_bytes(), head_code)
+                if name != "link.py":  # rejected before any phase ran
+                    self.assertNotIn("prove: head", text)
 
     def test_uncommitted_changes_fail(self):
         self.make_repo()
