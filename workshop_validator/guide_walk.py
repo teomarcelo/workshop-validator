@@ -6972,32 +6972,32 @@ def _act_open_flow(state: WalkState, step: GuideStep, flow_name: str, opened: di
             )
 
         # Find all matching flow rows by exact label in the Flows list region
-        # Search inside list/grid regions only, not page-wide
-        matches = []
+        # Search for the flow link across frames, but count only in the first frame that has it
+        flow_link = None
+        match_count = 0
         for root in _roots(state.page):
-            # Try to find the flows list container first (table, grid, or list role)
             try:
                 # Look for rows with the flow name as a link
                 loc = root.get_by_role("link", name=flow_name, exact=True)
-                if loc and _count(loc) > 0:
-                    matches.append(loc)
+                if loc:
+                    count = _count(loc)
+                    if count > 0:
+                        flow_link = loc
+                        match_count = count
+                        break  # Use first frame that has the flow
             except Exception:
                 pass
 
         # Check for duplicates
-        total_matches = sum(_count(loc) for loc in matches)
-        if total_matches == 0:
+        if match_count == 0:
             return None  # StillLoading will poll
-        if total_matches > 1:
+        if match_count > 1:
             return CheckResult(
                 "NEEDS_REVIEW",
-                f"Found {total_matches} flows with the exact label {flow_name}. The validator cannot choose which one to open.",
+                f"Found {match_count} flows with the exact label {flow_name}. The validator cannot choose which one to open.",
                 (),
                 freeze=True,
             )
-
-        # Click once
-        flow_link = matches[0]
         try:
             _first(flow_link).click(timeout=8000)
             opened["done"] = True
