@@ -113,7 +113,7 @@ class SessionIdPathTests(_Base):
         team_kit.claim_producer(self.team, session_id=sid, now=DAY_AGO)
         self.assertEqual(self._active(), DAY_AGO)
         line = self._check()
-        self.assertTrue(line.startswith(("TAKEOVER", "NUDGE")), line)
+        self.assertTrue(line.startswith(("LAUNCHED", "NUDGE")), line)
 
     def test_parent_escape_is_not_activity(self):
         self._assert_not_activity("../other")
@@ -142,7 +142,7 @@ class NoOpenJobTests(_Base):
 
     def test_no_job_producer_fresh_subagent_keeps_none(self):
         self._bound_producer(STALE)
-        self.assertTrue(self._check().startswith("TAKEOVER"))
+        self.assertTrue(self._check().startswith("LAUNCHED"))
         self._clear_markers()
         self._subagent("prod/subagents/agent-1.jsonl", NOW - timedelta(minutes=1))
         self.assertTrue(self._check().startswith("NONE WORKING"))

@@ -470,6 +470,19 @@ def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[st
             state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
         else:
             state, reason = status(repo, team, now)
+
+        # Check for masked stall before deciding action
+        live = load_producer(team)
+        active = producer_active_at(repo, live, now)
+        if state == "WORKING":
+            job = load_job(team.parent)
+            has_job = bool(job and is_open(job) and job.get("heartbeat"))
+            moved = None if has_job else step_moved_at(repo, team, load_plan(team), now)
+            if masked_stall(job, active, now, moved):
+                what = "job heartbeat" if has_job else "no open job, step"
+                state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
+                                            f" ({reason})")
+
         if state not in {"IDLE", "STALLED"}:
             return ("NONE", f"{state}: {reason}")
 
@@ -490,8 +503,6 @@ def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[st
             return ("WAITING", waiting_msg)
 
         # Act only when action is TAKEOVER AND no fresh producer
-        live = load_producer(team)
-        active = producer_active_at(repo, live, now)
         idle_file = team / "idle-since"
         takeover_file = team / "takeover-at"
         takeover_count_file = team / "takeover-count"
@@ -600,11 +611,20 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     else:
         state, reason = status(repo, team, now)
 
-    if state not in {"IDLE", "STALLED"}:
-        return f"NONE {state}: {reason}"
-
+    # Check for masked stall before deciding action
     live = load_producer(team)
     active = producer_active_at(repo, live, now)
+    if state == "WORKING":
+        job = load_job(team.parent)
+        has_job = bool(job and is_open(job) and job.get("heartbeat"))
+        moved = None if has_job else step_moved_at(repo, team, load_plan(team), now)
+        if masked_stall(job, active, now, moved):
+            what = "job heartbeat" if has_job else "no open job, step"
+            state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
+                                        f" ({reason})")
+
+    if state not in {"IDLE", "STALLED"}:
+        return f"NONE {state}: {reason}"
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
 

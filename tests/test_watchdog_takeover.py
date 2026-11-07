@@ -61,7 +61,7 @@ class WatchdogTakeoverTests(unittest.TestCase):
         self._job(STALE)
         team_kit.claim_producer(self.team, now=NOW - timedelta(days=1))
         line = team_kit.watchdog_check(self.repo, self.team, NOW)
-        self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+        self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
         self.assertNotIn("\n", line)
 
     def test_stale_job_and_dead_bound_producer_is_takeover(self):
