@@ -16,21 +16,43 @@ class StatusLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
 
-            # Create synthetic summary.json
+            # Create synthetic summary.json matching real structure
             summary = {
-                "guide": "Example Workshop Guide",
-                "total_steps": 10,
+                "guide_name": "Example Workshop Guide",
+                "counts": {
+                    "PASS": 2,
+                    "NEEDS_REVIEW": 1,
+                    "UI_MISMATCH": 1,
+                    "NOT_RUN": 1
+                },
+                "failures": [
+                    {"step_id": "P001N003", "status": "UI_MISMATCH", "note": "Control not found"},
+                    {"step_id": "P001N004", "status": "NEEDS_REVIEW", "note": "Manual check"}
+                ],
+                "stop_step": "P001N004"
             }
             (run_dir / "summary.json").write_text(json.dumps(summary))
 
-            # Create synthetic board.json
+            # Create synthetic board.json matching real structure
             board = {
-                "steps": [
-                    {"id": "P001N001", "status": "PASS", "note": ""},
-                    {"id": "P001N002", "status": "PASS", "note": ""},
-                    {"id": "P001N003", "status": "UI_MISMATCH", "note": "Control not found: Save Button"},
-                    {"id": "P001N004", "status": "NEEDS_REVIEW", "note": "Manual verification required"},
-                    {"id": "P001N005", "status": "NOT_RUN", "note": ""},
+                "sections": [
+                    {
+                        "exercises": [
+                            {
+                                "tasks": [
+                                    {
+                                        "steps": [
+                                            {"step_id": "P001N001", "status": "PASS"},
+                                            {"step_id": "P001N002", "status": "PASS"},
+                                            {"step_id": "P001N003", "status": "UI_MISMATCH"},
+                                            {"step_id": "P001N004", "status": "NEEDS_REVIEW"},
+                                            {"step_id": "P001N005", "status": "NOT_RUN"}
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
                 ]
             }
             (run_dir / "board.json").write_text(json.dumps(board))
@@ -56,17 +78,39 @@ class StatusLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
 
-            summary = {"guide": "Test Guide"}
+            summary = {
+                "guide_name": "Test Guide",
+                "counts": {
+                    "FUNCTIONAL_FAIL": 1,
+                    "ENV_BLOCKED": 1,
+                    "AUTH_BLOCKED": 1,
+                    "NEEDS_REVIEW": 1,
+                    "NOT_RUN": 1
+                },
+                "failures": [
+                    {"step_id": "P001N001", "status": "FUNCTIONAL_FAIL", "note": "Error 1"},
+                    {"step_id": "P001N002", "status": "ENV_BLOCKED", "note": "Error 2"},
+                    {"step_id": "P001N003", "status": "AUTH_BLOCKED", "note": "Error 3"},
+                    {"step_id": "P001N004", "status": "NEEDS_REVIEW", "note": "Error 4"}
+                ],
+                "stop_step": "P001N004"
+            }
             (run_dir / "summary.json").write_text(json.dumps(summary))
 
             board = {
-                "steps": [
-                    {"id": "P001N001", "status": "FUNCTIONAL_FAIL", "note": "Error 1"},
-                    {"id": "P001N002", "status": "ENV_BLOCKED", "note": "Error 2"},
-                    {"id": "P001N003", "status": "AUTH_BLOCKED", "note": "Error 3"},
-                    {"id": "P001N004", "status": "NEEDS_REVIEW", "note": "Error 4"},
-                    {"id": "P001N005", "status": "NOT_RUN", "note": ""},
-                ]
+                "sections": [{
+                    "exercises": [{
+                        "tasks": [{
+                            "steps": [
+                                {"step_id": "P001N001", "status": "FUNCTIONAL_FAIL"},
+                                {"step_id": "P001N002", "status": "ENV_BLOCKED"},
+                                {"step_id": "P001N003", "status": "AUTH_BLOCKED"},
+                                {"step_id": "P001N004", "status": "NEEDS_REVIEW"},
+                                {"step_id": "P001N005", "status": "NOT_RUN"}
+                            ]
+                        }]
+                    }]
+                }]
             }
             (run_dir / "board.json").write_text(json.dumps(board))
 
@@ -82,15 +126,28 @@ class StatusLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
 
-            summary = {"guide": "Test Guide"}
+            long_note = "B" * 100  # 100 character note
+            summary = {
+                "guide_name": "Test Guide",
+                "counts": {"FUNCTIONAL_FAIL": 1, "NOT_RUN": 1},
+                "failures": [
+                    {"step_id": "P001N001", "status": "FUNCTIONAL_FAIL", "note": long_note}
+                ],
+                "stop_step": "P001N001"
+            }
             (run_dir / "summary.json").write_text(json.dumps(summary))
 
-            long_note = "B" * 100  # 100 character note
             board = {
-                "steps": [
-                    {"id": "P001N001", "status": "FUNCTIONAL_FAIL", "note": long_note},
-                    {"id": "P001N002", "status": "NOT_RUN", "note": ""},
-                ]
+                "sections": [{
+                    "exercises": [{
+                        "tasks": [{
+                            "steps": [
+                                {"step_id": "P001N001", "status": "FUNCTIONAL_FAIL"},
+                                {"step_id": "P001N002", "status": "NOT_RUN"}
+                            ]
+                        }]
+                    }]
+                }]
             }
             (run_dir / "board.json").write_text(json.dumps(board))
 
@@ -108,15 +165,26 @@ class StatusLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
 
-            summary = {"guide": "All Pass Guide"}
+            summary = {
+                "guide_name": "All Pass Guide",
+                "counts": {"PASS": 3},
+                "failures": [],
+                "stop_step": "P001N003"
+            }
             (run_dir / "summary.json").write_text(json.dumps(summary))
 
             board = {
-                "steps": [
-                    {"id": "P001N001", "status": "PASS", "note": ""},
-                    {"id": "P001N002", "status": "PASS", "note": ""},
-                    {"id": "P001N003", "status": "PASS", "note": ""},
-                ]
+                "sections": [{
+                    "exercises": [{
+                        "tasks": [{
+                            "steps": [
+                                {"step_id": "P001N001", "status": "PASS"},
+                                {"step_id": "P001N002", "status": "PASS"},
+                                {"step_id": "P001N003", "status": "PASS"}
+                            ]
+                        }]
+                    }]
+                }]
             }
             (run_dir / "board.json").write_text(json.dumps(board))
 
@@ -129,18 +197,23 @@ class StatusLineTests(unittest.TestCase):
             self.assertNotIn("|", result)  # No failures section
 
     def test_status_line_handles_missing_board(self):
-        """status-line works without board.json."""
+        """status-line works without board.json, using stop_step."""
         with tempfile.TemporaryDirectory() as tmp:
             run_dir = Path(tmp)
 
-            summary = {"guide": "Test Guide"}
+            summary = {
+                "guide_name": "Test Guide",
+                "counts": {"PASS": 5, "NOT_RUN": 10},
+                "failures": [],
+                "stop_step": "P002N005"
+            }
             (run_dir / "summary.json").write_text(json.dumps(summary))
 
             result = team_dashboard.status_line(run_dir)
 
             # Should still produce output with guide name
             self.assertIn("Test Guide", result)
-            self.assertIn("None", result)  # No furthest step
+            self.assertIn("P002N005", result)  # Uses stop_step as furthest
 
     def test_status_line_handles_missing_summary(self):
         """status-line returns error message when summary.json missing."""
@@ -150,6 +223,102 @@ class StatusLineTests(unittest.TestCase):
             result = team_dashboard.status_line(run_dir)
 
             self.assertIn("No summary.json found", result)
+
+    def test_status_line_walks_real_shaped_board(self):
+        """status-line correctly walks nested board structure."""
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+
+            # Build a real-shaped board by walking nested sections
+            summary = {
+                "guide_name": "Multi-Section Guide",
+                "counts": {"PASS": 23, "NEEDS_REVIEW": 3, "NOT_RUN": 926},
+                "failures": [
+                    {"step_id": "P003N007", "status": "NEEDS_REVIEW", "note": "Verify modal text"},
+                    {"step_id": "P005N012", "status": "NEEDS_REVIEW", "note": "Check field value"},
+                    {"step_id": "P008N003", "status": "NEEDS_REVIEW", "note": "Confirm button state"}
+                ],
+                "stop_step": "P008N003"
+            }
+            (run_dir / "summary.json").write_text(json.dumps(summary))
+
+            # Real board has multiple sections, exercises, tasks
+            board = {
+                "sections": [
+                    {
+                        "exercises": [
+                            {
+                                "tasks": [
+                                    {
+                                        "steps": [
+                                            {"step_id": "P001N001", "status": "PASS"},
+                                            {"step_id": "P001N002", "status": "PASS"}
+                                        ]
+                                    },
+                                    {
+                                        "steps": [
+                                            {"step_id": "P001N003", "status": "PASS"}
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "exercises": [
+                            {
+                                "tasks": [
+                                    {
+                                        "steps": [
+                                            {"step_id": "P002N001", "status": "PASS"},
+                                            {"step_id": "P002N002", "status": "PASS"}
+                                        ]
+                                    }
+                                ]
+                            },
+                            {
+                                "tasks": [
+                                    {
+                                        "steps": [
+                                            {"step_id": "P003N001", "status": "PASS"},
+                                            {"step_id": "P003N002", "status": "PASS"},
+                                            {"step_id": "P003N007", "status": "NEEDS_REVIEW"}
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                    {
+                        "exercises": [
+                            {
+                                "tasks": [
+                                    {
+                                        "steps": [
+                                            {"step_id": "P008N001", "status": "PASS"},
+                                            {"step_id": "P008N002", "status": "PASS"},
+                                            {"step_id": "P008N003", "status": "NEEDS_REVIEW"},
+                                            {"step_id": "P008N004", "status": "NOT_RUN"}
+                                        ]
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            }
+            (run_dir / "board.json").write_text(json.dumps(board))
+
+            result = team_dashboard.status_line(run_dir)
+
+            # Verify it reads all the data correctly
+            self.assertIn("Multi-Section Guide", result)
+            self.assertIn("P008N003", result)  # Furthest non-NOT_RUN step
+            self.assertIn("PASS 23", result)
+            self.assertIn("NEEDS_REVIEW 3", result)
+            self.assertIn("NOT_RUN 926", result)
+            # Check first failure is present
+            self.assertIn("P003N007", result)
 
 
 if __name__ == "__main__":

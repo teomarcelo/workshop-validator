@@ -124,37 +124,48 @@ def status_line(run_dir: Path | None = None) -> str:
             pass
 
     # Extract guide name
-    guide_name = summary.get("guide", "Unknown guide")
+    guide_name = summary.get("guide_name", "Unknown guide")
 
     # Get furthest step (last step with status != NOT_RUN)
-    steps = board.get("steps", [])
     furthest_step = "None"
-    for step in reversed(steps):
-        if step.get("status") != "NOT_RUN":
-            furthest_step = step.get("id", "Unknown")
-            break
+    if board:
+        # Walk sections to find all steps in board order
+        all_steps = []
+        for section in board.get("sections", []):
+            for exercise in section.get("exercises", []):
+                for task in exercise.get("tasks", []):
+                    for step in task.get("steps", []):
+                        all_steps.append(step)
 
-    # Count statuses
-    counts = {"PASS": 0, "NEEDS_REVIEW": 0, "FAIL": 0, "NOT_RUN": 0}
-    for step in steps:
-        status = step.get("status", "NOT_RUN")
-        if status in ("UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED", "AUTH_BLOCKED"):
-            counts["FAIL"] += 1
-        elif status in counts:
-            counts[status] += 1
-        else:
-            counts["FAIL"] += 1
-
-    # Get top 3 failures
-    failures = []
-    for step in steps:
-        status = step.get("status", "NOT_RUN")
-        if status in ("UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED", "AUTH_BLOCKED", "NEEDS_REVIEW"):
-            step_id = step.get("id", "Unknown")
-            reason = (step.get("note", "") or "")[:80]
-            failures.append(f"{step_id}: {status}: {reason}")
-            if len(failures) >= 3:
+        # Find last step with status != NOT_RUN
+        for step in reversed(all_steps):
+            if step.get("status") != "NOT_RUN":
+                furthest_step = step.get("step_id", "Unknown")
                 break
+
+    # Fall back to summary stop_step if board didn't give us a furthest step
+    if furthest_step == "None" and "stop_step" in summary:
+        furthest_step = summary["stop_step"]
+
+    # Get counts from summary
+    summary_counts = summary.get("counts", {})
+    counts = {
+        "PASS": summary_counts.get("PASS", 0),
+        "NEEDS_REVIEW": summary_counts.get("NEEDS_REVIEW", 0),
+        "NOT_RUN": summary_counts.get("NOT_RUN", 0),
+        "FAIL": (summary_counts.get("UI_MISMATCH", 0) +
+                 summary_counts.get("FUNCTIONAL_FAIL", 0) +
+                 summary_counts.get("ENV_BLOCKED", 0) +
+                 summary_counts.get("AUTH_BLOCKED", 0))
+    }
+
+    # Get top 3 failures from summary
+    failure_list = []
+    for failure in summary.get("failures", [])[:3]:
+        step_id = failure.get("step_id", "Unknown")
+        status = failure.get("status", "Unknown")
+        note = (failure.get("note", "") or "")[:80]
+        failure_list.append(f"{step_id}: {status}: {note}")
 
     # Build status line
     parts = [
@@ -163,8 +174,8 @@ def status_line(run_dir: Path | None = None) -> str:
         f"PASS {counts['PASS']} / NEEDS_REVIEW {counts['NEEDS_REVIEW']} / FAIL {counts['FAIL']} / NOT_RUN {counts['NOT_RUN']}"
     ]
 
-    if failures:
-        parts.append(" | ".join(failures))
+    if failure_list:
+        parts.append(" | ".join(failure_list))
 
     return "; ".join(parts)
 
