@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -431,39 +432,174 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
 # ---- review verdicts -------------------------------------------------------
 
 ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
-HEAD_OID = re.compile(r"^[0-9a-f]{7,40}$")
+HEAD_OID = re.compile(r"[0-9a-f]{40}")  # Full 40-hex only; always used with fullmatch
 
 
 def reviews_dir(team: Path) -> Path:
     return team / "reviews"
 
 
-def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
-    """Write reviews/pr-<pr>-<role>.md with 'HEAD: <head>' as its first line (0600).
+def _full_head(head: str) -> str:
+    """Return the head in lower case, or refuse unless it is exactly 40 hex characters.
+
+    Short heads are never resolved: a short or stale prefix could name another commit.
+    """
+    value = (head or "").strip().lower()
+    if not HEAD_OID.fullmatch(value):
+        raise ValueError("head is not 40 hex characters; pass the full 40-hex headRefOid "
+                         "(gh pr view <N> --json headRefOid); short heads are refused")
+    return value
+
+
+def _open_checked(path: Path, flags: int, what: str) -> int:
+    """Open without following a symlink; refuse unless a regular file with one link."""
+    fd = os.open(path, flags | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{what} is not a regular file")
+        if info.st_nlink != 1:
+            raise ValueError(f"{what} has hard links (st_nlink != 1)")
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def _read_all(fd: int) -> bytes:
+    chunks = []
+    while chunk := os.read(fd, 65536):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+SHORT_HEAD = re.compile(r"[0-9a-f]{7,39}")
+
+
+def _legacy_seed(text: str, role: str, mtime: float, full_head: str) -> dict:
+    """History record for a legacy latest copy: its head, main's verdict rule, mtime ts, text.
+
+    A 40-hex head becomes `head`. A 7 to 39 hex head that the saved full head starts with
+    becomes that full head, as main's is_review_stale counts it current. Any other head is
+    kept as `legacy_head` with a null `head`, so it never matches (or blocks) a current head.
+    """
+    from . import team_gates
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    old_head = first.split(":", 1)[1].strip() if first.startswith("HEAD:") else ""
+    lowered = old_head.lower()
+    if HEAD_OID.fullmatch(lowered):
+        seed_head = lowered
+    elif SHORT_HEAD.fullmatch(lowered) and full_head.startswith(lowered):
+        seed_head = full_head
+    else:
+        seed_head = None
+    return {
+        "head": seed_head,
+        "legacy_head": old_head,
+        "ts": datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="microseconds"),
+        "role": role,
+        "verdict": team_gates.legacy_verdict(text),
+        "supersedes": None,
+        "reason": None,
+        "body": text,
+    }
+
+
+def save_review(team: Path, pr: int, role: str, head: str, reply: str,
+                supersedes_ts: str | None = None, supersedes_reason: str | None = None) -> Path:
+    """Write reviews/pr-<pr>-<role>.md with FORMAT: 2 and HEAD: <head> (0600).
+
+    Append to reviews/pr-<pr>-<role>.history.md as JSON Lines (one record per line).
+    Each record has: head (full 40-hex), ts (ISO UTC with microseconds), role, verdict,
+    supersedes (ts or null), reason (str or null), and body (full reply text).
+    The body is JSON-escaped, so nothing in a reply can forge a header or separator.
 
     This is the only way the producer saves a verdict; the write guard denies the
     Write and Edit tools in reviews/ so a session cannot hand-write one by mistake.
     """
     if pr <= 0:
         raise ValueError("pr must be a positive number")
-    if not ROLE_NAME.match(role or ""):
+    if not ROLE_NAME.fullmatch(role or ""):
         raise ValueError("role must be lower-case letters, digits and dashes")
-    head = (head or "").strip().lower()
-    if not HEAD_OID.match(head):
-        raise ValueError("head must be the PR headRefOid (7 to 40 hex characters)")
+    full_head = _full_head(head)
     body = (reply or "").strip()
     if not body:
         raise ValueError("reviewer reply on stdin is empty")
     # Refuse body without VERDICT line matching team_gates.VERDICT
     from . import team_gates
-    if not team_gates.VERDICT.search(body):
+    verdict_match = team_gates.VERDICT.search(body)
+    if not verdict_match:
         raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
+    # One verdict rule: a reply with more than one verdict-like line is refused, so a quoted
+    # "VERDICT: APPROVE" inside a VETO can never be read as the verdict by anyone.
+    if len(team_gates.VERDICT_LIKE_LINE.findall(body)) != 1:
+        raise ValueError("reviewer reply must contain exactly one VERDICT line; "
+                         "remove quoted or repeated VERDICT lines")
+    verdict = verdict_match.group(1).upper()
+    # Validate supersedes parameters
+    if (supersedes_ts is None) != (supersedes_reason is None):
+        raise ValueError("supersedes_ts and supersedes_reason must both be provided or both be None")
+    if supersedes_ts and not supersedes_reason.strip():
+        raise ValueError("supersedes_reason must not be empty")
+
     path = reviews_dir(team) / f"pr-{pr}-{role}.md"
+    history_path = reviews_dir(team) / f"pr-{pr}-{role}.history.md"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"HEAD: {head}\n{body}\n")
-    path.chmod(0o600)
+
+    # Build JSON Lines record
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    record = {
+        "head": full_head,
+        "ts": timestamp,
+        "role": role,
+        "verdict": verdict,
+        "supersedes": supersedes_ts,
+        "reason": supersedes_reason.strip() if supersedes_reason else None,
+        "body": body
+    }
+    json_line = json.dumps(record, ensure_ascii=False) + "\n"
+
+    latest_content = f"HEAD: {full_head}\nFORMAT: 2\n{body}\n"
+
+    # Check both files before writing either. The latest copy is opened without O_TRUNC,
+    # so a hard-linked or odd file is refused before a single byte of it changes.
+    history_fd = _open_checked(history_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, "history path")
+    try:
+        fd = _open_checked(path, os.O_RDWR | os.O_CREAT, "latest copy path")
+    except BaseException:
+        os.close(history_fd)
+        raise
+    try:
+        history_size = os.fstat(history_fd).st_size
+        # Never append onto a partial line: a torn tail would swallow the new record.
+        if history_size and os.pread(history_fd, 1, history_size - 1) != b"\n":
+            raise ValueError(f"{history_path.name} does not end with a newline (torn tail); "
+                             "refusing to append onto a partial line")
+        old = _read_all(fd)
+        try:
+            old_text = old.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(f"{path.name} is not valid UTF-8; refusing to overwrite it")
+        lines = ""
+        if not history_size and old_text.strip() and not team_gates.is_format_2(old_text):
+            # A legacy copy and no history yet: keep its verdict as the first record, so a
+            # legacy VETO still needs a real --supersedes after the switch.
+            lines = json.dumps(_legacy_seed(old_text, role, os.fstat(fd).st_mtime, full_head),
+                               ensure_ascii=False) + "\n"
+        _write_all(history_fd, (lines + json_line).encode("utf-8"))
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        _write_all(fd, latest_content.encode("utf-8"))
+    finally:
+        os.close(fd)
+        os.close(history_fd)
     return path
 
 
@@ -569,7 +705,9 @@ def main(argv: list[str] | None = None) -> int:
     rev = sub.add_parser("review", help="Save a reviewer reply (stdin) as reviews/pr-N-ROLE.md")
     rev.add_argument("--pr", type=int, required=True)
     rev.add_argument("--role", required=True)
-    rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
+    rev.add_argument("--head", required=True, help="The full 40-hex PR headRefOid the reviewer saw")
+    rev.add_argument("--supersedes", help="Timestamp of a prior verdict this review supersedes")
+    rev.add_argument("--reason", help="Reason for superseding a prior verdict")
     dec = sub.add_parser("decide", help="Append decision row and render dashboard")
     dec.add_argument("--id", required=True, help="Decision ID (e.g., W-001)")
     dec.add_argument("--status", required=True, help="Decision status (RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED)")
@@ -608,7 +746,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "review":
         try:
-            path = save_review(team, args.pr, args.role, args.head, sys.stdin.read())
+            path = save_review(team, args.pr, args.role, args.head, sys.stdin.read(),
+                             supersedes_ts=args.supersedes, supersedes_reason=args.reason)
         except (ValueError, OSError) as exc:
             print(f"review: REFUSED {exc}", file=sys.stderr)
             return 2
