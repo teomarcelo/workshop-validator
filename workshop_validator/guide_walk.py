@@ -7507,7 +7507,8 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult(
             "NEEDS_REVIEW",
             f"The validator has no action for this step yet: {_snippet(text)}. "
-            "It stopped here so later steps are not run out of order.",
+            "No matching action was found. The rest of this task was not run, "
+            "so its steps stay in order. The walk went on at the next task.",
             (),
             freeze=True,
         )
@@ -7566,14 +7567,13 @@ def _session_blocked(state: WalkState, step: GuideStep) -> bool:
 def _should_stop_walk(result: CheckResult) -> bool:
     """Check if a result should stop the whole walk (W-135/W-137 exceptions).
 
-    Returns True if the walk should stop completely (mandatory own-value field via stop_walk flag,
-    ENV_BLOCKED, AUTH_BLOCKED). Returns False if only the task should be blocked (W-117 path).
+    Returns True if the walk should stop completely (mandatory own-value field via stop_walk flag).
+    Returns False if only the task should be blocked (W-117 path).
+
+    Note: ENV_BLOCKED and AUTH_BLOCKED stop the walk through other checks in the walk loop.
     """
     # Mandatory own-value field stops the walk (W-137 structured flag)
     if result.stop_walk:
-        return True
-    # ENV_BLOCKED and AUTH_BLOCKED always stop
-    if result.status in ("ENV_BLOCKED", "AUTH_BLOCKED"):
         return True
     return False
 
@@ -7592,12 +7592,11 @@ def _step_error(exc: BaseException) -> CheckResult:
 
 
 # W-117: a stopping real failure blocks only the rest of its task; the walk goes on at the next task.
-# W-135: a frozen NEEDS_REVIEW (except mandatory own-value, ENV_BLOCKED, AUTH_BLOCKED, password)
+# W-135: a frozen NEEDS_REVIEW (except mandatory own-value, ENV_BLOCKED, AUTH_BLOCKED)
 # also blocks only its task.
 _TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL", "NEEDS_REVIEW")
 BLOCKED_BY_PREFIX = "blocked by "
 AFTER_FAILURE_FLAG = "after-earlier-failure"
-MANDATORY_OWN_VALUE_PREFIX = "mandatory-own-value: "
 
 
 def _task_key(step: GuideStep, task_positions: dict) -> tuple:
