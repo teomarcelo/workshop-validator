@@ -7651,6 +7651,8 @@ def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[
     A closed browser or a lost session already stopped the walk at the failure itself.
     """
     closed: list[str] = []
+    recovery_actions: list[str] = []
+    dialog_title_at_start: str | None = None
     try:
         for _ in range(_POPUP_CLOSE_LIMIT):
             title, _attempt = _close_unrelated_popup(state, step)
@@ -7658,12 +7660,57 @@ def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[
                 break
             closed.append(_popup_note(title))
         covering = _covering_modal_title(state, step)
+
+        # W-142: recover from guide's own dialog left open by blocked task
+        if covering:
+            dialog_title_at_start = covering
+            # Try Escape first
+            keyboard = getattr(state.page, "keyboard", None)
+            if keyboard is not None:
+                try:
+                    keyboard.press("Escape")
+                    recovery_actions.append("pressed Escape")
+                except Exception:
+                    pass
+                # Wait for load (poll about 2 s, up to about page_wait_s)
+                start = state.clock()
+                polls = 0
+                while state.clock() - start < state.page_wait_s:
+                    _sleep(state, state.interval_s)
+                    polls += 1
+                    try:
+                        covering = _covering_modal_title(state, step)
+                        if not covering:
+                            break
+                        # If page is not loading and dialog is still there, stop waiting
+                        if polls >= 2 and not _loading(state.page):
+                            break
+                    except Exception:
+                        break
+                try:
+                    covering = _covering_modal_title(state, step)
+                except Exception:
+                    pass
+
+            # If still covered, return home
+            if covering:
+                if return_home(state):
+                    recovery_actions.append("returned to the org home")
+                    covering = _covering_modal_title(state, step)
+                elif _session_stop_reason(state, step):
+                    return closed, _session_stop_reason(state, step)
+
     except Exception as exc:
         return closed, (f"The page could not be read after the failure in {failed} "
                         f"({type(exc).__name__}), so the following steps were not run.")
     if covering:
         return closed, (f'"{covering}" still covered the page after the failure in {failed}; '
                         "the walk could not close it, so the following steps were not run.")
+    # Add recovery note to the step's environment notes
+    if recovery_actions:
+        action_text = " and ".join(recovery_actions)
+        note = f'The dialog "{dialog_title_at_start}" from the blocked task {failed} was still open; the walk {action_text}, then started this task.'
+        closed.append(note)
     return closed, ""
 
 
