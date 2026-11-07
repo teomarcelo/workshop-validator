@@ -34,6 +34,9 @@ def files_page(current_text, before=False, hidden=False):
     if hidden:
         page.hidden.add(item)
     page.css = {NAV_CURRENT: [item] if before else []}
+    # P005N004: Files content area heading proves Files is open
+    content_heading = ("heading", "Files")
+    page.roles.add(content_heading)
 
     def opened(url):
         page.css[NAV_CURRENT] = [item]
