@@ -1461,10 +1461,17 @@ class WalkTests(unittest.TestCase):
 
     def test_files_tab_leaves_personal_information(self):
         page = Page("https://example.lightning.force.com/lightning/settings/personalInformation")
+        files_nav = ("navlink", "Files")
+        page.roles.add(files_nav)
         page.roles.add(("link", "Files tab"))
+        page.css = {"one-app-nav-bar [aria-current='page']": []}
+        # P005N004: Files heading must appear after opening Files home
+        files_heading = ("heading", "Files")
         def on_goto(url):
             if "ContentDocument" in url:
                 page.page_title = "Files | Salesforce"
+                page.roles.add(files_heading)
+                page.css["one-app-nav-bar [aria-current='page']"] = [files_nav]
         page.on_goto = on_goto
         item = step(
             "files", "Exercise 1: Get Started", "Task 2: Files.", "3",

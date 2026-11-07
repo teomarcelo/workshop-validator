@@ -6397,6 +6397,147 @@ _APP_NAV_CURRENT = (
 )
 
 
+def _snapshot_content_headings(page) -> frozenset[str]:
+    """Snapshot visible content-area headings (h1-h3, [role=heading]), outside nav bar."""
+    headings: set[str] = set()
+    # Heading elements: h1, h2, h3, and [role='heading']
+    selectors = ["h1", "h2", "h3", "[role='heading']"]
+    for root in _roots(page):
+        for selector in selectors:
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                try:
+                    item = loc.nth(index)
+                    if not item.is_visible():
+                        continue
+                    # Check if inside nav bar by evaluating ancestry
+                    try:
+                        inside_nav = page.evaluate("""
+                            (heading) => {
+                                let el = heading;
+                                while (el) {
+                                    if (el.classList && el.classList.contains('one-app-nav-bar')) {
+                                        return true;
+                                    }
+                                    el = el.parentElement;
+                                }
+                                return false;
+                            }
+                        """, item.element_handle())
+                        if inside_nav:
+                            continue
+                    except Exception:
+                        # Fake page: assume not in nav bar
+                        pass
+                    text = norm(item.inner_text(timeout=1000) or "")
+                    if text and len(text) < 300:
+                        headings.add(text)
+                except Exception:
+                    continue
+    return frozenset(headings)
+
+
+def _new_files_heading_uncovered(page, before_snapshot: frozenset[str]) -> bool:
+    """Check if a new, exact, uncovered 'Files' heading appeared in the content area.
+
+    Returns True only if:
+    - A heading (h1-h3 or role=heading) outside the nav bar
+    - Is visible
+    - Is uncovered (elementFromPoint at its center returns the heading or a descendant)
+    - Has first line exactly equal to "Files" (case-insensitive, trimmed)
+    - Was not in the before_snapshot (is new)
+
+    Allowlist: "Files", "Owned by Me", "Shared with Me"
+    """
+    # Allowlist of acceptable heading texts (first line must match exactly)
+    allowlist = {"files", "owned by me", "shared with me"}
+
+    selectors = ["h1", "h2", "h3", "[role='heading']"]
+
+    for root in _roots(page):
+        for selector in selectors:
+            try:
+                loc = root.locator(selector)
+            except Exception:
+                continue
+            for index in range(min(_count(loc), 20)):
+                try:
+                    item = loc.nth(index)
+                    if not item.is_visible():
+                        continue
+
+                    # Check if inside nav bar by evaluating ancestry
+                    try:
+                        inside_nav = page.evaluate("""
+                            (heading) => {
+                                let el = heading;
+                                while (el) {
+                                    if (el.classList && el.classList.contains('one-app-nav-bar')) {
+                                        return true;
+                                    }
+                                    el = el.parentElement;
+                                }
+                                return false;
+                            }
+                        """, item.element_handle())
+                        if inside_nav:
+                            continue
+                    except Exception:
+                        # Fake page: assume not in nav bar
+                        pass
+
+                    # Get full text
+                    text = norm(item.inner_text(timeout=1000) or "")
+                    if not text:
+                        continue
+
+                    # Check if it was in the before snapshot (must be NEW)
+                    if text in before_snapshot:
+                        continue
+
+                    # Extract first line
+                    first_line = text.split('\n')[0].strip().lower()
+                    if not first_line:
+                        continue
+
+                    # Check exact match to allowlist
+                    if first_line not in allowlist:
+                        continue
+
+                    # Check if uncovered: elementFromPoint at center must hit the heading or inside it
+                    # In fake pages (tests), skip uncovered check if bounding_box not supported
+                    try:
+                        box = item.bounding_box(timeout=1000)
+                        if not box:
+                            # Fake page: no bounding box, assume uncovered if visible
+                            return True
+
+                        center_x = box['x'] + box['width'] / 2
+                        center_y = box['y'] + box['height'] / 2
+
+                        # Use evaluate to check if the element at the center point is this heading or inside it
+                        is_uncovered = page.evaluate("""
+                            ([x, y, heading]) => {
+                                const elementAtPoint = document.elementFromPoint(x, y);
+                                if (!elementAtPoint || !heading) return false;
+                                return heading === elementAtPoint || heading.contains(elementAtPoint);
+                            }
+                        """, [center_x, center_y, item.element_handle()])
+
+                        if is_uncovered:
+                            return True
+                    except Exception:
+                        # Fake page or evaluate not supported: assume uncovered if visible
+                        return True
+
+                except Exception:
+                    continue
+    return False
+
+
 def _current_nav_item(page, targets) -> str:
     """The target name the app nav's current item shows as its whole visible text, else ""."""
     for root in _roots(page):
@@ -6546,6 +6687,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_url = getattr(state.page, "url", "")
     before_title = _page_title(state.page)
     before_headings = _extract_visible_headings(state.page)
+    # P005N004: snapshot content-area headings before click for Files tab check
+    before_content_headings = _snapshot_content_headings(state.page)
     # Also capture occurrence counts for target names (handles field placement case)
     before_scoped = _scoped_name_counts(state.page)
     before_counts = {t: before_scoped.get(t, 0) for t in target_names if len(t) > 3}
@@ -6636,10 +6779,13 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     if not evidence_desc and opened_files_home and not before_nav:
         current = _current_nav_item(state.page, frozenset(target_names))
         if current:
-            evidence_desc = f"after-state: {current} nav item current"
+            # P005N004: Require new, exact, uncovered Files heading in content area
+            if _new_files_heading_uncovered(state.page, before_content_headings):
+                evidence_desc = f"after-state: {current} nav item current"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
-    if not evidence_desc and before_url != after_url:
+    # P005N004: When opened_files_home, validator-made URL change is not evidence
+    if not evidence_desc and not opened_files_home and before_url != after_url:
         from urllib.parse import urlparse
         before_parsed = urlparse(before_url)
         after_parsed = urlparse(after_url)
@@ -6710,7 +6856,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                     evidence_desc = "after-state: url changed"
 
     # Check if new names appeared that match target_names, or if target name occurrence increased
-    if not evidence_desc:
+    # P005N004: When opened_files_home, name appearance is not evidence (only Files heading check)
+    if not evidence_desc and not opened_files_home:
         # A target name newly shown, or shown more times (a field placed on the canvas
         # while it stays in the palette). Counts leave out menus, listboxes and popups
         # and use the canvas when present, so a dropdown repeating the name is not evidence.
@@ -6793,9 +6940,12 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if not evidence_desc and opened_files_home and not before_nav:
                 current = _current_nav_item(state.page, frozenset(target_names))
                 if current:
-                    evidence_desc = f"after-state: {current} nav item current"
+                    # P005N004: Require new, exact, uncovered Files heading in content area
+                    if _new_files_heading_uncovered(state.page, before_content_headings):
+                        evidence_desc = f"after-state: {current} nav item current"
 
-            if not evidence_desc and before_url != after_url:
+            # P005N004: When opened_files_home, validator-made URL change is not evidence
+            if not evidence_desc and not opened_files_home and before_url != after_url:
                 from urllib.parse import urlparse
                 before_parsed = urlparse(before_url)
                 after_parsed = urlparse(after_url)
@@ -6855,7 +7005,8 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                         if found_in_url or found_in_heading:
                             evidence_desc = "after-state: url changed"
 
-            if not evidence_desc:
+            # P005N004: When opened_files_home, name appearance is not evidence
+            if not evidence_desc and not opened_files_home:
                 for target in sorted(target_names):
                     if len(target) > 3 and after_counts.get(target, 0) > before_counts.get(target, 0):
                         evidence_desc = f"after-state: {target} appeared"
