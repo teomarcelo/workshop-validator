@@ -1922,9 +1922,14 @@ def builtin_checks() -> tuple[GuideCheck, ...]:
         ),
         _check("Turn Agentforce on", lambda step: "toggle agentforce" in _text(step), run_toggle),
         _check(
-            "Create a new Screen Flow",
-            lambda step: _text(step).startswith("create a new screen flow"),
+            "Create a Screen Flow",
+            lambda step: re.search(r'\bcreate\s+(?:a\s+)?(?:new\s+)?screen\s+flow\b', _text(step)),
             run_screen_flow,
+        ),
+        _check(
+            "Create an Autolaunched Flow",
+            lambda step: re.search(r'\bcreate\s+(?:an?\s+)?(?:new\s+)?autolaunched\s+flow\b', _text(step)),
+            run_autolaunched_flow,
         ),
         _check(
             "Create a record variable",
@@ -3244,6 +3249,17 @@ def _click_screen_flow(page) -> bool:
     return _click_choice(page, "Screen Flow")
 
 
+def _autolaunched_flow_offered(state: WalkState) -> bool:
+    if _focus_named(state, "Autolaunched Flow"):
+        return True
+    _click_last(state.page, "button", "New Flow")
+    return False
+
+
+def _click_autolaunched_flow(page) -> bool:
+    return _click_choice(page, "Autolaunched Flow")
+
+
 # Custom elements that only the Flow Builder app renders for its canvas.
 # UNVERIFIED: these tag names have not been checked against a live Flow Builder page.
 _BUILDER_CANVAS_SELECTOR = (
@@ -4145,6 +4161,49 @@ def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:
     if not _flow_builder_open(state.page):
         return _not_open_result(state, "Flow Builder did not open after Create was clicked.")
     return passed(step, "screen-flow", "New Flow, Screen Flow, then Create opens Flow Builder.")
+
+
+def run_autolaunched_flow(state: WalkState, step: GuideStep) -> CheckResult:
+    origin = _origin(state.page)
+    if not origin:
+        return CheckResult("UI_MISMATCH", "The org was not open.", (), freeze=True)
+    try:
+        state.page.goto(
+            origin + "/lightning/setup/Flows/home",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+    except Exception:
+        return CheckResult("UI_MISMATCH", "Flows did not open.", (), freeze=True)
+    notes = len(state.popup_notes)
+    missed = _wait_past_promo(
+        state, step, lambda: _named_choice(state.page, "New Flow"), "New Flow was not on the Flows page."
+    )
+    if missed:
+        return _stop_here(missed)
+    if not (_click_last(state.page, "button", "New Flow") or _click_choice(state.page, "New Flow")):
+        return _resumed_miss(state, notes, CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True))
+    missed = require(
+        state,
+        lambda: _autolaunched_flow_offered(state),
+        "Autolaunched Flow was not offered.",
+        limit=state.page_wait_s,
+    )
+    if missed:
+        return _stop_here(missed)
+    if not _click_autolaunched_flow(state.page):
+        return CheckResult("UI_MISMATCH", "Autolaunched Flow was not selected.", (), freeze=True)
+    if present(state.page, "button", "Create") or present(state.page, "link", "Create"):
+        if not (click_role(state.page, "button", "Create") or click_role(state.page, "link", "Create")):
+            return CheckResult("UI_MISMATCH", "Create was not available for the Autolaunched Flow.", (), freeze=True)
+    missed = _wait_past_promo(state, step, lambda: _focus_builder(state), "Flow Builder did not open.")
+    if missed and missed.status == "UI_MISMATCH" and not _promo_over(state, step):
+        return _not_open_result(state, missed.note)
+    if missed:
+        return _stop_here(missed)
+    if not _flow_builder_open(state.page):
+        return _not_open_result(state, "Flow Builder did not open after Create was clicked.")
+    return passed(step, "autolaunched-flow", "New Flow, Autolaunched Flow, then Create opens Flow Builder.")
 
 
 def _api_name_ready(page) -> bool:
