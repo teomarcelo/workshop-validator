@@ -343,7 +343,7 @@ class KeepOrgTests(unittest.TestCase):
             gate = load_gate(root)
             self.assertEqual((gate["org"], gate["frozen"], gate["reason"]), (1, False, ""))
             self.assertEqual(gate["kept_org_reason"], {
-                "step_id": "s2", "verdict": "FALSE_FAILURE", "run_id": run_dir.name})
+                "verified_false_failures": ["s2"], "run_id": run_dir.name})
             self.assertEqual(next_org_index(gate), 1)
             # Only gate.json changes; .gate.json.lock is the shared gate lock file; automate.lock is the run lock.
             self.assertEqual(sorted(p.name for p in root.iterdir()
@@ -383,12 +383,15 @@ class KeepOrgTests(unittest.TestCase):
     def test_refuses_when_the_board_stop_is_another_step(self):
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_org_root(folder, stop=None)
-            # s2 failed first, but the walk stopped at s3: only s3's verdict counts.
+            # s2 failed first (with FALSE_FAILURE), walk stopped at s3 (NEEDS_REVIEW).
+            # W-167: all real failures must be verified, regardless of stop step.
+            # This is now allowed because s2 (the only real failure) has FALSE_FAILURE.
             steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "UI_MISMATCH"},
                      {"step_id": "s3", "status": "NEEDS_REVIEW"}, {"step_id": "s4", "status": "NOT_RUN"}]
             (run_dir / "board.json").write_text(
                 json.dumps({"sections": [{"tasks": [{"steps": steps}]}]}), encoding="utf-8")
-            self.assertRefusedUnchanged(root, run_dir)
+            self.assertEqual(self._keep(root, run_dir), 0)
+            self.assertEqual(load_gate(root)["kept_org_reason"]["verified_false_failures"], ["s2"])
 
     def test_refuses_when_files_are_missing_or_malformed(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -504,7 +507,9 @@ class KeepOrgTests(unittest.TestCase):
                              "kept_org_reason": "junk"})
             with contextlib.redirect_stdout(io.StringIO()):
                 self.assertEqual(self._keep(root, run_dir), 0)
-            self.assertEqual(load_gate(root)["kept_org_reason"]["run_id"], run_dir.name)
+            kept = load_gate(root)["kept_org_reason"]
+            self.assertEqual(kept["run_id"], run_dir.name)
+            self.assertEqual(kept["verified_false_failures"], ["s2"])
 
     def test_refuses_a_run_folder_at_the_wrong_depth_inside_runs(self):
         for depth in ("shallow", "deep"):
