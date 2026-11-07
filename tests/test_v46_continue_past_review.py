@@ -246,46 +246,60 @@ class SourceTests(unittest.TestCase):
 
 
 class PopUpNotesTests(unittest.TestCase):
-    """Test that stop_walk flag prevents pop-up notes from hiding the mandatory stop."""
+    """Test that stop_walk flag survives when pop-up notes are added in the walk loop."""
 
-    def test_popup_closed_during_mandatory_step_still_stops(self):
-        """Pop-up closed during a mandatory step; stop_walk flag ensures walk stops."""
-        # Simulate a mandatory step that has a pop-up note added
+    def test_popup_note_added_during_mandatory_step_preserves_stop_walk(self):
+        """Pop-up note added during mandatory step; stop_walk survives and walk stops."""
+        # This check returns stop_walk=True and adds a popup note to state
         def mandatory_with_popup(state, step):
-            # Simulate pop-up closed during the step
-            state.popup_notes = ["Closed the Sample Tips pop-up (owner rule W-080)."]
+            # Add a popup note (simulating W-080 pop-up close)
+            state.popup_notes.append("Environment: closed Sample pop-up (W-080).")
             return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
 
         outcome, calls = _walk(Page(HOME), TWO_TASKS, {"a2": mandatory_with_popup})
-        # The walk must stop at a2, not continue to b1
-        self.assertEqual(calls[-1], "a2")
+        # The walk must stop at a2 (stop_walk=True preserved), not continue to b1
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+        # Verify the popup note was added
+        self.assertIn("closed Sample pop-up", outcome.notes["a2"])
+        # b1 and b2 are NOT_RUN because the walk stopped (not blocked by)
         for later in ("a3", "b1", "b2"):
             self.assertEqual(outcome.statuses[later], "NOT_RUN")
-            # These are not blocked by a2; the walk just stopped
             self.assertFalse(outcome.notes.get(later, "").startswith("blocked by"))
 
-    def test_pretask_popup_cleanup_before_mandatory_step_still_stops(self):
-        """Pre-task cleanup closes pop-up before a task whose first step is mandatory."""
-        # Simulate a frozen real failure in a1 that blocks a2-a3, then b1 is mandatory
-        # The walk should close pop-ups before task 2, then stop at b1
-        def frozen_fail(state, step):
-            return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+    def test_boundary_note_before_mandatory_first_step_preserves_stop_walk(self):
+        """Boundary note added before mandatory first step of next task; walk stops."""
+        # Create a scenario where a1 fails, walk continues to task 2 where b1 is mandatory
+        THREE_TASKS = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("b1", EX_A, "Task 2", "1"),  # First step of task 2, will be mandatory
+            _step("b2", EX_A, "Task 2", "2"),
+            _step("c1", EX_A, "Task 3", "1"),
+        )
 
-        def mandatory_first_step(state, step):
-            # b1 is the first step of task 2 and is mandatory
+        def mandatory_step(state, step):
             return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
 
-        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
-            "a1": frozen_fail,
-            "b1": mandatory_first_step,
+        outcome, calls = _walk(Page(HOME), THREE_TASKS, {
+            "a1": _frozen("UI_MISMATCH"),  # Blocks a2, walk continues to task 2
+            "b1": mandatory_step,  # First step of task 2, mandatory
         })
-        # a1 fails, a2-a3 are blocked, b1 is checked and stops the walk
-        self.assertEqual(calls, ["a1", "b1"])
+
+        # a1 fails and blocks a2
         self.assertEqual(outcome.statuses["a1"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["a2"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a2"].startswith("blocked by"))
+
+        # Walk continues to b1, which is mandatory and stops the walk
+        self.assertEqual(calls, ["a1", "b1"])
         self.assertEqual(outcome.statuses["b1"], "NEEDS_REVIEW")
-        # b2 is NOT_RUN because the walk stopped at b1
+
+        # b2 and c1 are NOT_RUN because walk stopped
         self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
+        self.assertEqual(outcome.statuses["c1"], "NOT_RUN")
         self.assertFalse(outcome.notes.get("b2", "").startswith("blocked by"))
+        self.assertFalse(outcome.notes.get("c1", "").startswith("blocked by"))
 
 
 class SummaryAndGateTests(unittest.TestCase):
