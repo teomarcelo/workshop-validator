@@ -24,6 +24,12 @@ WAITING_LOG_EVERY = timedelta(hours=1)
 # producer is fixing, testing, reviewing or publishing; a headless restart
 # would only fight it, so the watchdog waits. Run and verify stay restartable.
 PRODUCER_PHASES = ("fix", "test", "audit", "publish", "lessons", "report")
+# Prompt for a fresh producer session when the chain is idle or stalled with no live producer.
+PRODUCER_WAKE_PROMPT = (
+    "You are the producer (read .claude/agents/producer.md). "
+    "Run team_kit status, claim if no producer is live, read the newest standup restart block and "
+    "progress/now.json, and start the next ready step."
+)
 
 
 def _now_utc() -> datetime:
@@ -146,6 +152,27 @@ def launch_resume(repo_root: Path, log_path: Path, venv_python: Path) -> None:
         )
 
 
+def launch_producer_wake(repo_root: Path, log_path: Path) -> None:
+    """Launch a detached fresh producer session (injectable for tests)."""
+    claude = claude_path()
+    if claude is None:
+        raise FileNotFoundError("The claude CLI was not found; set WORKSHOP_VALIDATOR_CLAUDE.")
+    cmd = [
+        claude,
+        "-p", PRODUCER_WAKE_PROMPT,
+        "--permission-mode", "acceptEdits",
+    ]
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with open(log_path, "a") as f:
+        subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+
 def _team_lesson(private_root: Path, cause: str, state: dict, now: datetime) -> None:
     """Record a restart or stall as a team lesson, keyed by the phase it died in."""
     from .lessons import TEAM, record_cause
@@ -160,10 +187,12 @@ def _team_lesson(private_root: Path, cause: str, state: dict, now: datetime) -> 
         pass
 
 
-def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) -> int:
+def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_launcher=None, now=None) -> int:
     """Check and act on the current job state."""
     if launcher is None:
         launcher = launch_resume
+    if producer_launcher is None:
+        producer_launcher = launch_producer_wake
     if now is None:
         now = _now_utc()
     state = load(private_root)
@@ -171,6 +200,27 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) ->
     fresh = producer_is_fresh(repo_root, private_root / "team", now)
     action = decide(state, now=now, producer_fresh=fresh)
     if action in {"idle", "alive"}:
+        # Check for takeover when no open job or job is done
+        if action == "idle":
+            from .team_kit import decide_and_record_takeover, MAX_TAKEOVERS_PER_IDLE
+            takeover_action, reason, ctx = decide_and_record_takeover(repo_root, private_root / "team", now)
+            if takeover_action == "TAKEOVER":
+                from .team_state import log
+                log(private_root, agent="watchdog", action="takeover-launch",
+                    detail=f"Chain {ctx['state']}, no fresh producer", now=now.isoformat())
+                log_path = private_root / "team" / "watchdog.log"
+                try:
+                    producer_launcher(repo_root, log_path)
+                except OSError as exc:
+                    _team_lesson(private_root, f"Takeover launch could not start: {exc}", {}, now)
+                    print(f"WAITING owner: takeover launch failed: {exc}", file=sys.stderr)
+                    return 1
+                print(f"Takeover launch: fresh producer session started. Log: {log_path}")
+                return 0
+            elif takeover_action == "NONE" and ctx["takeover_count"] >= MAX_TAKEOVERS_PER_IDLE:
+                session = (ctx["live"] or {}).get("session_id", "none")
+                print(f"WAITING owner: {ctx['takeover_count']} takeovers did not restart the chain "
+                      f"(producer session {session})", file=sys.stderr)
         return 0
     if action == "waiting":
         _note_waiting(private_root, state, now)

@@ -371,9 +371,16 @@ def _read_time(path: Path) -> datetime | None:
         return None
 
 
-def watchdog_check(repo: Path, team: Path, now=None) -> str:
-    """Record idle-since / nudged-at / takeover markers and print the action for the watchdog task."""
-    now = _utc(now)
+def decide_and_record_takeover(repo: Path, team: Path, now: datetime) -> tuple[str, str, dict]:
+    """Shared takeover decision: returns (action, reason, context).
+
+    Action is NONE, NUDGE, or TAKEOVER. When TAKEOVER is returned, the markers
+    (takeover-at, takeover-count) have already been written. The caller must launch
+    the takeover and log it.
+
+    Context dict contains: state, live, active, idle_since, nudged_at, takeover_at, takeover_count.
+    """
+    now = _aware(now)
     # Check main checkout is on main branch (branch and detached state only, not dirty files)
     from . import public_safety
     try:
@@ -403,7 +410,9 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
         nudge_file.unlink(missing_ok=True)
         takeover_file.unlink(missing_ok=True)
         takeover_count_file.unlink(missing_ok=True)
-        return f"NONE {state}: {reason}"
+        ctx = {"state": state, "live": live, "active": active, "idle_since": None,
+               "nudged_at": None, "takeover_at": None, "takeover_count": 0}
+        return "NONE", reason, ctx
     if not idle_file.is_file():
         _write_private(idle_file, now.isoformat())
         takeover_count_file.unlink(missing_ok=True)
@@ -413,15 +422,32 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
             takeover_count = int(takeover_count_file.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             takeover_count = 0
-    action = watchdog_action(state, live, now=now, idle_since=_read_time(idle_file),
-                             nudged_at=_read_time(nudge_file), session_active_at=active,
-                             takeover_at=_read_time(takeover_file), takeover_count=takeover_count)
+    idle_since = _read_time(idle_file)
+    nudged_at = _read_time(nudge_file)
+    takeover_at = _read_time(takeover_file)
+    action = watchdog_action(state, live, now=now, idle_since=idle_since,
+                             nudged_at=nudged_at, session_active_at=active,
+                             takeover_at=takeover_at, takeover_count=takeover_count)
     if action == "NUDGE":
         _write_private(nudge_file, now.isoformat())
     if action == "TAKEOVER":
         nudge_file.unlink(missing_ok=True)
         _write_private(takeover_file, now.isoformat())
         _write_private(takeover_count_file, str(takeover_count + 1))
+        takeover_count += 1
+        takeover_at = now
+    ctx = {"state": state, "live": live, "active": active, "idle_since": idle_since,
+           "nudged_at": nudged_at, "takeover_at": takeover_at, "takeover_count": takeover_count}
+    return action, reason, ctx
+
+
+def watchdog_check(repo: Path, team: Path, now=None) -> str:
+    """Record idle-since / nudged-at / takeover markers and print the action for the watchdog task."""
+    now = _utc(now)
+    action, reason, ctx = decide_and_record_takeover(repo, team, now)
+    state = ctx["state"]
+    takeover_count = ctx["takeover_count"]
+    live = ctx["live"]
     if action == "NONE" and takeover_count >= MAX_TAKEOVERS_PER_IDLE:
         session = (live or {}).get("session_id", "none")
         return f"NONE {state}: WAITING owner: {takeover_count} takeovers did not restart the chain (producer session {session})"
