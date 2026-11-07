@@ -4083,11 +4083,15 @@ def _read_builder_flow_label(page) -> str | None:
                 # Look for headings (h1, h2) that might contain the flow label
                 headings = root.locator("h1, h2, [role='heading']").all()
                 for heading in headings:
-                    if _visible(heading):
-                        text = safe_text(heading).strip()
+                    if not _visible(heading):
+                        continue
+                    try:
+                        text = (heading.inner_text(timeout=1000) or "").strip()
                         # Skip empty headings and generic builder titles
                         if text and text.lower() not in {"flow builder", "flows", "setup"}:
                             return text
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -4095,19 +4099,25 @@ def _read_builder_flow_label(page) -> str | None:
             try:
                 loc = _labeled(root, "Flow Label")
                 if loc and _visible(loc):
-                    text = safe_text(loc).strip()
-                    if text:
-                        return text
+                    try:
+                        text = (_first(loc).inner_text(timeout=500) or "").strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
             try:
                 loc = _labeled(root, "Label")
                 if loc and _visible(loc):
-                    # Make sure it's not some other label field
-                    text = safe_text(loc).strip()
-                    if text and len(text) < 200:  # Reasonable flow label length
-                        return text
+                    try:
+                        # Make sure it's not some other label field
+                        text = (_first(loc).inner_text(timeout=500) or "").strip()
+                        if text and len(text) < 200:  # Reasonable flow label length
+                            return text
+                    except Exception:
+                        pass
             except Exception:
                 pass
     except Exception:

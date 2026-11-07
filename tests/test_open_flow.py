@@ -334,7 +334,7 @@ class TestOpenFlowBrowser(unittest.TestCase):
 
             browser.close()
 
-            self.assertEqual(result.status, "PASS")
+            self.assertEqual(result.status, "PASS", f"Expected PASS but got {result.status}. Note: {result.note}")
             self.assertIn("Test Flow Alpha", result.note)
 
     def test_open_flow_browser_needs_review_with_duplicate_rows(self):
