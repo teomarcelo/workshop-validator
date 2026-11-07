@@ -76,6 +76,15 @@ class ProveCommandTests(unittest.TestCase):
         self.assertIn(f"prove: head {head}", text.splitlines())
         self.assertIn("prove: 1 test(s) fail on base: test_m.AddTests.test_add", text.splitlines())
 
+    def test_subtest_error_on_base_counts_its_test_once(self):
+        subtest_code = TEST_CODE.replace("        self.assertEqual(m.add(2, 3), 5)\n",
+                                         "        with self.subTest(n=1):\n"
+                                         "            self.assertEqual(m.add(2, 3), 5)\n")
+        self.make_repo(base="def add(a, b):\n    raise ValueError('synthetic')\n", tests=subtest_code)
+        code, last, text = self.prove()
+        self.assertEqual((code, last), (0, "PROVE: PASS"))
+        self.assertIn("prove: 1 test(s) fail on base: test_m.AddTests.test_add", text.splitlines())
+
     def test_skipped_test_fails(self):
         self.make_repo(tests=SKIP_CODE)
         code, last, _ = self.prove()

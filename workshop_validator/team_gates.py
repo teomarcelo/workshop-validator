@@ -1241,7 +1241,8 @@ for name in names:
     for test in items:
         tests[test.id()] = result.status.get(test.id(), "error")
     for test, _ in result.errors:
-        tests.setdefault(test.id(), "error")  # class or module fixture error
+        if type(test).__name__ == "_ErrorHolder":  # class or module fixture error
+            tests.setdefault(test.id(), "error")
 with open(out, "w", encoding="utf-8") as fh:
     json.dump({"tests": tests, "collection": collection}, fh)
 '''
