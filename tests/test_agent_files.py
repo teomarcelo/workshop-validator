@@ -1,11 +1,33 @@
 """Text checks for agent prompt files (synthetic, stdlib only)."""
 
 from pathlib import Path
+import hashlib
 import re
 import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENTS_DIR = REPO_ROOT / ".claude" / "agents"
+
+# SHA-256 of .claude/agents/run-operator.md from main
+RUN_OPERATOR_SHA256 = "049a8b208c7e7faa5fb98a3c10366f145843f0948e837c268271bbfc960fafa9"
+
+# Exact content of run-operator.md above "## Team rules"
+RUN_OPERATOR_CONTENT = """---
+name: run-operator
+description: Runs one guide walk on the current verification org with `automate --json` and returns the sanitized JSON summary. Use for every live run in /validate-guide.
+tools: Bash
+model: haiku
+---
+You run exactly one org walk and report its summary. You never read credentials.
+
+1. Check only that `~/.workshop-validator/verification-orgs.json` exists (`test -f`). Never cat, read or print it, and never read any `browser-state.json`.
+2. Run, from the repo root:
+   `D=$(mktemp -d) || { echo "mktemp failed"; exit 2; }; trap 'rm -rf "$D"' EXIT; trap 'exit 143' TERM INT HUP; chmod 700 "$D"; .venv/bin/python -m workshop_validator.automate --guide "<pdf>" --json > "$D/run.json" 2> "$D/run.log"; EXIT=$?; echo $EXIT; cat "$D/run.json"; if [ $EXIT -eq 2 ]; then tail -5 "$D/run.log" | sed -E 's/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/[email]/g'; fi; rm -rf "$D"`
+   A walk can take longer than one 10-minute Bash call: run it with `run_in_background: true` and wait for the completion notice. Do not retry on your own.
+   The command opens the live `report.html` in the user's browser; that is expected. Do not pass `--no-open`.
+3. Return only: the exit code (0 success, 1 real failure, 3 inconclusive, 2 refused) and the JSON output. If the exit code is 2, the last 5 lines from stderr are already included with email addresses redacted.
+
+Never return step text from the log beyond those lines. Never change the gate yourself."""
 
 
 class TestRunnerReplyRulesTests(unittest.TestCase):
@@ -148,10 +170,11 @@ class RunOperatorEmailRedactionTests(unittest.TestCase):
         run_operator_file = AGENTS_DIR / "run-operator.md"
         text = run_operator_file.read_text(encoding="utf-8")
 
-        # Extract the sed expression from the file
-        # Look for sed -E 's/...pattern.../[email]/g'
-        sed_match = re.search(r"sed -E 's/([^']+)/\[email\]/g'", text)
-        self.assertIsNotNone(sed_match, "sed expression not found in run-operator.md")
+        # Extract the sed expression from the run line
+        cmd = extract_run_command(text)
+        # Look for sed -E 's/...pattern.../[email]/g' after tail -5 "$D/run.log" |
+        sed_match = re.search(r"tail -5 \"\$D/run\.log\"\s*\|\s*sed -E 's/([^']+)/\[email\]/g'", cmd)
+        self.assertIsNotNone(sed_match, "sed expression not found after tail -5 in run command")
         sed_pattern = sed_match.group(1)
 
         # Test with synthetic email addresses
@@ -175,6 +198,74 @@ class RunOperatorEmailRedactionTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, f"sed failed: {result.stderr}")
         self.assertEqual(result.stdout.strip(), expected_output,
                          f"Email redaction failed. Got: {result.stdout.strip()}")
+
+
+def extract_run_command(agent_text):
+    """Extract the single backticked shell command that runs automate from run-operator.md."""
+    # Find all backtick code blocks
+    code_blocks = re.findall(r'`([^`]+)`', agent_text, re.DOTALL)
+    # Filter for commands that contain workshop_validator.automate
+    automate_commands = [block for block in code_blocks if 'workshop_validator.automate' in block]
+
+    if len(automate_commands) != 1:
+        raise ValueError(f"Expected exactly one backticked automate command, found {len(automate_commands)}")
+
+    return automate_commands[0]
+
+
+class RunOperatorExactContentTests(unittest.TestCase):
+    """F25: Pin run-operator.md by exact content."""
+
+    def source(self):
+        return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
+
+    def test_sha256_matches(self):
+        """run-operator.md SHA-256 must match the pinned hash."""
+        run_operator_file = AGENTS_DIR / "run-operator.md"
+        content = run_operator_file.read_bytes()
+        actual_hash = hashlib.sha256(content).hexdigest()
+        self.assertEqual(
+            actual_hash,
+            RUN_OPERATOR_SHA256,
+            "run-operator.md changed. If the change is intended and reviewed, update RUN_OPERATOR_SHA256 in this test in the same PR, and ask for a security review."
+        )
+
+    def test_content_above_team_rules_matches_exactly(self):
+        """Content above '## Team rules' must match the pinned copy exactly."""
+        text = self.source()
+        team_rules_marker = "## Team rules (shared by every role)"
+        team_rules_pos = text.find(team_rules_marker)
+        self.assertGreater(team_rules_pos, 0, "Team rules marker not found")
+
+        actual_content = text[:team_rules_pos].rstrip()
+        expected_content = RUN_OPERATOR_CONTENT.rstrip()
+
+        # Compare line by line for readable diff
+        actual_lines = actual_content.split('\n')
+        expected_lines = expected_content.split('\n')
+
+        for i, (actual, expected) in enumerate(zip(actual_lines, expected_lines), 1):
+            self.assertEqual(
+                actual,
+                expected,
+                f"run-operator.md line {i} changed. If the change is intended and reviewed, update RUN_OPERATOR_CONTENT in this test in the same PR, and ask for a security review.\nExpected: {expected!r}\nActual:   {actual!r}"
+            )
+
+        # Check line count
+        self.assertEqual(
+            len(actual_lines),
+            len(expected_lines),
+            f"run-operator.md line count changed. If the change is intended and reviewed, update RUN_OPERATOR_CONTENT in this test in the same PR, and ask for a security review.\nExpected {len(expected_lines)} lines, got {len(actual_lines)}"
+        )
+
+    def test_exactly_one_automate_command(self):
+        """run-operator.md must have exactly one backticked shell command running automate."""
+        text = self.source()
+        # Call the helper; it will raise if not exactly one
+        try:
+            extract_run_command(text)
+        except ValueError as e:
+            self.fail(str(e))
 
 
 if __name__ == "__main__":
