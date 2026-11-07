@@ -66,14 +66,14 @@ class FilesContentAreaAdversarialTests(unittest.TestCase):
         page.roles.add(nav_item)
         page.css = {NAV_CURRENT: []}
 
-        # Pre-existing heading "Salesforce Files Settings" on Setup page
-        pre_existing = ("heading", "Salesforce Files Settings")
+        # Pre-existing "Files" heading on Setup page (exact match but not new)
+        pre_existing = ("heading", "Files")
         page.roles.add(pre_existing)
 
         def opened(url):
             if "ContentDocument" in url:
                 page.css[NAV_CURRENT] = [nav_item]
-                # Don't add new heading - the old one stays
+                # Don't add new heading - the pre-existing "Files" heading stays
 
         page.on_goto = opened
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
