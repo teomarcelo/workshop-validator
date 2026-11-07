@@ -190,6 +190,49 @@ class FrozenNeedsReviewTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["b2"], "PASS")
 
 
+class PopUpNotesTests(unittest.TestCase):
+    """Test that stop_walk flag prevents pop-up notes from hiding the mandatory stop."""
+
+    def test_popup_closed_during_mandatory_step_still_stops(self):
+        """Pop-up closed during a mandatory step; stop_walk flag ensures walk stops."""
+        # Simulate a mandatory step that has a pop-up note added
+        def mandatory_with_popup(state, step):
+            # Simulate pop-up closed during the step
+            state.popup_notes = ["Closed the Sample Tips pop-up (owner rule W-080)."]
+            return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
+
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {"a2": mandatory_with_popup})
+        # The walk must stop at a2, not continue to b1
+        self.assertEqual(calls[-1], "a2")
+        for later in ("a3", "b1", "b2"):
+            self.assertEqual(outcome.statuses[later], "NOT_RUN")
+            # These are not blocked by a2; the walk just stopped
+            self.assertFalse(outcome.notes.get(later, "").startswith("blocked by"))
+
+    def test_pretask_popup_cleanup_before_mandatory_step_still_stops(self):
+        """Pre-task cleanup closes pop-up before a task whose first step is mandatory."""
+        # Simulate a frozen real failure in a1 that blocks a2-a3, then b1 is mandatory
+        # The walk should close pop-ups before task 2, then stop at b1
+        def frozen_fail(state, step):
+            return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+
+        def mandatory_first_step(state, step):
+            # b1 is the first step of task 2 and is mandatory
+            return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
+
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a1": frozen_fail,
+            "b1": mandatory_first_step,
+        })
+        # a1 fails, a2-a3 are blocked, b1 is checked and stops the walk
+        self.assertEqual(calls, ["a1", "b1"])
+        self.assertEqual(outcome.statuses["a1"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["b1"], "NEEDS_REVIEW")
+        # b2 is NOT_RUN because the walk stopped at b1
+        self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
+        self.assertFalse(outcome.notes.get("b2", "").startswith("blocked by"))
+
+
 class SummaryAndGateTests(unittest.TestCase):
     def test_summary_lists_needs_review_failure_and_counts_blocked_steps(self):
         """summary.json lists frozen NEEDS_REVIEW as a failure and counts blocked steps."""
