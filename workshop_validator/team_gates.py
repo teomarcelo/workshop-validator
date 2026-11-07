@@ -34,7 +34,7 @@ VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b"
 # Legacy copies (no FORMAT line, no history): main's rule, case-sensitive, last match wins.
 LEGACY_VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
 PASSING = {"APPROVE", "CLEAR"}
-ALWAYS_REVIEWERS = ("code-reviewer",)
+ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 NOREPLY_PATTERN = re.compile(r"[^@\s]+@users\.noreply\.github\.com\Z")
@@ -554,10 +554,6 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         print(f"merge-when-green: FAIL git fetch origin {base_name} {head} exited {fetched.returncode}")
         return 1
     if not merged_tree_gates(repo, head_oid, runner=runner):
-        return 1
-    # Safety scan on merged tree diff
-    if not safety_scan(repo, "origin/main", head_oid, runner=runner):
-        print("merge-when-green: FAIL safety scan blocked")
         return 1
     # New or changed tests must fail on base code: base = merge-base(PR base branch, head).
     if not prove_tests(repo, f"origin/{base_name}", head_oid, runner=runner):
@@ -1154,100 +1150,6 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
             _git(repo, "worktree", "prune", check=False, runner=runner)
 
 
-# ---- safety-scan -----------------------------------------------------------
-
-# Patterns for safety checks  # public-safety: pattern
-ORG_HOSTNAME = re.compile(r"\b(?!example\.)[a-z0-9-]+\.(my\.salesforce\.com|lightning\.force\.com)\b")  # public-safety: pattern
-EMAIL_RESERVED = ("example.com", "example.org", "example.net", "localhost", "users.noreply.github.com")
-USER_HOME = re.compile(r"/(?:Users|home)/[^/\s]+/")
-RUN_OUTPUT_PATH = re.compile(r"/runs/[^/]+/[0-9TZ-]+/")
-MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".webm", ".mov", ".pdf")
-PRIVATE_FILE_NAMES = ("verification-orgs.json", "browser-state.json", "lessons.json", "aliases.json")
-# Allowlisted test strings that contain private file names
-PRIVATE_FILE_ALLOWLIST = ("test_verification_orgs", "test_browser_state", "test_lessons", "test_aliases",
-                          "fake_aliases.json", "mock_lessons.json", "stub_orgs.json")
-# SHA-256 hashes (64 hex chars) that are allowlisted
-SHA256_ALLOWLIST = frozenset()
-LONG_HEX_BASE64 = re.compile(r"[A-Fa-f0-9]{40,}|[A-Za-z0-9+/]{40,}={0,2}")
-
-
-def safety_scan_checks(diff: str) -> dict[str, int]:
-    """Return hit counts for each safety check category."""
-    hits = {
-        "org-hostname": 0,
-        "email": 0,
-        "user-home": 0,
-        "run-output": 0,
-        "media": 0,
-        "private-files": 0,
-        "long-secrets": 0,
-    }
-    for file_path, line in added_lines(diff):
-        # org hostname
-        if ORG_HOSTNAME.search(line):
-            hits["org-hostname"] += 1
-        # email outside reserved domains
-        for match in EMAIL_PATTERN.finditer(line):
-            email = match.group(0)
-            domain = email.split("@")[-1].lower().strip('"\'')
-            # Check exact domain or TLD
-            if domain in EMAIL_RESERVED:
-                continue
-            # Check reserved TLDs
-            if any(domain.endswith(tld) for tld in (".example", ".test", ".invalid", ".localhost")):
-                continue
-            hits["email"] += 1
-        # user home paths
-        if USER_HOME.search(line):
-            hits["user-home"] += 1
-        # run output paths
-        if RUN_OUTPUT_PATH.search(line):
-            hits["run-output"] += 1
-        # media extensions
-        if any(line.lower().endswith(ext) or f"{ext}\"" in line.lower() or f"{ext}'" in line.lower()
-               for ext in MEDIA_EXTENSIONS):
-            hits["media"] += 1
-        # private file names (unless in allowlist)
-        for private_name in PRIVATE_FILE_NAMES:
-            if private_name in line and not any(allowed in line for allowed in PRIVATE_FILE_ALLOWLIST):
-                hits["private-files"] += 1
-        # long hex or base64 strings (unless allowlisted SHA-256)
-        for match in LONG_HEX_BASE64.finditer(line):
-            token = match.group(0)
-            # Skip if it's an allowlisted SHA-256 hash
-            if len(token) == 64 and token.lower() in SHA256_ALLOWLIST:
-                continue
-            hits["long-secrets"] += 1
-    return hits
-
-
-def safety_scan(repo: Path, base_ref: str, head_sha: str, runner=None) -> bool:
-    """Run public_safety and scan diff for safety violations. Return True if clear."""
-    run = runner or _default_runner
-
-    # Run public_safety first
-    result = run([sys.executable, "-m", "workshop_validator.public_safety"], repo)
-    if result.returncode:
-        print("SAFETY: BLOCK public_safety failed")
-        return False
-
-    # Get diff
-    diff = _git(repo, "diff", base_ref, head_sha, runner=runner)
-    hits = safety_scan_checks(diff)
-
-    # Print each check with hit count
-    for check, count in hits.items():
-        print(f"  {check}: {count} hit(s)")
-
-    # BLOCK if any hits
-    if any(hits.values()):
-        print("SAFETY: BLOCK")
-        return False
-
-    print("SAFETY: CLEAR")
-    return True
-
-
 # ---- prove -----------------------------------------------------------------
 
 def prove_command(repo: Path, base_ref: str, test_modules: list[str], mutants_file: str | None, runner=None) -> bool:
@@ -1405,9 +1307,6 @@ def main(argv: list[str] | None = None) -> int:
     prove_parser.add_argument("--base", required=True, help="Base ref to compare against")
     prove_parser.add_argument("--tests", required=True, nargs="+", help="Test modules to run")
     prove_parser.add_argument("--mutants", help="JSON file with mutants")
-    safety_parser = sub.add_parser("safety-scan")
-    safety_parser.add_argument("--base", required=True, help="Base ref")
-    safety_parser.add_argument("--head", required=True, help="Head SHA")
     mwg = sub.add_parser("merge-when-green")
     mwg.add_argument("pr", type=int)
     mwg.add_argument("--dry-run", action="store_true")
@@ -1435,8 +1334,6 @@ def main(argv: list[str] | None = None) -> int:
         return 0 if prove_tests(repo, f"origin/{base_name}", head_oid) else 1
     if args.cmd == "prove":
         return 0 if prove_command(repo, args.base, args.tests, args.mutants) else 1
-    if args.cmd == "safety-scan":
-        return 0 if safety_scan(repo, args.base, args.head) else 1
     if args.cmd == "merge-when-green":
         return merge_when_green(repo, team, args.pr, args.dry_run)
     if args.cmd == "worktree-cleanup":
