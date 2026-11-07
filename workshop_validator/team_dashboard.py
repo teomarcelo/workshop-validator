@@ -80,103 +80,89 @@ th{{color:var(--text_secondary);font-weight:600}}.chip{{font-weight:600}}.muted{
 """
 
 
-def status_line(run_dir: Path | None = None) -> str:
-    """Generate one-line status from newest run or given run_dir."""
-    if run_dir is None:
-        # Find newest run
-        home = Path.home() / ".workshop-validator"
-        runs = home / "runs"
-        if not runs.exists():
-            return "No runs found"
+NO_RUNS = "No runs found"
+FAIL_STATUSES = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
+BLOCKED_STATUSES = ("ENV_BLOCKED", "AUTH_BLOCKED")
 
-        # Find all run directories
-        run_dirs = []
-        for org_dir in runs.iterdir():
-            if org_dir.is_dir():
-                for run in org_dir.iterdir():
-                    if run.is_dir() and (run / "summary.json").exists():
-                        run_dirs.append(run)
 
-        if not run_dirs:
-            return "No runs found"
+def _clean(value) -> str:
+    """One-line text: newlines and tabs become spaces, other control and format characters go."""
+    import unicodedata
+    text = value if isinstance(value, str) else ("" if value is None else str(value))
+    text = "".join(" " if c in "\r\n\t\v\f\x85\u2028\u2029" else c for c in text)
+    return " ".join("".join(c for c in text if unicodedata.category(c) not in ("Cc", "Cf")).split())
 
-        # Get newest by modification time
-        run_dir = max(run_dirs, key=lambda p: p.stat().st_mtime)
 
-    # Read summary.json and board.json
-    summary_file = run_dir / "summary.json"
-    board_file = run_dir / "board.json"
+def _count(counts: dict, *names: str) -> int:
+    total = 0
+    for name in names:
+        value = counts.get(name, 0)
+        total += value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+    return total
 
-    if not summary_file.exists():
-        return "No summary.json found"
 
+def _read_json_dict(path: Path) -> dict | None:
     try:
-        summary = json.loads(summary_file.read_text())
-    except (OSError, ValueError):
-        return "Cannot read summary.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    return data if isinstance(data, dict) else None
 
-    # Read board.json if it exists
-    board = {}
-    if board_file.exists():
-        try:
-            board = json.loads(board_file.read_text())
-        except (OSError, ValueError):
-            pass
 
-    # Extract guide name
-    guide_name = summary.get("guide_name", "Unknown guide")
+def _newest_run(private_root: Path | None) -> Path | None:
+    runs = (Path(private_root) if private_root else Path.home() / ".workshop-validator") / "runs"
+    found = []
+    try:
+        for org_dir in runs.iterdir():
+            if not org_dir.is_dir() or org_dir.is_symlink():
+                continue
+            for run in org_dir.iterdir():
+                summary = run / "summary.json"
+                if run.is_dir() and summary.is_file():
+                    found.append((summary.stat().st_mtime, run.name, run))
+    except OSError:
+        return None
+    return max(found)[2] if found else None
 
-    # Get furthest step (last step with status != NOT_RUN)
-    furthest_step = "None"
-    if board:
-        # Walk sections to find all steps in board order
-        all_steps = []
-        for section in board.get("sections", []):
-            for exercise in section.get("exercises", []):
-                for task in exercise.get("tasks", []):
-                    for step in task.get("steps", []):
-                        all_steps.append(step)
 
-        # Find last step with status != NOT_RUN
-        for step in reversed(all_steps):
-            if step.get("status") != "NOT_RUN":
-                furthest_step = step.get("step_id", "Unknown")
-                break
+def _furthest_step(board: dict | None) -> str:
+    """step_id of the last step in board order (sections > tasks > steps) not NOT_RUN, or ""."""
+    steps = []
+    sections = board.get("sections") if board else None
+    for section in sections if isinstance(sections, list) else []:
+        tasks = section.get("tasks") if isinstance(section, dict) else None
+        for task in tasks if isinstance(tasks, list) else []:
+            items = task.get("steps") if isinstance(task, dict) else None
+            steps.extend(s for s in (items if isinstance(items, list) else []) if isinstance(s, dict))
+    for step in reversed(steps):
+        if step.get("status") != "NOT_RUN" and _clean(step.get("step_id")):
+            return _clean(step.get("step_id"))
+    return ""
 
-    # Fall back to summary stop_step if board didn't give us a furthest step
-    if furthest_step == "None" and "stop_step" in summary:
-        furthest_step = summary["stop_step"]
 
-    # Get counts from summary
-    summary_counts = summary.get("counts", {})
-    counts = {
-        "PASS": summary_counts.get("PASS", 0),
-        "NEEDS_REVIEW": summary_counts.get("NEEDS_REVIEW", 0),
-        "NOT_RUN": summary_counts.get("NOT_RUN", 0),
-        "FAIL": (summary_counts.get("UI_MISMATCH", 0) +
-                 summary_counts.get("FUNCTIONAL_FAIL", 0) +
-                 summary_counts.get("ENV_BLOCKED", 0) +
-                 summary_counts.get("AUTH_BLOCKED", 0))
-    }
+def status_line(run_dir: Path | None = None, private_root: Path | None = None) -> str:
+    """`<guide>; <furthest step>; PASS n / NEEDS_REVIEW n / FAIL n / BLOCKED n / NOT_RUN n; <failures>`.
 
-    # Get top 3 failures from summary
-    failure_list = []
-    for failure in summary.get("failures", [])[:3]:
-        step_id = failure.get("step_id", "Unknown")
-        status = failure.get("status", "Unknown")
-        note = (failure.get("note", "") or "")[:80]
-        failure_list.append(f"{step_id}: {status}: {note}")
-
-    # Build status line
-    parts = [
-        guide_name,
-        furthest_step,
-        f"PASS {counts['PASS']} / NEEDS_REVIEW {counts['NEEDS_REVIEW']} / FAIL {counts['FAIL']} / NOT_RUN {counts['NOT_RUN']}"
-    ]
-
-    if failure_list:
-        parts.append(" | ".join(failure_list))
-
+    Reads the given run folder, else the newest run under `<private_root>/runs`.
+    Returns NO_RUNS when there is no readable summary.json. Never raises.
+    """
+    if run_dir is None:
+        run_dir = _newest_run(private_root)
+    summary = _read_json_dict(Path(run_dir) / "summary.json") if run_dir else None
+    if summary is None:
+        return NO_RUNS
+    furthest = _furthest_step(_read_json_dict(Path(run_dir) / "board.json"))
+    furthest = furthest or _clean(summary.get("stop_step")) or "none"
+    counts = summary.get("counts") if isinstance(summary.get("counts"), dict) else {}
+    tally = (f"PASS {_count(counts, 'PASS')} / NEEDS_REVIEW {_count(counts, 'NEEDS_REVIEW')}"
+             f" / FAIL {_count(counts, *FAIL_STATUSES)} / BLOCKED {_count(counts, *BLOCKED_STATUSES)}"
+             f" / NOT_RUN {_count(counts, 'NOT_RUN')}")
+    parts = [_clean(summary.get("guide_name")) or "unknown guide", furthest, tally]
+    failures = summary.get("failures") if isinstance(summary.get("failures"), list) else []
+    shown = [f"{_clean(f.get('step_id'))}: {_clean(f.get('status'))}: {_clean(f.get('note'))[:80]}"
+             for f in failures if isinstance(f, dict)][:3]
+    if shown:
+        parts.append(" | ".join(shown))
     return "; ".join(parts)
 
 
@@ -190,9 +176,11 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     if args.status_line:
-        run_dir = Path(args.run_dir) if args.run_dir else None
-        print(status_line(run_dir))
-        return 0
+        run_dir = Path(args.run_dir).expanduser() if args.run_dir else None
+        private_root = Path(args.private_root).expanduser() if args.private_root else None
+        line = status_line(run_dir, private_root)
+        print(line)
+        return 1 if line == NO_RUNS else 0
 
     repo = Path(args.repo).resolve()
     team = team_kit.team_root(Path(args.private_root).expanduser() if args.private_root else None)

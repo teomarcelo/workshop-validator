@@ -1,8 +1,13 @@
-"""Tests for W-147: prove command and proportional reviewers."""
+"""Tests for W-147: the prove command and proportional reviewers.
+
+Every prove test builds a tiny synthetic git repo (m.py, test_m.py, a base and a
+head commit) in a temp folder and runs the real `team_gates.main`.
+"""
 
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -10,45 +15,156 @@ from pathlib import Path
 
 from workshop_validator import team_gates
 
+BASE_CODE = "def add(a, b):\n    return a - b\n"
+HEAD_CODE = "def add(a, b):\n    return a + b\n"
+TEST_CODE = ("import unittest\n\nimport m\n\n\nclass AddTests(unittest.TestCase):\n"
+             "    def test_add(self):\n        self.assertEqual(m.add(2, 3), 5)\n")
+SKIP_CODE = TEST_CODE + ("\n    @unittest.skip('synthetic skip')\n"
+                         "    def test_skipped(self):\n        pass\n")
+SLEEP_CODE = TEST_CODE + ("\n    def test_slow(self):\n        import time\n"
+                          "        time.sleep(30)\n")
 
-class FakeRunner:
-    """Records (cmd, cwd); answers from a list of (predicate, returncode, stdout)."""
 
-    def __init__(self, rules=()):
-        self.calls, self.rules = [], list(rules)
-
-    def __call__(self, cmd, cwd):
-        self.calls.append((list(cmd), Path(cwd)))
-        for match, code, out in self.rules:
-            if match(cmd):
-                return subprocess.CompletedProcess(cmd, code, out, "")
-        return subprocess.CompletedProcess(cmd, 0, "", "")
-
-    def find(self, *prefix):
-        return [(c, cwd) for c, cwd in self.calls if c[:len(prefix)] == list(prefix)]
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=", "-c", "commit.gpgsign=false",
+                           *args], cwd=repo, check=True, capture_output=True, text=True).stdout
 
 
 class ProveCommandTests(unittest.TestCase):
-    """Tests for prove command."""
+    """prove on synthetic repos: last line and exit code."""
 
-    def test_prove_fails_on_skipped_tests(self):
-        """prove fails when tests are skipped on head."""
-        # This test is a specification test - the code checks for skipped tests
-        # In the stderr output and fails if any are found
-        # The actual implementation uses subprocess.run with RUN_BROWSER_SMOKE=1
-        # and checks for "skipped=" in stderr
-        pass
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
 
-    def test_prove_fails_when_tests_pass_on_base(self):
-        """prove fails when tests pass on base (should fail)."""
-        # This would require complex mocking; the key is that it creates a temp worktree
-        # and runs tests there. The test is documented here for completeness.
-        pass
+    def make_repo(self, base=BASE_CODE, head=HEAD_CODE, tests=TEST_CODE):
+        _git(self.repo, "init", "-q", "-b", "trunk")
+        (self.repo / "m.py").write_text(base, encoding="utf-8")
+        _git(self.repo, "add", "m.py")
+        _git(self.repo, "commit", "-q", "-m", "base")
+        _git(self.repo, "tag", "base")
+        (self.repo / "m.py").write_text(head, encoding="utf-8")
+        (self.repo / "test_m.py").write_text(tests, encoding="utf-8")
+        _git(self.repo, "add", "m.py", "test_m.py")
+        _git(self.repo, "commit", "-q", "-m", "head")
 
-    def test_prove_fails_on_surviving_mutant(self):
-        """prove fails when a mutant survives."""
-        # Similar to above - complex temp directory setup required
-        pass
+    def mutants(self, *items) -> str:
+        path = self.root / "mutants.json"
+        path.write_text(json.dumps(list(items)), encoding="utf-8")
+        return str(path)
+
+    def prove(self, *extra, base="base"):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(out):
+            code = team_gates.main(["--repo", str(self.repo), "prove", f"--base={base}",
+                                    "--tests", "test_m", *extra])
+        lines = out.getvalue().splitlines()
+        self.assertNotIn("Traceback", out.getvalue())
+        return code, (lines[-1] if lines else ""), out.getvalue()
+
+    def test_pass_prints_head_sha_and_failing_base_names(self):
+        self.make_repo()
+        code, last, text = self.prove()
+        self.assertEqual((code, last), (0, "PROVE: PASS"))
+        head = _git(self.repo, "rev-parse", "HEAD").strip()
+        self.assertIn(f"prove: head {head}", text.splitlines())
+        self.assertIn("prove: 1 test(s) fail on base: test_m.AddTests.test_add", text.splitlines())
+
+    def test_skipped_test_fails(self):
+        self.make_repo(tests=SKIP_CODE)
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL 1 test(s) skipped on head: test_m.AddTests.test_skipped"))
+
+    def test_tests_that_pass_on_base_fail(self):
+        self.make_repo(base=HEAD_CODE)
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL tests pass on base"))
+
+    def test_killed_mutant_passes(self):
+        self.make_repo()
+        mutants = self.mutants({"file": "m.py", "find": "a + b", "replace": "a * b"})
+        code, last, text = self.prove("--mutants", mutants)
+        self.assertEqual((code, last), (0, "PROVE: PASS"))
+        self.assertIn("prove: mutant 1 killed by test_m.AddTests.test_add", text.splitlines())
+
+    def test_surviving_mutant_fails(self):
+        self.make_repo()
+        mutants = self.mutants({"file": "m.py", "find": "a + b", "replace": "b + a"})
+        code, last, _ = self.prove("--mutants", mutants)
+        self.assertEqual((code, last), (1, "PROVE: FAIL mutant survived: 1"))
+
+    def test_import_only_mutant_fails(self):
+        self.make_repo()
+        mutants = self.mutants({"file": "m.py", "find": "def add",
+                                "replace": "import no_such_synthetic_module\ndef add"})
+        code, last, _ = self.prove("--mutants", mutants)
+        self.assertEqual((code, last), (1, "PROVE: FAIL mutant broke import: 1"))
+
+    def test_mutant_that_does_not_apply_fails(self):
+        self.make_repo()
+        mutants = self.mutants({"file": "m.py", "find": "not in the file", "replace": "x"})
+        code, last, _ = self.prove("--mutants", mutants)
+        self.assertEqual((code, last), (1, "PROVE: FAIL mutant did not apply: 1"))
+
+    def test_outside_mutant_paths_fail_and_write_nothing(self):
+        self.make_repo()
+        outside = self.root / "outside.txt"
+        outside.write_bytes(b"a + b\n")
+        for name in ("../outside.txt", str(outside), "untracked.py"):
+            with self.subTest(name=name):
+                mutants = self.mutants({"file": name, "find": "a + b", "replace": "MUTATED"})
+                code, last, text = self.prove("--mutants", mutants)
+                self.assertEqual((code, last), (1, "PROVE: FAIL bad mutant path"))
+                self.assertEqual(outside.read_bytes(), b"a + b\n")
+                self.assertNotIn("prove: head", text)  # rejected before any phase ran
+
+    def test_uncommitted_changes_fail(self):
+        self.make_repo()
+        (self.repo / "m.py").write_text(HEAD_CODE + "# edit\n", encoding="utf-8")
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL uncommitted changes"))
+
+    def test_untracked_file_fails(self):
+        self.make_repo()
+        (self.repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+        code, last, _ = self.prove()
+        self.assertEqual((code, last), (1, "PROVE: FAIL uncommitted changes"))
+
+    def test_bad_base_fails_without_traceback(self):
+        self.make_repo()
+        code, last, _ = self.prove(base="no-such-ref")
+        self.assertEqual(code, 1)
+        self.assertTrue(last.startswith("PROVE: FAIL git rev-parse failed"), last)
+        code, last, _ = self.prove(base="--output=x")
+        self.assertEqual((code, last), (1, "PROVE: FAIL bad --base"))
+        self.assertFalse((self.repo / "x").exists())
+
+    def test_timeout_fails(self):
+        self.make_repo(tests=SLEEP_CODE)
+        code, last, _ = self.prove("--timeout", "3")
+        self.assertEqual((code, last), (1, "PROVE: FAIL timeout"))
+
+    def test_prove_command_never_raises_on_missing_repo(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            ok = team_gates.prove_command(self.root / "missing", "base", ["test_m"])
+        self.assertFalse(ok)
+        self.assertTrue(out.getvalue().splitlines()[-1].startswith("PROVE: FAIL"))
+
+    def test_merged_tree_gates_keep_the_venv_python(self):
+        calls = []
+
+        def runner(cmd, cwd):
+            calls.append(list(cmd))
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            team_gates.merged_tree_gates(self.repo, "0" * 40, runner=runner)
+        venv = str(self.repo / ".venv" / "bin" / "python")
+        self.assertIn([venv, "-m", "workshop_validator.public_safety"], calls)
 
 
 class RequiredReviewersTests(unittest.TestCase):
@@ -110,30 +226,6 @@ class RequiredReviewersTests(unittest.TestCase):
                 self.assertIn("privacy-reviewer", roles, f"Expected privacy-reviewer for {changed}")
             else:
                 self.assertNotIn("privacy-reviewer", roles, f"Did not expect privacy-reviewer for {changed}")
-
-
-# Mutant tests
-class MutantTests(unittest.TestCase):
-    """Tests that fail when specific guards are removed."""
-
-    def test_mutant_skip_check_removed(self):
-        """Removing skip check in prove allows skipped tests."""
-        # This test ensures the skip check is present
-        diff_output = "Ran 5 tests\nskipped=1"
-        self.assertIn("skipped=", diff_output)
-        # The actual prove code checks for this
-
-    def test_mutant_base_run_check_removed(self):
-        """Removing base run check allows tests that pass on base."""
-        # The prove command must run tests on base and ensure they fail
-        # This is tested by the prove_command logic
-        pass
-
-    def test_mutant_privacy_reviewer_dropped(self):
-        """Removing privacy-reviewer from matrix allows privacy files without review."""
-        roles = team_gates.required_reviewers(["workshop_validator/report.py"])
-        # Must include privacy-reviewer
-        self.assertIn("privacy-reviewer", roles)
 
 
 if __name__ == "__main__":
