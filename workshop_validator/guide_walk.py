@@ -44,6 +44,16 @@ PASSWORD_NOTE = (
 WELCOME = "Hello! I'm a simple agent here to say hi."
 HELLO = "Hello there!"
 _LOADING_TEXT = re.compile(r"\bLoading\b|Loading assistant|Nothing here yet", re.I)
+# Browser network error indicators for ENV_BLOCKED detection
+_BROWSER_ERROR_INDICATORS = (
+    "can't be reached",
+    "could not be found",
+    "err_name_not_resolved",
+    "err_connection_refused",
+    "err_connection_timed_out",
+    "err_internet_disconnected",
+    "server ip address",
+)
 
 
 class StillLoading(Exception):
@@ -6651,7 +6661,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             is_error = any(indicator in page_text_lower for indicator in (
                 "error", "404", "insufficient privileges", "access denied",
                 "permission denied", "unauthorized"
-            ))
+            ) + _BROWSER_ERROR_INDICATORS)
 
             if not is_error:
                 # Check if target name appears in new URL or page heading/title using whole-token matching
@@ -6805,7 +6815,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                     is_error = any(indicator in page_text_lower for indicator in (
                         "error", "404", "insufficient privileges", "access denied",
                         "permission denied", "unauthorized"
-                    ))
+                    ) + _BROWSER_ERROR_INDICATORS)
 
                     if not is_error:
                         # Only a real change counts: a new URL path (a query or fragment
@@ -7306,6 +7316,15 @@ def _freeze_result(state: WalkState, step: GuideStep, target: str, suggestion: s
         return CheckResult(
             "ENV_BLOCKED",
             f'"{modal_title}" modal covered the page; the guide does not mention it; the walk did not close it.',
+            (),
+            freeze=True,
+        )
+    # Check if a browser network error page is shown
+    page_text_lower = norm(_read_page_text(state.page))
+    if any(indicator in page_text_lower for indicator in _BROWSER_ERROR_INDICATORS):
+        return CheckResult(
+            "ENV_BLOCKED",
+            f"Browser error page: {_snippet(page_text_lower, limit=100)}",
             (),
             freeze=True,
         )
