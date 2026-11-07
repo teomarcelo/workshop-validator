@@ -1,6 +1,6 @@
 ---
 name: validate-guide
-description: Validate a Salesforce workshop guide PDF end to end - run it on the current verification org, triage the first failure, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
+description: Validate a Salesforce workshop guide PDF end to end - run it on the current verification org, triage failures, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
 model: sonnet
 ---
 
@@ -27,7 +27,7 @@ The lock prevents concurrent runs.
 - At preflight, run `.venv/bin/python -m workshop_validator.lessons --rules` and paste
   the rules into the prompts of failure-triager, check-fixer and rule-auditor.
 - **Team failures are lessons too.** Whenever test-runner is RED, rule-auditor
-  vetoes, the same first failure repeats, an agent errors or returns nothing
+  vetoes, an agent errors or returns nothing
   usable, or a command in this skill fails, record it at once:
   `.venv/bin/python -m workshop_validator.lessons --record team --title "<agent/phase>" --cause "<what went wrong>" --fix "<what you did>" --never "<rule>"`.
   If the failure is in this skill or an agent file itself, say so in the final reply
@@ -41,15 +41,13 @@ final report when the run ends. Each report names the org instance and links
 to this guide's latest report on every other instance.
 
 ## Budgets
-- At most 3 fix iterations per invocation.
-- Stop on the same first failure twice in a row, on AUTH_BLOCKED, or when
-  `automate` exits 2 (refused / all orgs used).
+- At most 3 runs per invocation.
+- At most 6 guide runs per guide per day across sessions (producer rule: the producer checks this in preflight by counting today's runs in `~/.workshop-validator/reports/history.json`).
+- Stop when a run shows no change from the last one (same counts and the same failure set), on AUTH_BLOCKED, or when `automate` exits 2 (refused / all orgs used).
 - Never retry around HTTP 429 (Option A). Never use more than one new org per iteration.
 
 ## Loop
-1. **Preflight.** `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`;
-   test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules
-   (`lessons --rules`).
+1. **Preflight.** Fast-forward main with `git pull --ff-only` on main only. Read the producer claim time (`claimed` in `~/.workshop-validator/team/producer-live`, written by `team_kit claim` at session start). If `git log -1 --format=%cI -- .claude/agents/` (on main, after the pull) is later than the claim time, stop: start a fresh session and claim again. `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`; test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules (`lessons --rules`).
 2. **Run.** `team_state advance --phase run`. run-operator (background) with the PDF.
    **Never leave a run unattended:** while waiting, `team_state heartbeat` every
    2–3 minutes. Read its exit code and summary.
@@ -64,9 +62,7 @@ to this guide's latest report on every other instance.
    - `REAL` → Triage as normal.
    - `UNCLEAR` → mark as NEEDS_REVIEW, never PASS.
    - `CONFIRMED_PASS` → no action.
-4. **Triage.** `team_state advance --phase triage`. failure-triager on the run dir (or
-   the step-verifier verdict). If it suspects a rename, ask salesforce-doc-validator
-   (Sonnet unless ambiguous) to confirm with current docs.
+4. **Triage.** `team_state advance --phase triage`. After a run, step-verifier judges every non-PASS and suspect row first. Then failure-triager writes one brief per distinct root cause, not only for the first failure. If a rename is suspected, ask salesforce-doc-validator (Sonnet unless ambiguous) to confirm with current docs. The producer starts one executor per brief in parallel worktrees, up to 4 at a time, and merges them all before the next run.
 5. **Decide by cause.**
    - `environment`: no code change; `team_state finish --outcome <outcome>`; record and finish as INCOMPLETE.
    - `guide-mismatch` confirmed by docs: propose an alias entry (guide, screen,
@@ -89,7 +85,7 @@ to this guide's latest report on every other instance.
    `.venv/bin/python -m workshop_validator.step_board --history ~/.workshop-validator`.
    The browser already shows the report; it reloads on its own only while running, so
    `open <run_dir>/report.html` once more after re-rendering.
-10. **Publish** (only if code changed): `team_state advance --phase publish`. safety-scanner
+10. **Publish** (only if code changed): `team_state advance --phase publish`. safety-scanner (until P2 merges)
    must be CLEAR, then git-publisher with the changed paths, the test result, the
    auditor verdict and the outcome counts. `team_state log --agent git-publisher --action pr-created --link <url>`, re-render.
 11. `team_state finish --outcome <outcome>`.

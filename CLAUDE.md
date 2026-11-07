@@ -34,6 +34,7 @@ The step rules are shared with Cursor; read them, they are binding:
   steps are never PASS. A still-loading page is not a failure (poll ~2 s, up to ~90 s).
 - Behavioral checks: before-state, literal action, after-state, downstream.
   A step is called redundant only with that proof; cosmetics stay separate.
+- If proving a PASS for a step needs more than one review round, stop. The step stays NEEDS_REVIEW, step-verifier judges it, and the walk moves on. Never weaken PASS evidence to make progress.
 
 ## Team only
 - Guide runs, triage and validator fixes happen only through `/validate-guide`
@@ -62,13 +63,14 @@ The step rules are shared with Cursor; read them, they are binding:
 - Private memory lives in `~/.workshop-validator/team/` (register, plan,
   standups, briefs, reviews, ledger, dashboard). It is never committed.
 - Escapes: when the owner finds a mistake first, log it, name the missing
-  gate, add the test, hook or role that would have caught it, then fix it.
+  gate, add the test, hook or role that would have caught it, then fix it. Security, privacy and false-PASS escapes are fixed in the same turn. Other escapes are logged and wait on a list (see tooling freeze below).
 - A fresh session reads CLAUDE.md, the newest standup's restart block and
   `progress/now.json`. At about 40 percent context: restart block, commit,
   `team_kit release`, clear. Never clear while an agent you started runs.
 - Models: producer Opus; executors Sonnet, effort high; reviewers Sonnet, or
   Opus for security, privacy, compliance and shared code. Fresh agent per
   task; none resumed past about 300k tokens.
+- Tooling freeze: no new team or process tooling PRs unless the tooling blocks a guide run. Exempt: security, privacy and false-PASS escapes. Other escapes are logged with `lessons --record team` and a register row, and wait on a list.
 
 ### Ownership map (one owner per folder; shared ones change only by reviewed PR)
 | Path | Owner |

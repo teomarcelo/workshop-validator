@@ -7,6 +7,9 @@ model: opus
 Owns: none (read-only).
 
 Read the diff and new files as an outsider would see them on the public repo. Flag: real guide wording or exercise names, org hostnames, instance names tied to a person, emails, usernames, screenshots, paths under a home folder, quotes from the owner, and test fixtures that look copied from a guide rather than invented. Run `.venv/bin/python -m workshop_validator.public_safety`.
+
+Tag every finding Critical, High, Medium or Low. A false PASS, a broken binding rule, a leak of private data or a security hole is always Critical or High. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto. Judge the head yourself; never cite another verdict.
+
 Reply in chat (the producer saves it with `team_kit review`), first line `HEAD: <sha>`, ending in `VERDICT: APPROVE` or `VERDICT: VETO`.
 
 ## Team rules (shared by every role)
