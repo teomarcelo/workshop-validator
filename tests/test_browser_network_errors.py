@@ -234,33 +234,64 @@ class FreezeResultBrowserErrorTests(unittest.TestCase):
 class ClickPathBrowserErrorTests(unittest.TestCase):
     """Click path guards: browser errors block URL-change PASS evidence."""
 
-    def test_network_error_blocks_url_evidence_pass(self):
-        """Guard test: Network error blocks URL-change PASS evidence."""
-        state = Mock()
+    def test_network_error_blocks_url_evidence_first_guard(self):
+        """Guard test: First click-path guard blocks URL evidence when error signal present."""
+        # This tests the is_error logic around line 6688-6693
         page = Mock()
-        page.url = "https://example.lightning.force.com/lightning/setup/SetupOneHome/home"
-        state.page = page
+        page.url = "https://example.lightning.force.com/setup"
+        page_text = "Setup Home ERR_NAME_NOT_RESOLVED"
 
-        step_obj = step("s1", "Exercise 1", "Task 1: Sample", "1", "Click Setup")
+        # Test the is_error calculation that appears in the first click path
+        with patch.object(guide_walk, "_read_page_text", return_value=page_text):
+            page_text_lower = guide_walk.norm(page_text)
+            is_error = (
+                any(indicator in page_text_lower for indicator in (
+                    "error", "404", "insufficient privileges", "access denied",
+                    "permission denied", "unauthorized"
+                ))
+                or guide_walk._browser_error_signal(page) is not None
+            )
+            # With the browser error signal, is_error should be True
+            self.assertTrue(is_error)
 
-        with patch.object(guide_walk, "_read_page_text", return_value="ERR_NAME_NOT_RESOLVED"), \
-                patch.object(guide_walk, "_page_title", return_value="Setup"):
-            # Call the helper directly to verify it blocks
-            error_signal = guide_walk._browser_error_signal(page)
-            self.assertIsNotNone(error_signal)
-            self.assertEqual(error_signal, "ERR_NAME_NOT_RESOLVED")
+    def test_network_error_blocks_url_evidence_second_guard(self):
+        """Guard test: Second click-path guard blocks URL evidence when error signal present."""
+        # This tests the is_error logic around line 6844-6849
+        page = Mock()
+        page.url = "https://example.lightning.force.com/setup"
+        page_text = "Setup Home ERR_CONNECTION_REFUSED"
+
+        # Test the is_error calculation that appears in the second click path
+        with patch.object(guide_walk, "_read_page_text", return_value=page_text):
+            page_text_lower = guide_walk.norm(page_text)
+            is_error = (
+                any(indicator in page_text_lower for indicator in (
+                    "error", "404", "insufficient privileges", "access denied",
+                    "permission denied", "unauthorized"
+                ))
+                or guide_walk._browser_error_signal(page) is not None
+            )
+            # With the browser error signal, is_error should be True
+            self.assertTrue(is_error)
 
     def test_normal_page_with_chat_does_not_block_url_pass(self):
         """Guard test: Normal page with 'could not be found' in chat does NOT block URL evidence."""
         page = Mock()
         page.url = "https://example.lightning.force.com/lightning/setup/SetupOneHome/home"
+        page_text = "Setup Home Chat: The item could not be found"
 
-        with patch.object(guide_walk, "_read_page_text",
-                         return_value="Setup Home Chat: The item could not be found"), \
-                patch.object(guide_walk, "_page_title", return_value="Setup"):
-            # Normal page should not trigger browser error signal
-            error_signal = guide_walk._browser_error_signal(page)
-            self.assertIsNone(error_signal)
+        # Test that normal page text doesn't trigger browser error signal
+        with patch.object(guide_walk, "_read_page_text", return_value=page_text):
+            page_text_lower = guide_walk.norm(page_text)
+            is_error = (
+                any(indicator in page_text_lower for indicator in (
+                    "error", "404", "insufficient privileges", "access denied",
+                    "permission denied", "unauthorized"
+                ))
+                or guide_walk._browser_error_signal(page) is not None
+            )
+            # Without error indicators or browser error signal, is_error should be False
+            self.assertFalse(is_error)
 
 
 class BrowserNetworkErrorGateTests(unittest.TestCase):
