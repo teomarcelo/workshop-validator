@@ -148,10 +148,11 @@ class RunOperatorEmailRedactionTests(unittest.TestCase):
         run_operator_file = AGENTS_DIR / "run-operator.md"
         text = run_operator_file.read_text(encoding="utf-8")
 
-        # Extract the sed expression from the file
-        # Look for sed -E 's/...pattern.../[email]/g'
-        sed_match = re.search(r"sed -E 's/([^']+)/\[email\]/g'", text)
-        self.assertIsNotNone(sed_match, "sed expression not found in run-operator.md")
+        # Extract the sed expression from the run line
+        cmd = extract_run_command(text)
+        # Look for sed -E 's/...pattern.../[email]/g' after tail -5 "$D/run.log" |
+        sed_match = re.search(r"tail -5 \"\$D/run\.log\"\s*\|\s*sed -E 's/([^']+)/\[email\]/g'", cmd)
+        self.assertIsNotNone(sed_match, "sed expression not found after tail -5 in run command")
         sed_pattern = sed_match.group(1)
 
         # Test with synthetic email addresses
@@ -202,10 +203,11 @@ class RunOperatorRunLinePinsTests(unittest.TestCase):
     def test_exactly_one_automate_command(self):
         """run-operator.md must have exactly one backticked shell command running automate."""
         text = self.source()
-        code_blocks = re.findall(r'`([^`]+)`', text, re.DOTALL)
-        automate_commands = [block for block in code_blocks if 'workshop_validator.automate' in block]
-        self.assertEqual(len(automate_commands), 1,
-                        f"Expected exactly one backticked automate command, found {len(automate_commands)}")
+        # Call the helper; it will raise if not exactly one
+        try:
+            extract_run_command(text)
+        except ValueError as e:
+            self.fail(str(e))
 
     def test_mktemp_guard_on_run_line(self):
         """The mktemp -d assignment must have the guard on the run line."""
@@ -247,23 +249,35 @@ class RunOperatorRunLinePinsTests(unittest.TestCase):
                        "chmod 700 must appear before automate call")
 
     def test_log_tail_redaction(self):
-        """The tail -5 log output must be piped through the redaction sed on the run line."""
+        """The tail -5 log output must be piped directly through the full redaction sed on the run line."""
         cmd = self.run_command()
-        # Look for: tail -5 "$D/run.log" | sed -E 's/.../[email]/g'
-        redaction_pattern = r'tail -5 "\$D/run\.log"\s*\|\s*sed -E'
+        # Look for: tail -5 "$D/run.log" | sed -E 's/.../[email]/g' with the exact expression
+        redaction_pattern = r"tail -5 \"\$D/run\.log\"\s*\|\s*sed -E 's/[^']+/\[email\]/g'"
         self.assertIsNotNone(re.search(redaction_pattern, cmd),
-                            "run line missing log tail redaction: tail -5 piped to sed")
+                            "run line missing log tail redaction: tail -5 piped directly to full sed expression")
+        # run.log may appear only twice: as the 2> target of automate and in tail -5
+        run_log_count = cmd.count('run.log')
+        self.assertEqual(run_log_count, 2, f"run.log must appear exactly twice on run line, found {run_log_count}")
 
-    def test_no_unguarded_mktemp(self):
-        """There must be no second unguarded mktemp -d on the run line."""
+    def test_exactly_one_temp_folder_assignment(self):
+        """The run line must have exactly one D= assignment and exactly one mktemp."""
         cmd = self.run_command()
-        # Find all mktemp -d occurrences
-        mktemp_matches = list(re.finditer(r'mktemp -d', cmd))
-        # Each must be followed by ) || { within a few chars
-        for match in mktemp_matches:
-            after = cmd[match.end():match.end()+20]
-            self.assertIn(') ||', after,
-                         f"Found unguarded mktemp -d at position {match.start()}")
+        # Count D= assignments
+        d_assignments = len(re.findall(r'\bD=', cmd))
+        self.assertEqual(d_assignments, 1, f"run line must have exactly one D= assignment, found {d_assignments}")
+        # Count mktemp -d
+        mktemp_count = len(re.findall(r'mktemp -d', cmd))
+        self.assertEqual(mktemp_count, 1, f"run line must have exactly one mktemp -d, found {mktemp_count}")
+
+    def test_temp_folder_guard_exact_form(self):
+        """The D= assignment must be D=$(mktemp -d) || { ...; exit 2; }."""
+        cmd = self.run_command()
+        # Pin the exact form
+        guard_pattern = r'D=\$\(mktemp -d\)\s*\|\|\s*\{\s*[^}]*exit 2[^}]*\}'
+        self.assertIsNotNone(re.search(guard_pattern, cmd),
+                            "D= assignment must be: D=$(mktemp -d) || { ...; exit 2; }")
+        # || true is not a guard
+        self.assertNotIn('|| true', cmd, "|| true is not a valid guard")
 
 
 class RunOperatorFileAccessPinsTests(unittest.TestCase):
@@ -272,47 +286,137 @@ class RunOperatorFileAccessPinsTests(unittest.TestCase):
     def source(self):
         return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
 
-    def test_verification_orgs_test_f_only(self):
-        """verification-orgs.json must be checked only with test -f."""
+    def test_verification_orgs_mentions_allowed_only(self):
+        """verification-orgs.json mentions must be test -f with path in same backticks, or sentence with never."""
         text = self.source()
-        # Must mention checking with test -f
-        self.assertIn("test -f", text, "missing test -f check")
-        self.assertIn("verification-orgs.json", text, "missing verification-orgs.json reference")
-        # Pin the exact instruction
-        self.assertIn('~/.workshop-validator/verification-orgs.json', text)
-        self.assertIn('test -f', text)
+        filename = "verification-orgs.json"
+        # Find all mentions of the filename
+        mentions = []
+        start = 0
+        while True:
+            pos = text.find(filename, start)
+            if pos == -1:
+                break
+            mentions.append(pos)
+            start = pos + 1
 
-    def test_never_cat_verification_orgs(self):
-        """run-operator.md must not cat, head, tail, less or open verification-orgs.json."""
-        text = self.source()
-        # Check for commands that would read the file
-        forbidden = ['cat ~/.workshop-validator/verification-orgs.json',
-                    'head ~/.workshop-validator/verification-orgs.json',
-                    'tail ~/.workshop-validator/verification-orgs.json',
-                    'less ~/.workshop-validator/verification-orgs.json',
-                    'open(~/.workshop-validator/verification-orgs.json',
-                    'jq ~/.workshop-validator/verification-orgs.json']
-        for cmd in forbidden:
-            self.assertNotIn(cmd, text, f"run-operator.md must not contain: {cmd}")
+        self.assertGreater(len(mentions), 0, f"no mentions of {filename} found")
 
-    def test_never_read_browser_state(self):
-        """run-operator.md must never read any browser-state.json file."""
-        text = self.source()
-        # Must mention not reading browser-state.json
-        self.assertIn('browser-state.json', text)
-        # Check it says never read
-        browser_state_context = text[max(0, text.find('browser-state.json')-200):
-                                      text.find('browser-state.json')+200]
-        self.assertIn('Never', browser_state_context,
-                     "Should have 'Never' near browser-state.json")
+        # Each mention must be one of two allowed forms
+        for pos in mentions:
+            # Find the sentence containing this mention (look for period+space or newline)
+            # Find sentence start
+            sentence_start = 0
+            for i in range(pos - 1, max(0, pos - 500), -1):
+                if text[i] == '.' and (i + 1 < len(text) and text[i + 1] in ' \n'):
+                    sentence_start = i + 1
+                    break
+                if text[i] == '\n' and (i == 0 or text[i - 1] == '\n'):
+                    sentence_start = i + 1
+                    break
+            # Find sentence end
+            sentence_end = len(text)
+            for i in range(pos, min(len(text), pos + 500)):
+                if text[i] == '.' and (i + 1 >= len(text) or text[i + 1] in ' \n'):
+                    sentence_end = i + 1
+                    break
+            sentence = text[sentence_start:sentence_end].strip()
 
-    def test_no_jq_on_sensitive_files(self):
-        """run-operator.md must not use jq on verification-orgs.json or browser-state.json."""
+            # Check if sentence contains "never" (form 2)
+            has_never = 'never' in sentence.lower()
+
+            # Check if this mention is with test -f (form 1)
+            # The path and test -f should be in the same backticked command,
+            # or both present in the same sentence (instruction context)
+            text_before = text[:pos]
+            backticks_before = text_before.count('`')
+            is_in_backticks = (backticks_before % 2 == 1)
+            with_test_f = False
+
+            if is_in_backticks:
+                # Check if test -f is in the same backticked section
+                last_backtick = text_before.rfind('`')
+                text_after = text[pos:]
+                next_backtick = text_after.find('`')
+                self.assertNotEqual(next_backtick, -1, f"unclosed backtick before position {pos}")
+                backticked = text[last_backtick:pos + next_backtick + 1]
+                if 'test -f' in backticked:
+                    with_test_f = True
+                # Also check if test -f appears in the same sentence
+                elif 'test -f' in sentence:
+                    with_test_f = True
+
+            # Must satisfy at least one form
+            self.assertTrue(
+                with_test_f or has_never,
+                f"{filename} at position {pos} must be either: (1) in backticked command with test -f, or (2) in sentence with 'never'. Sentence: {sentence[:200]}"
+            )
+
+    def test_browser_state_mentions_allowed_only(self):
+        """browser-state.json mentions must be test -f with path in same backticks, or sentence with never."""
         text = self.source()
-        # No jq commands on these files
-        self.assertNotIn('jq', text.split('verification-orgs.json')[0] +
-                        (text.split('verification-orgs.json')[1] if 'verification-orgs.json' in text else ''),
-                        "jq should not be used on verification-orgs.json")
+        filename = "browser-state.json"
+        # Find all mentions of the filename
+        mentions = []
+        start = 0
+        while True:
+            pos = text.find(filename, start)
+            if pos == -1:
+                break
+            mentions.append(pos)
+            start = pos + 1
+
+        self.assertGreater(len(mentions), 0, f"no mentions of {filename} found")
+
+        # Each mention must be one of two allowed forms
+        for pos in mentions:
+            # Find the sentence containing this mention (look for period+space or newline)
+            # Find sentence start
+            sentence_start = 0
+            for i in range(pos - 1, max(0, pos - 500), -1):
+                if text[i] == '.' and (i + 1 < len(text) and text[i + 1] in ' \n'):
+                    sentence_start = i + 1
+                    break
+                if text[i] == '\n' and (i == 0 or text[i - 1] == '\n'):
+                    sentence_start = i + 1
+                    break
+            # Find sentence end
+            sentence_end = len(text)
+            for i in range(pos, min(len(text), pos + 500)):
+                if text[i] == '.' and (i + 1 >= len(text) or text[i + 1] in ' \n'):
+                    sentence_end = i + 1
+                    break
+            sentence = text[sentence_start:sentence_end].strip()
+
+            # Check if sentence contains "never" (form 2)
+            has_never = 'never' in sentence.lower()
+
+            # Check if this mention is with test -f (form 1)
+            # The path and test -f should be in the same backticked command,
+            # or both present in the same sentence (instruction context)
+            text_before = text[:pos]
+            backticks_before = text_before.count('`')
+            is_in_backticks = (backticks_before % 2 == 1)
+            with_test_f = False
+
+            if is_in_backticks:
+                # Check if test -f is in the same backticked section
+                last_backtick = text_before.rfind('`')
+                text_after = text[pos:]
+                next_backtick = text_after.find('`')
+                self.assertNotEqual(next_backtick, -1, f"unclosed backtick before position {pos}")
+                backticked = text[last_backtick:pos + next_backtick + 1]
+                if 'test -f' in backticked:
+                    with_test_f = True
+                # Also check if test -f appears in the same sentence
+                elif 'test -f' in sentence:
+                    with_test_f = True
+
+            # Must satisfy at least one form
+            self.assertTrue(
+                with_test_f or has_never,
+                f"{filename} at position {pos} must be either: (1) in backticked command with test -f, or (2) in sentence with 'never'. Sentence: {sentence[:200]}"
+            )
 
 
 class RunOperatorFrontMatterPinsTests(unittest.TestCase):
@@ -320,6 +424,21 @@ class RunOperatorFrontMatterPinsTests(unittest.TestCase):
 
     def source(self):
         return (AGENTS_DIR / "run-operator.md").read_text(encoding="utf-8")
+
+    def test_front_matter_keys_exactly_allowed_set(self):
+        """Front matter keys must be exactly the allowed set from main."""
+        text = self.source()
+        # Extract front matter
+        front_matter_match = re.match(r'^---\n(.*?)\n---', text, re.DOTALL)
+        self.assertIsNotNone(front_matter_match, "no front matter found")
+        front_matter = front_matter_match.group(1)
+        # Parse keys
+        key_pattern = re.compile(r'^(\w+):', re.MULTILINE)
+        keys = set(key_pattern.findall(front_matter))
+        # Allowed keys from main
+        allowed_keys = {'name', 'description', 'tools', 'model'}
+        self.assertEqual(keys, allowed_keys,
+                        f"front matter keys must be exactly {allowed_keys}, found {keys}")
 
     def test_tools_exactly_bash(self):
         """Front matter tools must be exactly 'Bash'."""
@@ -341,6 +460,28 @@ class RunOperatorFrontMatterPinsTests(unittest.TestCase):
         # Pin the exact sentence
         self.assertIn("Do not retry on your own", text,
                      "missing 'Do not retry on your own' instruction")
+
+    def test_gate_instruction_pinned(self):
+        """run-operator.md must contain the gate instruction."""
+        text = self.source()
+        # Pin the exact sentence
+        self.assertIn("Never change the gate yourself", text,
+                     "missing 'Never change the gate yourself' instruction")
+
+    def test_no_gate_flags_anywhere(self):
+        """run-operator.md must not contain --reset-gate or --keep-org anywhere."""
+        text = self.source()
+        self.assertNotIn("--reset-gate", text,
+                        "must not contain --reset-gate flag")
+        self.assertNotIn("--keep-org", text,
+                        "must not contain --keep-org flag")
+
+    def test_log_text_limit_pinned(self):
+        """run-operator.md must contain the log text limit instruction."""
+        text = self.source()
+        # Pin the exact sentence
+        self.assertIn("Never return step text from the log beyond those lines", text,
+                     "missing 'Never return step text from the log beyond those lines' instruction")
 
 
 if __name__ == "__main__":
