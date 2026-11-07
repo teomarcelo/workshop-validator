@@ -632,14 +632,16 @@ class SaveReviewTests(unittest.TestCase):
             with self.assertRaises(ValueError) as cm:
                 team_kit.save_review(team, 3, "code-reviewer", OID, "This looks good but no verdict")
             self.assertIn("VERDICT", str(cm.exception))
-            # Wrong format (lowercase verdict)
+            # Wrong format (missing "VERDICT:" keyword)
             with self.assertRaises(ValueError):
-                team_kit.save_review(team, 3, "code-reviewer", OID, "verdict: approve")
-            # Valid verdicts should work
+                team_kit.save_review(team, 3, "code-reviewer", OID, "just approve with no keyword")
+            # Valid verdicts should work (both uppercase and lowercase)
             roles = ["code-reviewer", "safety-scanner", "rule-auditor", "security-reviewer", "privacy-reviewer"]
             verdicts = ["APPROVE", "VETO", "CLEAR", "BLOCK", "REQUEST_CHANGES"]
             for i, verdict in enumerate(verdicts):
                 team_kit.save_review(team, i + 10, roles[i % len(roles)], OID, f"VERDICT: {verdict}\nGood")
+            # Lowercase verdict should also work (case-insensitive)
+            team_kit.save_review(team, 50, "code-reviewer", OID, "VERDICT: approve\nGood")
 
     def test_cli_reads_stdin(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2099,11 +2101,12 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """A VETO followed by an APPROVE for the same head blocks the merge."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            full_head = "a" * 40
             # First save a VETO
-            team_kit.save_review(Path(tmp), 10, "code-reviewer", "abc1234", "Found issues\nVERDICT: VETO")
+            team_kit.save_review(Path(tmp), 10, "code-reviewer", full_head, "Found issues\nVERDICT: VETO")
             # Then save an APPROVE for the same head
-            team_kit.save_review(Path(tmp), 10, "code-reviewer", "abc1234", "Looks good\nVERDICT: APPROVE")
-            verdicts = review_verdicts(reviews / "reviews", 10, "abc1234")
+            team_kit.save_review(Path(tmp), 10, "code-reviewer", full_head, "Looks good\nVERDICT: APPROVE")
+            verdicts = review_verdicts(reviews / "reviews", 10, full_head)
             # Should be blocked due to the earlier VETO
             self.assertIn("VETO", verdicts.get("code-reviewer", ""))
             self.assertNotEqual(verdicts.get("code-reviewer"), "APPROVE")
@@ -2112,11 +2115,12 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """An APPROVE followed by a late VETO for the same head blocks the merge."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            full_head = "b" * 40
             # First save an APPROVE
-            team_kit.save_review(Path(tmp), 11, "code-reviewer", "def5678", "Good\nVERDICT: APPROVE")
+            team_kit.save_review(Path(tmp), 11, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
             # Then save a VETO for the same head
-            team_kit.save_review(Path(tmp), 11, "code-reviewer", "def5678", "Wait, found bug\nVERDICT: VETO")
-            verdicts = review_verdicts(reviews / "reviews", 11, "def5678")
+            team_kit.save_review(Path(tmp), 11, "code-reviewer", full_head, "Wait, found bug\nVERDICT: VETO")
+            verdicts = review_verdicts(reviews / "reviews", 11, full_head)
             # Should be blocked due to the later VETO
             self.assertIn("VETO", verdicts.get("code-reviewer", ""))
 
@@ -2124,17 +2128,19 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """A VETO with a valid SUPERSEDES allows the merge to proceed."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            full_head = "c" * 40
             # First save a VETO
-            team_kit.save_review(Path(tmp), 12, "code-reviewer", "abc9012", "Issues\nVERDICT: VETO")
-            # Read the timestamp from history
+            team_kit.save_review(Path(tmp), 12, "code-reviewer", full_head, "Issues\nVERDICT: VETO")
+            # Read the timestamp from history (now JSON Lines)
             history = (reviews / "reviews" / "pr-12-code-reviewer.history.md").read_text()
-            ts_line = [line for line in history.splitlines() if line.startswith("TIMESTAMP:")][0]
-            timestamp = ts_line.split(":", 1)[1].strip()
+            import json
+            rec = json.loads(history.strip())
+            timestamp = rec["ts"]
             # Then save an APPROVE with supersedes
-            team_kit.save_review(Path(tmp), 12, "code-reviewer", "abc9012",
+            team_kit.save_review(Path(tmp), 12, "code-reviewer", full_head,
                                "Fixed now\nVERDICT: APPROVE",
                                supersedes_ts=timestamp, supersedes_reason="Issues were fixed in latest commit")
-            verdicts = review_verdicts(reviews / "reviews", 12, "abc9012")
+            verdicts = review_verdicts(reviews / "reviews", 12, full_head)
             # Should not be blocked because the VETO was superseded
             self.assertEqual(verdicts.get("code-reviewer"), "APPROVE")
 
@@ -2142,13 +2148,14 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """A SUPERSEDES with a wrong timestamp does not clear the VETO."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            full_head = "d" * 40
             # Save a VETO
-            team_kit.save_review(Path(tmp), 13, "code-reviewer", "def3456", "Bad\nVERDICT: VETO")
+            team_kit.save_review(Path(tmp), 13, "code-reviewer", full_head, "Bad\nVERDICT: VETO")
             # Save an APPROVE with wrong timestamp
-            team_kit.save_review(Path(tmp), 13, "code-reviewer", "def3456",
+            team_kit.save_review(Path(tmp), 13, "code-reviewer", full_head,
                                "Fixed\nVERDICT: APPROVE",
                                supersedes_ts="2026-01-01T00:00:00", supersedes_reason="wrong ts")
-            verdicts = review_verdicts(reviews / "reviews", 13, "def3456")
+            verdicts = review_verdicts(reviews / "reviews", 13, full_head)
             # Should still be blocked
             self.assertIn("VETO", verdicts.get("code-reviewer", ""))
 
@@ -2168,11 +2175,13 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """A VETO for an old head does not block the current head."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            old_head = "b" * 40
+            new_head = "c" * 40
             # Save a VETO for old head
-            team_kit.save_review(Path(tmp), 15, "code-reviewer", "bcd1234", "Bad\nVERDICT: VETO")
+            team_kit.save_review(Path(tmp), 15, "code-reviewer", old_head, "Bad\nVERDICT: VETO")
             # Save an APPROVE for new head
-            team_kit.save_review(Path(tmp), 15, "code-reviewer", "ace5678", "Good\nVERDICT: APPROVE")
-            verdicts = review_verdicts(reviews / "reviews", 15, "ace5678")
+            team_kit.save_review(Path(tmp), 15, "code-reviewer", new_head, "Good\nVERDICT: APPROVE")
+            verdicts = review_verdicts(reviews / "reviews", 15, new_head)
             # Should not be blocked
             self.assertEqual(verdicts.get("code-reviewer"), "APPROVE")
 
@@ -2180,16 +2189,18 @@ class AppendOnlyVerdictTests(unittest.TestCase):
         """The history file preserves both APPROVE and subsequent VETO."""
         with tempfile.TemporaryDirectory() as tmp:
             reviews = Path(tmp)
+            full_head = "f" * 40
             # Save APPROVE then VETO
-            team_kit.save_review(Path(tmp), 16, "code-reviewer", "fed1234", "Good\nVERDICT: APPROVE")
-            team_kit.save_review(Path(tmp), 16, "code-reviewer", "fed1234", "Wait\nVERDICT: VETO")
+            team_kit.save_review(Path(tmp), 16, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            team_kit.save_review(Path(tmp), 16, "code-reviewer", full_head, "Wait\nVERDICT: VETO")
             history_path = reviews / "reviews" / "pr-16-code-reviewer.history.md"
             history = history_path.read_text()
-            # Both verdicts should be in history
-            self.assertIn("VERDICT: APPROVE", history)
-            self.assertIn("VERDICT: VETO", history)
-            # Should have two records
-            self.assertEqual(history.count("--- REVIEW RECORD ---"), 2)
+            # Both verdicts should be in history (now as JSON Lines)
+            self.assertIn("APPROVE", history)  # In JSON record
+            self.assertIn("VETO", history)     # In JSON record
+            # Should have two lines (JSON Lines format)
+            lines = [l for l in history.strip().split('\n') if l.strip()]
+            self.assertEqual(len(lines), 2)
 
     def test_latest_copy_has_head_first_and_mode_0600(self):
         """The latest copy has HEAD: first line and mode 0600."""
@@ -2216,6 +2227,298 @@ class AppendOnlyVerdictTests(unittest.TestCase):
             # Should raise OSError when trying to write to symlink
             with self.assertRaises(OSError):
                 team_kit.save_review(Path(tmp), 18, "code-reviewer", "aef9012", "Good\nVERDICT: APPROVE")
+
+    def test_short_head_refused_on_save(self):
+        """A short head (less than 40 hex) is refused when gh cannot resolve it."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # Short head for non-existent PR should fail
+            with self.assertRaises(ValueError) as cm:
+                team_kit.save_review(Path(tmp), 999999, "code-reviewer", "abc1234", "Good\nVERDICT: APPROVE")
+            self.assertIn("Could not resolve", str(cm.exception))
+
+    def test_reply_with_fake_head_line_blocked(self):
+        """A reply body starting with HEAD: <short> cannot forge the head."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "a" * 40
+            fake_body = f"HEAD: {'b' * 7}\nGood work\nVERDICT: APPROVE"
+            team_kit.save_review(Path(tmp), 21, "code-reviewer", full_head, fake_body)
+            # Latest copy should have the real head, not the fake one
+            latest = (Path(tmp) / "reviews" / "pr-21-code-reviewer.md").read_text()
+            self.assertTrue(latest.startswith(f"HEAD: {full_head}"))
+            self.assertIn("FORMAT: 2", latest)
+
+    def test_body_with_supersedes_line_cannot_forge(self):
+        """A body with SUPERSEDES: line cannot clear a VETO without --supersedes flag."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "c" * 40
+            # Save a VETO
+            team_kit.save_review(Path(tmp), 22, "code-reviewer", full_head, "Bad\nVERDICT: VETO")
+            # Try to clear with fake SUPERSEDES in body
+            fake_body = "SUPERSEDES: 2026-01-01T00:00:00 fake\nFixed\nVERDICT: APPROVE"
+            team_kit.save_review(Path(tmp), 22, "code-reviewer", full_head, fake_body)
+            # Should still be blocked
+            verdicts = review_verdicts(Path(tmp) / "reviews", 22, full_head)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_body_with_timestamp_line_cannot_forge(self):
+        """A body with TIMESTAMP: line cannot fake the timestamp (body is JSON-escaped)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "d" * 40
+            fake_body = "TIMESTAMP: 1999-01-01T00:00:00\nGood\nVERDICT: APPROVE"
+            team_kit.save_review(Path(tmp), 23, "code-reviewer", full_head, fake_body)
+            # Check history uses JSON Lines format
+            history = (Path(tmp) / "reviews" / "pr-23-code-reviewer.history.md").read_text()
+            import json
+            rec = json.loads(history.strip())
+            # The fake TIMESTAMP is in the body (escaped), not used as the actual timestamp
+            self.assertIn("TIMESTAMP: 1999-01-01", rec["body"])
+            self.assertNotEqual(rec["ts"][:4], "1999")  # Real timestamp is current year
+
+    def test_body_with_fake_json_separator_blocked(self):
+        """A body with fake JSON or separator cannot break parsing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "e" * 40
+            # Try various injection attempts
+            fake_body = '{"verdict": "APPROVE"}\nVERDICT: VETO'
+            team_kit.save_review(Path(tmp), 24, "code-reviewer", full_head, fake_body)
+            verdicts = review_verdicts(Path(tmp) / "reviews", 24, full_head)
+            # Should get VETO (the real verdict)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_deleted_history_blocks_format2(self):
+        """Deleted history for FORMAT: 2 review blocks the merge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "f" * 40
+            team_kit.save_review(Path(tmp), 25, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            # Delete history file
+            (Path(tmp) / "reviews" / "pr-25-code-reviewer.history.md").unlink()
+            # Should be blocked
+            verdicts = review_verdicts(Path(tmp) / "reviews", 25, full_head)
+            self.assertIn("BLOCKED", verdicts.get("code-reviewer", ""))
+            self.assertIn("requires history", verdicts.get("code-reviewer", ""))
+
+    def test_emptied_history_blocks_format2(self):
+        """Emptied history for FORMAT: 2 review blocks the merge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "1" * 40
+            team_kit.save_review(Path(tmp), 26, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            # Empty history file
+            (Path(tmp) / "reviews" / "pr-26-code-reviewer.history.md").write_text("")
+            # Should be blocked
+            verdicts = review_verdicts(Path(tmp) / "reviews", 26, full_head)
+            self.assertIn("BLOCKED", verdicts.get("code-reviewer", ""))
+            self.assertIn("empty", verdicts.get("code-reviewer", ""))
+
+    def test_dangling_symlink_history_blocks(self):
+        """A dangling symlink at history path blocks the merge."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "2" * 40
+            team_kit.save_review(Path(tmp), 27, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            history_path = Path(tmp) / "reviews" / "pr-27-code-reviewer.history.md"
+            history_path.unlink()
+            # Create dangling symlink
+            history_path.symlink_to("/nonexistent/path")
+            # Should be blocked
+            verdicts = review_verdicts(Path(tmp) / "reviews", 27, full_head)
+            self.assertIn("BLOCKED", verdicts.get("code-reviewer", ""))
+
+    def test_request_changes_then_approve_blocks(self):
+        """REQUEST_CHANGES followed by APPROVE blocks unless superseded."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "3" * 40
+            team_kit.save_review(Path(tmp), 28, "code-reviewer", full_head, "Needs work\nVERDICT: REQUEST_CHANGES")
+            team_kit.save_review(Path(tmp), 28, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            # Should be blocked by REQUEST_CHANGES
+            verdicts = review_verdicts(Path(tmp) / "reviews", 28, full_head)
+            self.assertIn("REQUEST_CHANGES", verdicts.get("code-reviewer", ""))
+
+    def test_supersede_before_veto_does_not_clear(self):
+        """A supersede recorded before the VETO does not clear it (order check)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "4" * 40
+            # Manually create history with supersede before VETO (out of order)
+            import json
+            history_path = Path(tmp) / "reviews" / "pr-29-code-reviewer.history.md"
+            history_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            # APPROVE with supersede timestamp that doesn't exist yet
+            rec1 = {"head": full_head, "ts": "2026-01-01T00:00:00.000000+00:00", "role": "code-reviewer",
+                   "verdict": "APPROVE", "supersedes": "2026-01-01T01:00:00.000000+00:00", "reason": "fixed", "body": "Good\nVERDICT: APPROVE"}
+            # VETO after (but its timestamp is what rec1 tries to supersede)
+            rec2 = {"head": full_head, "ts": "2026-01-01T01:00:00.000000+00:00", "role": "code-reviewer",
+                   "verdict": "VETO", "supersedes": None, "reason": None, "body": "Bad\nVERDICT: VETO"}
+            history_path.write_text(json.dumps(rec1) + "\n" + json.dumps(rec2) + "\n")
+            # Create latest copy with FORMAT: 2
+            latest_path = Path(tmp) / "reviews" / "pr-29-code-reviewer.md"
+            latest_path.write_text(f"HEAD: {full_head}\nFORMAT: 2\nBad\nVERDICT: VETO\n")
+            # Should be blocked (supersede doesn't work if it's before the VETO)
+            verdicts = review_verdicts(Path(tmp) / "reviews", 29, full_head)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_two_vetos_same_ts_one_supersede(self):
+        """Two VETOs with the same timestamp and one supersede: one VETO remains."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "5" * 40
+            import json
+            history_path = Path(tmp) / "reviews" / "pr-30-code-reviewer.history.md"
+            history_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+            same_ts = "2026-01-01T00:00:00.000000+00:00"
+            # Two VETOs with same timestamp
+            rec1 = {"head": full_head, "ts": same_ts, "role": "code-reviewer",
+                   "verdict": "VETO", "supersedes": None, "reason": None, "body": "Bad1\nVERDICT: VETO"}
+            rec2 = {"head": full_head, "ts": same_ts, "role": "code-reviewer",
+                   "verdict": "VETO", "supersedes": None, "reason": None, "body": "Bad2\nVERDICT: VETO"}
+            # One supersede
+            later_ts = "2026-01-01T01:00:00.000000+00:00"
+            rec3 = {"head": full_head, "ts": later_ts, "role": "code-reviewer",
+                   "verdict": "APPROVE", "supersedes": same_ts, "reason": "fixed", "body": "Good\nVERDICT: APPROVE"}
+            history_path.write_text(json.dumps(rec1) + "\n" + json.dumps(rec2) + "\n" + json.dumps(rec3) + "\n")
+            latest_path = Path(tmp) / "reviews" / "pr-30-code-reviewer.md"
+            latest_path.write_text(f"HEAD: {full_head}\nFORMAT: 2\nGood\nVERDICT: APPROVE\n")
+            # Should still be blocked (one supersede clears one VETO, but two had same ts)
+            verdicts = review_verdicts(Path(tmp) / "reviews", 30, full_head)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_history_only_veto_blocks_when_latest_deleted(self):
+        """A history-only VETO (latest copy missing) still blocks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "6" * 40
+            team_kit.save_review(Path(tmp), 31, "code-reviewer", full_head, "Bad\nVERDICT: VETO")
+            # Delete latest copy, keep history
+            (Path(tmp) / "reviews" / "pr-31-code-reviewer.md").unlink()
+            # Should still be blocked
+            verdicts = review_verdicts(Path(tmp) / "reviews", 31, full_head)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_hard_link_at_history_refused(self):
+        """A hard link at the history path is refused."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "7" * 40
+            reviews = Path(tmp) / "reviews"
+            reviews.mkdir(mode=0o700, parents=True)
+            # Create a file and hard link to it
+            original = Path(tmp) / "original.txt"
+            original.write_text("data")
+            history_path = reviews / "pr-32-code-reviewer.history.md"
+            os.link(original, history_path)
+            # Should refuse due to hard link
+            with self.assertRaises(ValueError) as cm:
+                team_kit.save_review(Path(tmp), 32, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            self.assertIn("hard link", str(cm.exception))
+
+    def test_lowercase_veto_matched(self):
+        """A lowercase 'veto' is matched case-insensitively and blocks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "8" * 40
+            team_kit.save_review(Path(tmp), 33, "code-reviewer", full_head, "Bad\nVERDICT: veto")
+            verdicts = review_verdicts(Path(tmp) / "reviews", 33, full_head)
+            # Should be blocked (case-insensitive)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_invalid_utf8_clean_fail(self):
+        """Invalid UTF-8 in history gives a clean BLOCKED, no traceback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "9" * 40
+            team_kit.save_review(Path(tmp), 34, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            history_path = Path(tmp) / "reviews" / "pr-34-code-reviewer.history.md"
+            # Write invalid UTF-8
+            with open(history_path, "wb") as f:
+                f.write(b'\xff\xfe invalid utf8')
+            # Should fail cleanly
+            verdicts = review_verdicts(Path(tmp) / "reviews", 34, full_head)
+            self.assertIn("BLOCKED", verdicts.get("code-reviewer", ""))
+            self.assertIn("UTF-8", verdicts.get("code-reviewer", ""))
+
+    def test_valid_supersede_clears_veto(self):
+        """A valid supersede (later position, later ts, non-empty reason) clears the VETO."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "a" * 40
+            team_kit.save_review(Path(tmp), 35, "code-reviewer", full_head, "Bad\nVERDICT: VETO")
+            # Read timestamp
+            history = (Path(tmp) / "reviews" / "pr-35-code-reviewer.history.md").read_text()
+            import json
+            rec = json.loads(history.strip())
+            veto_ts = rec["ts"]
+            # Supersede it
+            team_kit.save_review(Path(tmp), 35, "code-reviewer", full_head, "Fixed\nVERDICT: APPROVE",
+                               supersedes_ts=veto_ts, supersedes_reason="All issues resolved")
+            verdicts = review_verdicts(Path(tmp) / "reviews", 35, full_head)
+            # Should not be blocked
+            self.assertEqual(verdicts.get("code-reviewer"), "APPROVE")
+
+    def test_legacy_approve_still_passes(self):
+        """A legacy review (no FORMAT: line) with APPROVE still passes."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "b" * 40
+            reviews = Path(tmp) / "reviews"
+            reviews.mkdir(mode=0o700, parents=True)
+            # Create legacy format (no FORMAT: 2, no history)
+            latest = reviews / "pr-36-code-reviewer.md"
+            latest.write_text(f"HEAD: {full_head}\nGood\nVERDICT: APPROVE\n")
+            verdicts = review_verdicts(reviews, 36, full_head)
+            self.assertEqual(verdicts.get("code-reviewer"), "APPROVE")
+
+    def test_legacy_veto_still_blocks(self):
+        """A legacy review (no FORMAT: line) with VETO still blocks."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "c" * 40
+            reviews = Path(tmp) / "reviews"
+            reviews.mkdir(mode=0o700, parents=True)
+            # Create legacy format (no FORMAT: 2, no history)
+            latest = reviews / "pr-37-code-reviewer.md"
+            latest.write_text(f"HEAD: {full_head}\nBad\nVERDICT: VETO\n")
+            verdicts = review_verdicts(reviews, 37, full_head)
+            self.assertIn("VETO", verdicts.get("code-reviewer", ""))
+
+    def test_wait_text_pinned_with_full_timestamp(self):
+        """The WAIT text includes role, verdict and full timestamp."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "d" * 40
+            team_kit.save_review(Path(tmp), 38, "code-reviewer", full_head, "Bad\nVERDICT: VETO")
+            # Read the timestamp from history
+            history = (Path(tmp) / "reviews" / "pr-38-code-reviewer.history.md").read_text()
+            import json
+            rec = json.loads(history.strip())
+            ts = rec["ts"]
+            # Check verdict includes full timestamp
+            verdicts = review_verdicts(Path(tmp) / "reviews", 38, full_head)
+            verdict = verdicts.get("code-reviewer", "")
+            self.assertIn("VETO", verdict)
+            self.assertIn(ts, verdict)
+            # Check merge_blockers formats it correctly (pass dummy checks to avoid "no CI checks" problem)
+            from workshop_validator.team_gates import merge_blockers
+            dummy_checks = [{"name": "test", "bucket": "pass"}]
+            problems = merge_blockers(dummy_checks, verdicts, ["code-reviewer"], pr=38, head_oid=full_head)
+            self.assertEqual(len(problems), 1)
+            self.assertIn(f"VETO at {ts}", problems[0])
+            self.assertIn("team_kit review --pr 38 --role code-reviewer", problems[0])
+            self.assertIn(f"--head {full_head}", problems[0])
+            self.assertIn(f"--supersedes {ts}", problems[0])
+
+    def test_supersedes_without_reason_refused_in_main(self):
+        """Calling main() with --supersedes but no --reason is refused."""
+        with tempfile.TemporaryDirectory() as tmp:
+            full_head = "e" * 40
+            # Create a review first
+            team_kit.save_review(Path(tmp), 39, "code-reviewer", full_head, "Good\nVERDICT: APPROVE")
+            # Try to call main with --supersedes but no --reason
+            import sys
+            import io
+            old_stdin = sys.stdin
+            old_stderr = sys.stderr
+            old_argv = sys.argv
+            try:
+                sys.stdin = io.StringIO("Fixed\nVERDICT: APPROVE")
+                sys.stderr = io.StringIO()
+                sys.argv = ["team_kit"]  # Avoid argparse seeing pytest args
+                exit_code = team_kit.main(["--private-root", tmp, "review", "--pr", "40", "--role", "code-reviewer",
+                                          "--head", full_head, "--supersedes", "2026-01-01T00:00:00"])
+                self.assertEqual(exit_code, 2)
+                stderr_output = sys.stderr.getvalue()
+                self.assertIn("REFUSED", stderr_output)
+            finally:
+                sys.stdin = old_stdin
+                sys.stderr = old_stderr
+                sys.argv = old_argv
 
 
 if __name__ == "__main__":

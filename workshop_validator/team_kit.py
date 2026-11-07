@@ -431,19 +431,44 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
 # ---- review verdicts -------------------------------------------------------
 
 ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
-HEAD_OID = re.compile(r"^[0-9a-f]{7,40}$")
+HEAD_OID = re.compile(r"^[0-9a-f]{40}$")  # Full 40-hex only
+HEAD_OID_SHORT = re.compile(r"^[0-9a-f]{7,40}$")  # For resolving to full
 
 
 def reviews_dir(team: Path) -> Path:
     return team / "reviews"
 
 
+def _resolve_full_head(pr: int, head: str) -> str:
+    """Resolve a short head to the PR's full headRefOid, or refuse unless given 40 hex."""
+    head = head.strip().lower()
+    if HEAD_OID.match(head):
+        return head
+    if not HEAD_OID_SHORT.match(head):
+        raise ValueError("head must be 7 to 40 hex characters")
+    # Try to get full headRefOid from GitHub
+    try:
+        result = subprocess.run(
+            ["gh", "pr", "view", str(pr), "--json", "headRefOid"],
+            capture_output=True, text=True, check=True, timeout=10
+        )
+        data = json.loads(result.stdout)
+        full_head = data.get("headRefOid", "").strip().lower()
+        if not HEAD_OID.match(full_head):
+            raise ValueError(f"gh pr view returned invalid headRefOid: {full_head}")
+        return full_head
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as e:
+        raise ValueError(f"Could not resolve short head {head} to full headRefOid: {e}")
+
+
 def save_review(team: Path, pr: int, role: str, head: str, reply: str,
                 supersedes_ts: str | None = None, supersedes_reason: str | None = None) -> Path:
-    """Write reviews/pr-<pr>-<role>.md with 'HEAD: <head>' as its first line (0600).
+    """Write reviews/pr-<pr>-<role>.md with FORMAT: 2 and HEAD: <head> (0600).
 
-    Append to reviews/pr-<pr>-<role>.history.md with a UTC timestamp for each record.
-    If supersedes_ts and supersedes_reason are given, add a SUPERSEDES line.
+    Append to reviews/pr-<pr>-<role>.history.md as JSON Lines (one record per line).
+    Each record has: head (full 40-hex), ts (ISO UTC with microseconds), role, verdict,
+    supersedes (ts or null), reason (str or null), and body (full reply text).
+    The body is JSON-escaped, so nothing in a reply can forge a header or separator.
 
     This is the only way the producer saves a verdict; the write guard denies the
     Write and Edit tools in reviews/ so a session cannot hand-write one by mistake.
@@ -452,16 +477,18 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
         raise ValueError("pr must be a positive number")
     if not ROLE_NAME.match(role or ""):
         raise ValueError("role must be lower-case letters, digits and dashes")
-    head = (head or "").strip().lower()
-    if not HEAD_OID.match(head):
-        raise ValueError("head must be the PR headRefOid (7 to 40 hex characters)")
+    # Resolve to full 40-hex head
+    full_head = _resolve_full_head(pr, head)
     body = (reply or "").strip()
     if not body:
         raise ValueError("reviewer reply on stdin is empty")
     # Refuse body without VERDICT line matching team_gates.VERDICT
     from . import team_gates
-    if not team_gates.VERDICT.search(body):
+    verdict_match = team_gates.VERDICT.search(body)
+    if not verdict_match:
         raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
+    # Parse verdict once here (case-insensitive), store it
+    verdict = verdict_match.group(1).upper()
     # Validate supersedes parameters
     if (supersedes_ts is None) != (supersedes_reason is None):
         raise ValueError("supersedes_ts and supersedes_reason must both be provided or both be None")
@@ -472,27 +499,53 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
     history_path = reviews_dir(team) / f"pr-{pr}-{role}.history.md"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    # Build the record with timestamp
+    # Build JSON Lines record
     timestamp = datetime.now(timezone.utc).isoformat()
-    record_lines = [f"HEAD: {head}", f"TIMESTAMP: {timestamp}"]
-    if supersedes_ts and supersedes_reason:
-        record_lines.append(f"SUPERSEDES: {supersedes_ts} {supersedes_reason.strip()}")
-    record_lines.append(body)
-    record = "\n".join(record_lines) + "\n"
+    record = {
+        "head": full_head,
+        "ts": timestamp,
+        "role": role,
+        "verdict": verdict,
+        "supersedes": supersedes_ts,
+        "reason": supersedes_reason.strip() if supersedes_reason else None,
+        "body": body
+    }
+    json_line = json.dumps(record, ensure_ascii=False) + "\n"
 
-    # Append to history (O_APPEND never truncates)
+    # Append to history with hard-link check
     history_fd = os.open(history_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(history_fd, "a", encoding="utf-8") as handle:
-        handle.write("--- REVIEW RECORD ---\n")
-        handle.write(record)
-        handle.write("\n")
-    history_path.chmod(0o600)
+    try:
+        stat_info = os.fstat(history_fd)
+        import stat as stat_module
+        if not stat_module.S_ISREG(stat_info.st_mode):
+            raise ValueError("history path is not a regular file")
+        if stat_info.st_nlink != 1:
+            raise ValueError("history path has hard links (st_nlink != 1)")
+        os.fchmod(history_fd, 0o600)
+        with os.fdopen(history_fd, "a", encoding="utf-8") as handle:
+            handle.write(json_line)
+            history_fd = None  # fdopen took ownership
+    finally:
+        if history_fd is not None:
+            os.close(history_fd)
 
-    # Write the latest copy (O_TRUNC is intentional here for the latest-only file)
+    # Write the latest copy with FORMAT: 2 and hard-link check
+    latest_content = f"HEAD: {full_head}\nFORMAT: 2\n{body}\n"
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(record)
-    path.chmod(0o600)
+    try:
+        stat_info = os.fstat(fd)
+        import stat as stat_module
+        if not stat_module.S_ISREG(stat_info.st_mode):
+            raise ValueError("latest copy path is not a regular file")
+        if stat_info.st_nlink != 1:
+            raise ValueError("latest copy path has hard links (st_nlink != 1)")
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(latest_content)
+            fd = None  # fdopen took ownership
+    finally:
+        if fd is not None:
+            os.close(fd)
     return path
 
 
@@ -638,6 +691,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ledger row added: {row['role']} / {row['task']}")
         return 0
     if args.cmd == "review":
+        # Validate --supersedes and --reason together
+        if (args.supersedes is None) != (args.reason is None):
+            print("review: REFUSED --supersedes and --reason must both be provided or both omitted", file=sys.stderr)
+            return 2
+        if args.supersedes and not (args.reason or "").strip():
+            print("review: REFUSED --reason must not be empty when --supersedes is given", file=sys.stderr)
+            return 2
         try:
             path = save_review(team, args.pr, args.role, args.head, sys.stdin.read(),
                              supersedes_ts=args.supersedes, supersedes_reason=args.reason)

@@ -27,7 +27,7 @@ EM_DASH = "\u2014"
 TEXT_SUFFIXES = (".md", ".mdc")
 ROW_PATTERN = re.compile(r"^\|\s*(" + team_kit.DECISION_ID_RE + r")\s*\|")
 CLOCK24 = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b(?!\s*(?:AM|PM|am|pm))")
-VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
+VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE | re.IGNORECASE)
 PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
@@ -144,76 +144,164 @@ def is_review_stale(content: str, head_oid: str) -> bool:
 
 
 def _parse_review_history(history_path: Path, head_oid: str) -> list[dict]:
-    """Parse history file into records with head, timestamp, verdict, supersedes."""
+    """Parse JSON Lines history into records for the current head.
+
+    Returns records in file order (append order). Each has: head, ts, verdict, supersedes, reason.
+    """
     if not history_path.exists():
         return []
-    content = history_path.read_text(encoding="utf-8")
+    if not history_path.is_file():
+        # Directory or other non-file: fail closed
+        raise ValueError(f"history path is not a regular file: {history_path}")
+
     records = []
-    for block in content.split("--- REVIEW RECORD ---"):
-        block = block.strip()
-        if not block:
-            continue
-        lines = block.splitlines()
-        record = {"head": None, "timestamp": None, "verdict": None, "supersedes": None}
-        for line in lines:
-            if line.startswith("HEAD:"):
-                record["head"] = line.split(":", 1)[1].strip()
-            elif line.startswith("TIMESTAMP:"):
-                record["timestamp"] = line.split(":", 1)[1].strip()
-            elif line.startswith("SUPERSEDES:"):
-                record["supersedes"] = line.split(":", 1)[1].strip()
-        verdicts = VERDICT.findall(block)
-        if verdicts:
-            record["verdict"] = verdicts[-1]
-        # Only include records for the current head
-        if record["head"] and record["head"] == head_oid and record["verdict"]:
-            records.append(record)
+    try:
+        with open(history_path, "r", encoding="utf-8") as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                    # Only include records for the current head (full 40-hex comparison)
+                    if record.get("head") == head_oid and record.get("verdict"):
+                        records.append({
+                            "head": record["head"],
+                            "ts": record["ts"],
+                            "verdict": record["verdict"].upper(),  # Normalize
+                            "supersedes": record.get("supersedes"),
+                            "reason": record.get("reason")
+                        })
+                except json.JSONDecodeError as e:
+                    raise ValueError(f"history line {line_no} is not valid JSON: {e}")
+    except UnicodeDecodeError as e:
+        raise ValueError(f"history contains invalid UTF-8: {e}")
     return records
 
 
 def _check_blocking_verdicts(records: list[dict]) -> str | None:
-    """Return blocking verdict with timestamp, or None if not blocked."""
-    # Build a map of superseded timestamps
-    superseded = set()
-    for record in records:
-        if record.get("supersedes"):
-            parts = record["supersedes"].split(None, 1)
-            if len(parts) >= 2 and parts[1].strip():  # Must have timestamp and non-empty reason
-                superseded.add(parts[0])
-    # Check for any VETO or BLOCK that is not superseded
-    for record in records:
-        if record["verdict"] in ("VETO", "BLOCK"):
-            if record["timestamp"] not in superseded:
-                ts = record["timestamp"][:19] if record["timestamp"] else "unknown"
-                return f"{record['verdict']} at {ts}"
+    """Return blocking verdict with full timestamp, or None if not blocked.
+
+    A blocking verdict (VETO, BLOCK, REQUEST_CHANGES, or anything not in PASSING)
+    is cleared only by a strictly later record (later position in file, strictly
+    later ts) for the same role and head, whose supersedes equals that record's
+    exact ts and whose reason is non-empty. One supersede clears one record;
+    two records with the same ts need two supersedes.
+    """
+    # Build a list of (position, timestamp) for each record for supersede matching
+    record_positions = [(i, rec["ts"]) for i, rec in enumerate(records)]
+
+    # Track which specific record positions have been superseded (one supersede clears one record)
+    superseded_positions = set()
+    for i, record in enumerate(records):
+        sup_ts = record.get("supersedes")
+        sup_reason = record.get("reason")
+        if sup_ts and sup_reason and sup_reason.strip():
+            # Find the earliest not-yet-superseded record with matching timestamp and earlier position
+            for j, rec_ts in record_positions:
+                if j < i and rec_ts == sup_ts and j not in superseded_positions:
+                    # Check strictly later timestamp
+                    if record["ts"] > sup_ts:
+                        superseded_positions.add(j)
+                        break  # One supersede clears one record
+
+    # Check for any non-passing verdict that is not superseded
+    for i, record in enumerate(records):
+        verdict = record["verdict"]
+        if verdict not in PASSING:
+            if i not in superseded_positions:
+                # Return full timestamp for supersede command
+                return f"{verdict} at {record['ts']}"
     return None
 
 
 def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict[str, str]:
     """Load review verdicts. If head_oid is given, mark stale reviews as STALE.
 
-    Check history for any VETO or BLOCK verdicts for the current head that are not superseded.
+    For FORMAT: 2 latest copies, fail closed if history is missing, empty, unreadable,
+    not a regular file, or unparsable. Legacy (no FORMAT line) behaves as before.
+    Also scan history files whose latest copy is missing.
     """
     verdicts = {}
+    seen_roles = set()
+
+    # Scan latest copies
     for path in sorted(reviews.glob(f"pr-{pr}-*.md")):
         role = path.stem[len(f"pr-{pr}-"):]
         if role.endswith(".history"):
             continue
-        content = path.read_text(encoding="utf-8")
+        seen_roles.add(role)
+
+        try:
+            content = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            verdicts[role] = f"BLOCKED: invalid UTF-8 in latest copy: {e}"
+            continue
+
+        # Check for FORMAT: 2
+        is_format_2 = "FORMAT: 2" in content.splitlines()[:5]  # Check first few lines
+
         found = VERDICT.findall(content)
         verdict = found[-1] if found else "MISSING"
         # Fail closed: empty/missing head_oid or stale review marks PASSING verdicts as STALE
         if verdict in PASSING and (not head_oid or not head_oid.strip() or is_review_stale(content, head_oid)):
             verdict = "STALE"
+
         # Check history for blocking verdicts
         if head_oid and head_oid.strip():
             history_path = reviews / f"pr-{pr}-{role}.history.md"
-            if history_path.exists():
+
+            if is_format_2:
+                # FORMAT: 2 requires readable history
+                if not history_path.exists():
+                    verdicts[role] = f"BLOCKED: FORMAT: 2 requires history file"
+                    continue
+                if not history_path.is_file():
+                    verdicts[role] = f"BLOCKED: history path is not a regular file"
+                    continue
+                try:
+                    if history_path.stat().st_size == 0:
+                        verdicts[role] = f"BLOCKED: history file is empty"
+                        continue
+                    records = _parse_review_history(history_path, head_oid)
+                    blocking = _check_blocking_verdicts(records)
+                    if blocking:
+                        verdict = blocking
+                except (ValueError, OSError) as e:
+                    verdicts[role] = f"BLOCKED: {e}"
+                    continue
+            else:
+                # Legacy: history is optional
+                if history_path.exists():
+                    try:
+                        records = _parse_review_history(history_path, head_oid)
+                        blocking = _check_blocking_verdicts(records)
+                        if blocking:
+                            verdict = blocking
+                    except (ValueError, OSError):
+                        # Legacy: ignore history errors, use latest copy
+                        pass
+
+        verdicts[role] = verdict
+
+    # Scan for history-only VETOs (latest copy missing)
+    if head_oid and head_oid.strip():
+        for history_path in sorted(reviews.glob(f"pr-{pr}-*.history.md")):
+            role_with_hist = history_path.stem[len(f"pr-{pr}-"):]
+            role = role_with_hist.replace(".history", "")
+            if role in seen_roles:
+                continue
+            seen_roles.add(role)
+
+            try:
                 records = _parse_review_history(history_path, head_oid)
                 blocking = _check_blocking_verdicts(records)
                 if blocking:
-                    verdict = blocking
-        verdicts[role] = verdict
+                    verdicts[role] = blocking
+            except (ValueError, OSError):
+                # History-only: if we can't read it, no verdict
+                pass
+
     return verdicts
 
 
@@ -233,7 +321,8 @@ def required_reviewers(changed: list[str]) -> list[str]:
     return roles
 
 
-def merge_blockers(checks: list[dict], verdicts: dict[str, str], required: list[str]) -> list[str]:
+def merge_blockers(checks: list[dict], verdicts: dict[str, str], required: list[str], pr: int | None = None, head_oid: str | None = None) -> list[str]:
+    """Return list of blocking problems. For verdicts with timestamps, show supersede command."""
     problems = []
     if not checks:
         problems.append("no CI checks reported")
@@ -241,11 +330,31 @@ def merge_blockers(checks: list[dict], verdicts: dict[str, str], required: list[
         if check.get("bucket") != "pass" and check.get("bucket") != "skipping":
             problems.append(f"CI {check.get('name')}: {check.get('bucket') or check.get('state')}")
     for role in required:
-        if verdicts.get(role) not in PASSING:
-            problems.append(f"review {role}: {verdicts.get(role, 'MISSING')}")
+        verdict = verdicts.get(role, 'MISSING')
+        if verdict not in PASSING:
+            # Check if verdict is in "VERDICT at timestamp" format
+            if " at " in verdict and pr and head_oid:
+                parts = verdict.split(" at ", 1)
+                if len(parts) == 2:
+                    v, ts = parts
+                    cmd = f"team_kit review --pr {pr} --role {role} --head {head_oid} --supersedes {ts} --reason \"...\""
+                    problems.append(f"review {role}: {verdict}; clear with: {cmd}")
+                else:
+                    problems.append(f"review {role}: {verdict}")
+            else:
+                problems.append(f"review {role}: {verdict}")
     for role, verdict in verdicts.items():
         if verdict not in PASSING and role not in required:
-            problems.append(f"review {role}: {verdict}")
+            if " at " in verdict and pr and head_oid:
+                parts = verdict.split(" at ", 1)
+                if len(parts) == 2:
+                    v, ts = parts
+                    cmd = f"team_kit review --pr {pr} --role {role} --head {head_oid} --supersedes {ts} --reason \"...\""
+                    problems.append(f"review {role}: {verdict}; clear with: {cmd}")
+                else:
+                    problems.append(f"review {role}: {verdict}")
+            else:
+                problems.append(f"review {role}: {verdict}")
     return problems
 
 
@@ -413,7 +522,7 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
                       runner=runner) or []
     changed = [f["path"] for f in info.get("files", [])]
     problems = merge_blockers(checks, review_verdicts(team / "reviews", pr, head_oid),
-                              required_reviewers(changed))
+                              required_reviewers(changed), pr=pr, head_oid=head_oid)
     if problems:
         print(f"merge-when-green: WAIT {'; '.join(problems[:5])}")
         return 1
