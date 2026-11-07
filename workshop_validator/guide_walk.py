@@ -7314,7 +7314,9 @@ def _freeze_result(state: WalkState, step: GuideStep, target: str, suggestion: s
 
 def _clean_name(label: str) -> bool:
     """True when the target reads like one control name, not a clause."""
-    words = label.split()
+    # Normalize pipes: "Setup | Foo | Bar" → "Setup Foo Bar"
+    normalized = re.sub(r'\s*\|\s*', ' ', label)
+    words = normalized.split()
     if not words or len(words) > 5:
         return False
     return not re.search(r"\b(?:click|select|then|and|to|it|you|your|if|scroll|find)\b", label, re.I)

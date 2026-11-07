@@ -18,6 +18,7 @@ from workshop_validator.guide_walk import (
     click_role,
     present,
     walk_guide,
+    _clean_name,
 )
 from workshop_validator.live_test import wait_for_live_test
 from workshop_validator.step_board import build_board
@@ -4207,6 +4208,37 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         self.assertEqual(self.clicks(page), [("click", "link", "Accounts")])
         self.assertEqual(outcome.statuses["open-accounts"], "NOT_RUN")
         self.assertIn("exceeded its time limit", outcome.notes["open-accounts"])
+
+
+class CleanNameTest(unittest.TestCase):
+    def test_pipe_separated_navigation_path_normalizes_correctly(self):
+        # "Setup | Company Settings | Holidays" has 4 words after normalizing pipes
+        self.assertTrue(_clean_name("Setup | Company Settings | Holidays"))
+
+    def test_pipe_separated_path_with_too_many_words_fails(self):
+        # 7 parts → 7 words after normalization, exceeds limit
+        self.assertFalse(_clean_name("Alpha | Beta | Gamma | Delta | Epsilon | Zeta | Eta"))
+
+    def test_pipe_separated_path_with_control_word_fails(self):
+        # Contains "click", should fail even after normalization
+        self.assertFalse(_clean_name("Click on Setup | Settings"))
+
+    def test_regular_control_names_without_pipes_still_work(self):
+        # Existing behavior preserved
+        self.assertTrue(_clean_name("Save"))
+        self.assertTrue(_clean_name("New Account"))
+        self.assertTrue(_clean_name("Custom Field"))
+        self.assertTrue(_clean_name("Flow Builder"))
+
+    def test_control_names_with_too_many_words_fail(self):
+        # More than 5 words, should fail
+        self.assertFalse(_clean_name("This is a very long control name"))
+
+    def test_control_names_with_action_words_fail(self):
+        # Contains control words
+        self.assertFalse(_clean_name("Click the Save button"))
+        self.assertFalse(_clean_name("Select your name"))
+        self.assertFalse(_clean_name("Then find it"))
 
 
 if __name__ == "__main__":
