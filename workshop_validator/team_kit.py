@@ -590,8 +590,12 @@ def _write_waiting_owner(team: Path, reason: str, now: datetime) -> None:
         _write_private(marker, json.dumps(payload, indent=2) + "\n")
 
 
-def watchdog_check(repo: Path, team: Path, now=None) -> str:
-    """Desktop watchdog task: NUDGE the live producer or call takeover_launch on TAKEOVER."""
+def watchdog_check(repo: Path, team: Path, now=None, *, launcher=None) -> str:
+    """Desktop watchdog task: NUDGE the live producer or call takeover_launch on TAKEOVER.
+
+    When launcher is None (default), returns TAKEOVER without launching; the caller must launch.
+    When launcher is a callable, calls takeover_launch to perform the launch.
+    """
     now = _utc(now)
 
     # Compute decision first
@@ -654,8 +658,9 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
         return f"NUDGE {state}: {reason} (producer session {session})"
 
     if action == "TAKEOVER":
-        from . import watchdog
-        status_code, message = takeover_launch(repo, team, now, watchdog.launch_producer_wake)
+        if launcher is None:
+            return f"TAKEOVER {state}: {reason} (producer session {session})"
+        status_code, message = takeover_launch(repo, team, now, launcher)
         if status_code == "LAUNCHED":
             return f"LAUNCHED {state}: {reason} (was session {session})"
         elif status_code == "WAITING":
@@ -961,7 +966,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{state}: {reason}")
         return 0
     if args.cmd == "watchdog":
-        print(watchdog_check(repo, team))
+        from . import watchdog as watchdog_module
+        print(watchdog_check(repo, team, launcher=watchdog_module.launch_producer_wake))
         return 0
     if args.cmd == "prereqs":
         bad = owner_asks_not_doable(load_plan(team), repo)

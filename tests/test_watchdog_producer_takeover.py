@@ -23,6 +23,7 @@ import time
 import unittest
 
 from workshop_validator import team_kit, team_state, watchdog
+from workshop_validator.watchdog import launch_resume
 from workshop_validator.lessons import TEAM, read_lessons
 
 NOW = datetime(2026, 11, 7, 10, 0, 0, tzinfo=timezone.utc)
@@ -236,7 +237,7 @@ class TakeoverLaunchTests(unittest.TestCase):
 
         with mock.patch.dict("os.environ", {"WORKSHOP_VALIDATOR_CLAUDE": str(fake_claude)}), \
                 mock.patch.object(subprocess, "Popen"):
-            result = team_kit.watchdog_check(self.repo, self.team, NOW)
+            result = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=watchdog.launch_producer_wake)
 
         self.assertTrue(result.startswith("LAUNCHED"))
         self.assertNotIn("TAKEOVER", result)
@@ -319,10 +320,10 @@ class InterleavingTests(unittest.TestCase):
                 team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "next"}]}, tick)
                 if tick in desktop_ticks:
                     # Desktop calls watchdog_check
-                    team_kit.watchdog_check(self.repo, self.team, tick)
+                    team_kit.watchdog_check(self.repo, self.team, tick, launcher=watchdog.launch_producer_wake)
                 if tick in launchd_ticks:
                     # launchd calls run_once
-                    watchdog.run_once(self.repo, self.root, now=tick)
+                    watchdog.run_once(self.repo, self.root, now=tick, launcher=launch_resume, producer_launcher=watchdog.launch_producer_wake)
 
         # Expect launches at: 0, 61, 122, 183, 244 (every 60+ minutes)
         # With 60-minute cooldown, at most 6 launches in 5 hours
@@ -454,6 +455,126 @@ class GuardKillingTests(unittest.TestCase):
         result = watchdog.run_once(self.repo, self.root, producer_launcher=fake_launcher, now=NOW)
         self.assertEqual(result, 0)
         self.assertEqual(len(produced), 0)
+
+
+class NoLaunchByDefaultTests(unittest.TestCase):
+    """Test that library functions never launch by default (security escape W-155)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root, self.repo = base / "private", base / "repo"
+        self.team = self.root / "team"
+        self.transcripts = base / "transcripts"
+        for d in (self.team, self.repo, self.transcripts):
+            d.mkdir(parents=True)
+
+        from workshop_validator import public_safety
+        for patch in (
+            mock.patch.object(team_kit, "transcripts_dir", return_value=self.transcripts),
+            mock.patch.object(team_kit, "free_gb", return_value=100.0),
+            mock.patch.object(public_safety, "check_main_clean", return_value=(True, "")),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_watchdog_check_no_launch_by_default(self):
+        """watchdog_check with no launcher parameter does not start a process."""
+        team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "next"}]}, NOW)
+
+        with mock.patch.object(subprocess, "Popen") as popen_mock:
+            result = team_kit.watchdog_check(self.repo, self.team, NOW)
+
+        # No process started
+        self.assertEqual(popen_mock.call_count, 0)
+        # Returns TAKEOVER without launching
+        self.assertTrue(result.startswith("TAKEOVER"))
+
+    def test_run_once_no_launch_by_default(self):
+        """run_once with no launcher parameters does not start a process."""
+        team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "next"}]}, NOW)
+
+        with mock.patch.object(subprocess, "Popen") as popen_mock:
+            result = watchdog.run_once(self.repo, self.root, now=NOW)
+
+        # No process started
+        self.assertEqual(popen_mock.call_count, 0)
+        self.assertEqual(result, 0)
+
+    def test_run_once_stalled_no_launch_by_default(self):
+        """run_once with stalled job and no launcher does not start a process."""
+        team_state.start_job(self.root, "guide.pdf", "quick", now=(NOW - timedelta(hours=1)).isoformat())
+        team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "running"}]}, NOW)
+
+        with mock.patch.object(subprocess, "Popen") as popen_mock:
+            result = watchdog.run_once(self.repo, self.root, now=NOW)
+
+        # No process started
+        self.assertEqual(popen_mock.call_count, 0)
+        self.assertEqual(result, 0)
+
+
+class CLIPassesRealLauncherTests(unittest.TestCase):
+    """Test that CLI entry points pass the real launcher (W-155 requirement 4)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        self.root, self.repo = base / "private", base / "repo"
+        self.team = self.root / "team"
+        self.transcripts = base / "transcripts"
+        for d in (self.team, self.repo, self.transcripts):
+            d.mkdir(parents=True)
+
+        from workshop_validator import public_safety
+        for patch in (
+            mock.patch.object(team_kit, "transcripts_dir", return_value=self.transcripts),
+            mock.patch.object(team_kit, "free_gb", return_value=100.0),
+            mock.patch.object(public_safety, "check_main_clean", return_value=(True, "")),
+        ):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_team_kit_watchdog_cli_passes_launcher(self):
+        """team_kit CLI 'watchdog' command passes the real launcher."""
+        team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "next"}]}, NOW)
+
+        fake_claude = self.repo / "fake-claude"
+        fake_claude.write_text("#!/bin/sh\necho test\n", encoding="utf-8")
+        fake_claude.chmod(0o700)
+
+        with mock.patch.dict("os.environ", {"WORKSHOP_VALIDATOR_CLAUDE": str(fake_claude)}), \
+                mock.patch.object(subprocess, "Popen") as popen_mock:
+            # Call the CLI entry point
+            team_kit.main(["--repo", str(self.repo), "--private-root", str(self.root), "watchdog"])
+
+        # A process was started (real launcher was passed)
+        self.assertGreater(popen_mock.call_count, 0)
+        cmd = popen_mock.call_args[0][0]
+        self.assertEqual(cmd[0], str(fake_claude))
+
+    def test_watchdog_once_cli_passes_launchers(self):
+        """watchdog --once CLI passes the real launchers."""
+        team_state.start_job(self.root, "guide.pdf", "quick", now=(NOW - timedelta(hours=1)).isoformat())
+        team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "running"}]}, NOW)
+
+        fake_claude = self.repo / "fake-claude"
+        fake_claude.write_text("#!/bin/sh\necho test\n", encoding="utf-8")
+        fake_claude.chmod(0o700)
+
+        with mock.patch.dict("os.environ", {"WORKSHOP_VALIDATOR_CLAUDE": str(fake_claude)}), \
+                mock.patch.object(subprocess, "Popen") as popen_mock:
+            # Call the CLI entry point
+            watchdog.main(["--repo", str(self.repo), "--private-root", str(self.root), "--once"])
+
+        # A process was started (real launcher was passed)
+        self.assertGreater(popen_mock.call_count, 0)
 
 
 if __name__ == "__main__":

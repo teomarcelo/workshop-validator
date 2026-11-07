@@ -121,10 +121,15 @@ def _note_waiting(root: Path, state: dict, now: datetime) -> None:
 
 
 def claude_path() -> str | None:
-    """The Claude Code CLI. launchd has a short PATH, so common places are tried too."""
+    """The Claude Code CLI. launchd has a short PATH, so common places are tried too.
+
+    When WORKSHOP_VALIDATOR_CLAUDE is set, use only it (no PATH fallback); if not
+    executable, return None.
+    """
     override = os.environ.get("WORKSHOP_VALIDATOR_CLAUDE")
-    candidates = [override] if override else []
-    candidates += [shutil.which("claude"), str(Path.home() / ".local" / "bin" / "claude"),
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    candidates = [shutil.which("claude"), str(Path.home() / ".local" / "bin" / "claude"),
                    "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
     for item in candidates:
         if item and os.access(item, os.X_OK):
@@ -191,11 +196,10 @@ def _team_lesson(private_root: Path, cause: str, state: dict, now: datetime) -> 
 
 
 def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_launcher=None, now=None) -> int:
-    """Check and act on the current job state."""
-    if launcher is None:
-        launcher = launch_resume
-    if producer_launcher is None:
-        producer_launcher = launch_producer_wake
+    """Check and act on the current job state.
+
+    When launcher or producer_launcher is None (default), no launch happens; used by tests.
+    """
     if now is None:
         now = _now_utc()
     state = load(private_root)
@@ -204,7 +208,7 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_lau
     action = decide(state, now=now, producer_fresh=fresh)
     if action in {"idle", "alive"}:
         # Check for takeover when no open job or job is done
-        if action == "idle" and not fresh:
+        if action == "idle" and not fresh and producer_launcher is not None:
             from .team_kit import takeover_launch
             try:
                 status_code, message = takeover_launch(repo_root, private_root / "team", now, producer_launcher)
@@ -234,6 +238,8 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_lau
                          state, now)
             print(f"Job stalled after {RESTART_CAP_PER_HOUR} restarts. Marker written.")
         return 0
+    if launcher is None:
+        return 0  # No launcher provided, tests only
     record_restart(private_root, now=now)
     _team_lesson(private_root, "Heartbeat went stale and the job was restarted", state, now)
     from .team_state import log
@@ -307,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.once:
-        code = run_once(repo_root, private_root)
+        code = run_once(repo_root, private_root, launcher=launch_resume, producer_launcher=launch_producer_wake)
         cleanup_worktrees(repo_root)
         return code
 

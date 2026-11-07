@@ -76,7 +76,7 @@ class _Base(unittest.TestCase):
             (self.team / name).unlink(missing_ok=True)
 
     def _check(self) -> str:
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
         self.assertNotIn("\n", line)
         return line
 
