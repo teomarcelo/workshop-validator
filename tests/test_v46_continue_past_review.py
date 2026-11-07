@@ -694,5 +694,107 @@ class UnknownIntentNoteTests(unittest.TestCase):
         self.assertEqual(calls, ["a1"])
 
 
+class SessionBlockNoteTests(unittest.TestCase):
+    """Test that session-blocked steps get correct notes."""
+
+    def test_session_block_on_unknown_intent_step(self):
+        """Session block on unknown intent: step's note adds session sentence, later steps name it."""
+        page = Page(HOME, body="Home")
+
+        # Create an unknown intent step
+        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                "Configuration review complete",
+                                (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            unknown_step,
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            # Simulate session block on a2 by patching _session_blocked
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+        # Only a1, a3, and b1 match the catalog; a2 is unknown intent
+        def matches_catalog(step):
+            return step.step_id in ("a1", "a3", "b1")
+
+        with patch('workshop_validator.guide_walk._session_blocked') as mock_session:
+            # Return True when checking a2 after the step
+            def session_blocked_check(state, step):
+                return step.step_id == "a2"
+            mock_session.side_effect = session_blocked_check
+
+            outcome = walk_guide(
+                page, GuideInventory(1, steps, (), ()),
+                checks=(GuideCheck("sample", matches_catalog, run_check),),
+                timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            )
+
+        # a2's note must contain the unknown intent text AND the session-blocked sentence
+        self.assertIn("The validator has no action for this step yet", outcome.notes["a2"])
+        self.assertIn("The org session was blocked, so the walk stopped here.", outcome.notes["a2"])
+        # a2's note must NOT claim the walk goes on
+        self.assertNotIn("The walk goes on", outcome.notes["a2"])
+
+        # a3's note must name the session block and a2
+        self.assertEqual(outcome.notes["a3"], "Not run: the session was blocked at a2, so the walk stopped.")
+
+        # b1's note must be the same
+        self.assertEqual(outcome.notes["b1"], "Not run: the session was blocked at a2, so the walk stopped.")
+
+        # Only a1 ran
+        self.assertEqual(calls, ["a1"])
+
+    def test_session_block_on_ordinary_failing_step(self):
+        """Session block on ordinary failing step: later steps get session-block note."""
+        page = Page(HOME, body="Home")
+
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            if step.step_id == "a2":
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+
+        with patch('workshop_validator.guide_walk._session_blocked') as mock_session:
+            # Return True when checking a2 after the step
+            def session_blocked_check(state, step):
+                return step.step_id == "a2"
+            mock_session.side_effect = session_blocked_check
+
+            outcome = walk_guide(
+                page, GuideInventory(1, steps, (), ()),
+                checks=(GuideCheck("sample", lambda s: True, run_check),),
+                timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            )
+
+        # a2's note should have the failure note AND the session-blocked sentence
+        self.assertIn("Sample control not found.", outcome.notes["a2"])
+        self.assertIn("The org session was blocked, so the walk stopped here.", outcome.notes["a2"])
+
+        # Later steps get the clear session-block note
+        self.assertEqual(outcome.notes["a3"], "Not run: the session was blocked at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the session was blocked at a2, so the walk stopped.")
+
+        # Only a1 and a2 ran
+        self.assertEqual(calls, ["a1", "a2"])
+
+
 if __name__ == "__main__":
     unittest.main()

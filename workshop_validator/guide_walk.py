@@ -7873,7 +7873,15 @@ def walk_guide(
             failed_task, failed_step = _task_key(step, task_positions), step.step_id
             failed_note = result.note or ""
         elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
-            if result.freeze:
+            if result.freeze and _session_blocked(state, step):
+                # Session-blocked on a frozen step: add the session-blocked sentence to this step's note,
+                # removing any misleading "goes on" claim, and give later steps a clear note.
+                note = result.note or ""
+                # Remove the misleading "goes on at the next task" clause if present
+                note = note.replace("The walk goes on at the next task, if there is one.", "").strip()
+                notes[step.step_id] = f"{note} The org session was blocked, so the walk stopped here.".strip()
+                blocked = f"Not run: the session was blocked at {step.step_id}, so the walk stopped."
+            elif result.freeze:
                 blocked = result.note or "The following steps were not run."
             else:
                 blocked = "The org session was blocked, so the following steps were not run."

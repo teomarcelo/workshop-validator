@@ -158,7 +158,10 @@ class StopBehaviorKeptTests(unittest.TestCase):
             return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
 
         outcome = self.assertWalkStopped({"a2": closed})
-        self.assertEqual(outcome.notes["b1"], "Sample control was not found.")
+        # Session block: a2 gets the failure note + session sentence, later steps name the block
+        self.assertIn("Sample control was not found.", outcome.notes["a2"])
+        self.assertIn("The org session was blocked, so the walk stopped here.", outcome.notes["a2"])
+        self.assertEqual(outcome.notes["b1"], "Not run: the session was blocked at a2, so the walk stopped.")
 
 
 def _add_popup(page, title, *buttons):
