@@ -372,76 +372,6 @@ def _read_time(path: Path) -> datetime | None:
         return None
 
 
-def decide_and_record_takeover(repo: Path, team: Path, now: datetime) -> tuple[str, str, dict]:
-    """Shared takeover decision: returns (action, reason, context).
-
-    Action is NONE, NUDGE, or TAKEOVER. When TAKEOVER is returned, the markers
-    (takeover-at, takeover-count) have already been written. The caller must launch
-    the takeover and log it.
-
-    Context dict contains: state, live, active, idle_since, nudged_at, takeover_at, takeover_count.
-    """
-    now = _aware(now)
-    # Check main checkout is on main branch (branch and detached state only, not dirty files)
-    from . import public_safety
-    try:
-        clean_ok, clean_msg = public_safety.check_main_clean(repo, check_dirty=False)
-    except Exception as exc:
-        # Catch any Exception from check_main_clean and report as STALLED (no crash)
-        clean_ok, clean_msg = False, f"Exception checking main checkout: {exc}"
-    if not clean_ok:
-        # Treat as STALLED and run through watchdog_action
-        state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
-    else:
-        state, reason = status(repo, team, now)
-    live = load_producer(team)
-    active = producer_active_at(repo, live, now)
-    if state == "WORKING":
-        job = load_job(team.parent)
-        has_job = bool(job and is_open(job) and job.get("heartbeat"))
-        moved = None if has_job else step_moved_at(repo, team, load_plan(team), now)
-        if masked_stall(job, active, now, moved):
-            what = "job heartbeat" if has_job else "no open job, step"
-            state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
-                                        f" ({reason})")
-    idle_file, nudge_file = team / "idle-since", team / "nudged-at"
-    takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
-    if state not in {"IDLE", "STALLED"}:
-        idle_file.unlink(missing_ok=True)
-        nudge_file.unlink(missing_ok=True)
-        takeover_file.unlink(missing_ok=True)
-        takeover_count_file.unlink(missing_ok=True)
-        ctx = {"state": state, "live": live, "active": active, "idle_since": None,
-               "nudged_at": None, "takeover_at": None, "takeover_count": 0}
-        return "NONE", reason, ctx
-    if not idle_file.is_file():
-        _write_private(idle_file, now.isoformat())
-        takeover_count_file.unlink(missing_ok=True)
-    takeover_count = 0
-    if takeover_count_file.is_file():
-        try:
-            takeover_count = int(takeover_count_file.read_text(encoding="utf-8").strip())
-        except (ValueError, OSError):
-            takeover_count = 0
-    idle_since = _read_time(idle_file)
-    nudged_at = _read_time(nudge_file)
-    takeover_at = _read_time(takeover_file)
-    action = watchdog_action(state, live, now=now, idle_since=idle_since,
-                             nudged_at=nudged_at, session_active_at=active,
-                             takeover_at=takeover_at, takeover_count=takeover_count)
-    if action == "NUDGE":
-        _write_private(nudge_file, now.isoformat())
-    if action == "TAKEOVER":
-        nudge_file.unlink(missing_ok=True)
-        _write_private(takeover_file, now.isoformat())
-        _write_private(takeover_count_file, str(takeover_count + 1))
-        takeover_count += 1
-        takeover_at = now
-    ctx = {"state": state, "live": live, "active": active, "idle_since": idle_since,
-           "nudged_at": nudged_at, "takeover_at": takeover_at, "takeover_count": takeover_count}
-    return action, reason, ctx
-
-
 def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[str, str | None]:
     """Launch a fresh producer under a file lock.
 
@@ -484,6 +414,12 @@ def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[st
                                             f" ({reason})")
 
         if state not in {"IDLE", "STALLED"}:
+            # Clear markers when WORKING
+            (team / "idle-since").unlink(missing_ok=True)
+            (team / "nudged-at").unlink(missing_ok=True)
+            (team / "takeover-at").unlink(missing_ok=True)
+            (team / "takeover-count").unlink(missing_ok=True)
+            (team / "watchdog-waiting-owner").unlink(missing_ok=True)
             return ("NONE", f"{state}: {reason}")
 
         # Check rolling cap (6 launches in 24 hours)
@@ -628,6 +564,12 @@ def watchdog_check(repo: Path, team: Path, now=None, *, launcher=None) -> str:
                                         f" ({reason})")
 
     if state not in {"IDLE", "STALLED"}:
+        # Clear markers when WORKING
+        (team / "idle-since").unlink(missing_ok=True)
+        (team / "nudged-at").unlink(missing_ok=True)
+        (team / "takeover-at").unlink(missing_ok=True)
+        (team / "takeover-count").unlink(missing_ok=True)
+        (team / "watchdog-waiting-owner").unlink(missing_ok=True)
         return f"NONE {state}: {reason}"
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"

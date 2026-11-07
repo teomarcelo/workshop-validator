@@ -449,13 +449,23 @@ def merged_tree_gates(repo: Path, oid: str, runner=None) -> bool:
                 print("merged-tree: FAIL merge conflict with main")
                 return False
             python = repo / ".venv" / "bin" / "python"
-            for cmd in ([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"],
-                        [str(python), "-m", "workshop_validator.public_safety"],
-                        [str(python), "-m", "compileall", "-q", "workshop_validator", "tests"]):
-                result = run(cmd, tree)
-                if result.returncode:
-                    print(f"merged-tree: FAIL {' '.join(cmd[1:4])}")
-                    return False
+            # Set WORKSHOP_VALIDATOR_CLAUDE for the test subprocess
+            saved_env = os.environ.get("WORKSHOP_VALIDATOR_CLAUDE")
+            try:
+                os.environ["WORKSHOP_VALIDATOR_CLAUDE"] = "/nonexistent/claude"
+                for cmd in ([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"],
+                            [str(python), "-m", "workshop_validator.public_safety"],
+                            [str(python), "-m", "compileall", "-q", "workshop_validator", "tests"]):
+                    result = run(cmd, tree)
+                    if result.returncode:
+                        print(f"merged-tree: FAIL {' '.join(cmd[1:4])}")
+                        return False
+            finally:
+                # Restore the original env var
+                if saved_env is None:
+                    os.environ.pop("WORKSHOP_VALIDATOR_CLAUDE", None)
+                else:
+                    os.environ["WORKSHOP_VALIDATOR_CLAUDE"] = saved_env
             print("merged-tree: PASS tests, public_safety, compileall")
             return True
         finally:
