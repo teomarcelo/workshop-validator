@@ -19,12 +19,13 @@ except ImportError:
     sync_playwright = None
 
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
-from workshop_validator.guide_walk import CheckResult, GuideCheck, _open_guide_dialog, walk_guide
+from workshop_validator.guide_walk import CheckResult, GuideCheck, _landing_stop, _open_guide_dialog, walk_guide
 
 SMOKE = sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1"
 EX_A = "Exercise 1: Sample Alpha"
 HOME = "https://example.lightning.force.com/lightning/page/home"
 LOGIN = "https://login.salesforce.com/?wv=synthetic"
+OFF_ORG = "https://example.com/wv-synthetic-off-org"
 TITLE = "New Sample Screen"
 RECOVERED = f'Environment: the guide\'s own dialog "{TITLE}" was still open after the blocked task a2; the walk '
 TODAY_STOP = (f'"{TITLE}" still covered the page after the failure in a2; '
@@ -94,6 +95,21 @@ def _frozen(status):
     return lambda state, step: CheckResult(status, "Sample control was not found.", (), freeze=True)
 
 
+class LandingStopTests(unittest.TestCase):
+    """The landing after the recovery's goto is read from the URL alone, never by navigating again."""
+
+    def test_blank_or_empty_url_is_page_lost(self):
+        self.assertEqual(_landing_stop("about:blank"), "page-lost")
+        self.assertEqual(_landing_stop(""), "page-lost")
+
+    def test_login_host_is_login(self):
+        self.assertEqual(_landing_stop(LOGIN), "login")
+
+    def test_org_and_other_hosts_are_not_a_stop(self):
+        self.assertIsNone(_landing_stop(HOME))
+        self.assertIsNone(_landing_stop(OFF_ORG))
+
+
 @unittest.skipUnless(SMOKE, "RUN_BROWSER_SMOKE=1 not set")
 class RecoverAfterBlockedTaskBrowserTests(unittest.TestCase):
 
@@ -112,31 +128,44 @@ class RecoverAfterBlockedTaskBrowserTests(unittest.TestCase):
         self.addCleanup(self.page.close)
         self.events = []
         self.navs = []
-        self.served = {"home": "", "home_mode": "html"}
+        self.served = {"home": "", "home_mode": "html", "counting": False}
+        self.home_hits = []
         self.page.expose_function("wvEvent", lambda event: self.events.append(event))
         self.page.route("https://login.salesforce.com/**", self._login_route)
         self.page.route("https://example.lightning.force.com/**", self._home_route)
+        self.page.route("https://example.com/**", self._off_org_route)
+
+    def _off_org_route(self, route):
+        route.fulfill(status=200, body=self.served["home"], content_type="text/html")
 
     def _login_route(self, route):
         route.fulfill(status=200, body=LOGIN_HTML, content_type="text/html")
 
     def _home_route(self, route):
         mode = self.served["home_mode"]
-        if mode == "abort":
+        if self.served["counting"]:
+            self.home_hits.append(route.request.url)
+        if mode == "blank":  # the home page goes blank while it loads
+            route.fulfill(status=200, content_type="text/html",
+                          body='<html><head><script>location.replace("about:blank")</script></head></html>')
+        elif mode == "offorg":
+            route.fulfill(status=302, headers={"Location": OFF_ORG})
+        elif mode == "abort":
             route.abort()
         elif mode == "login":
             route.fulfill(status=302, headers={"Location": LOGIN})
         else:
             route.fulfill(status=200, body=self.served["home"], content_type="text/html")
 
-    def _start(self, start_html, home_html=None, home_mode="html", focus_field=False):
-        """Open the org home with START_HTML; later visits to the home get HOME_HTML or HOME_MODE."""
+    def _start(self, start_html, home_html=None, home_mode="html", focus_field=False, url=HOME):
+        """Open URL with START_HTML; later visits to the home get HOME_HTML or HOME_MODE."""
         self.served["home"] = start_html
-        self.page.goto(HOME)
+        self.page.goto(url)
         if focus_field:
             self.page.focus("#field")
         self.served["home"] = home_html if home_html is not None else start_html
         self.served["home_mode"] = home_mode
+        self.served["counting"] = True
         self.page.on("framenavigated",
                      lambda frame: self.navs.append(frame.url) if frame == self.page.main_frame else None)
 
@@ -207,7 +236,57 @@ class RecoverAfterBlockedTaskBrowserTests(unittest.TestCase):
         sentence = "The org session ended (sent to the login page), so the following steps were not run."
         self.assertEqual(outcome.notes["b1"], sentence)
         self.assertEqual(outcome.notes["b2"], sentence)
-        self.assertTrue(self.navs and all(url == LOGIN for url in self.navs), self.navs)
+        self.assertEqual(self.home_hits, [HOME])  # exactly one goto: the landing is read, not re-navigated
+        self.assertEqual(self.navs, [LOGIN])
+
+    def test_page_goes_blank_during_navigation_full_page_lost_sentence(self):
+        self._start(page_html(TITLE), home_mode="blank")
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        sentence = "The page left the org (blank or closed page), so the following steps were not run."
+        self.assertEqual(outcome.notes["b1"], sentence)
+        self.assertEqual(outcome.notes["b2"], sentence)
+        self.assertEqual(self.home_hits, [HOME])
+
+    def test_home_redirects_off_org_no_recovery_claimed(self):
+        self._start(page_html(TITLE), home_html=page_html(), home_mode="offorg")
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.notes["b1"], "The return to the org home after the failure in a2 did not "
+                         "reach the org, so the following steps were not run.")
+        self.assertNotIn("returned to the org home", outcome.notes["b1"])
+        self.assertEqual(self.navs, [OFF_ORG])
+
+    def test_walk_started_off_org_no_navigation_today_note(self):
+        self._start(page_html(TITLE), url=OFF_ORG)
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.notes["b1"], TODAY_STOP)
+        self.assertEqual(self.navs, [])
+        self.assertEqual(self.home_hits, [])
+
+    def test_later_step_needing_blocked_state_fails_on_its_own(self):
+        """After a recovery, a step that needed the blocked task's state fails with its own reason."""
+        self._start(page_html(TITLE, escape_closes=True))
+        outcome, calls = self._walk({
+            "a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW"),
+            "b1": lambda state, step: CheckResult("UI_MISMATCH", "Sample screen from a2 was not found.", (),
+                                                  freeze=True),
+        })
+        self.assertEqual(calls, ["a1", "a2", "b1"])
+        self.assertEqual(outcome.statuses["b1"], "UI_MISMATCH")
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "pressed Escape, then started this task "
+                         "(owner rule W-144). Sample screen from a2 was not found.")
+        self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
+
+    def test_new_unrelated_popup_on_home_no_close_claimed(self):
+        self._start(page_html(TITLE), home_html=page_html("Sample Notice", focusable=False))
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.notes["b1"], '"Sample Notice" covered the page after the walk returned to the '
+                         "org home after the failure in a2; no close was tried, so the following steps were not run.")
+        self.assertNotIn("could not close it", outcome.notes["b1"])
+        self.assertEqual(self.navs, [HOME])
 
     def test_focus_in_guide_field_outside_dialog_no_escape_into_field(self):
         """The dialog cannot take focus: Escape is skipped, the navigation still runs."""

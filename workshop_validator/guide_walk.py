@@ -7715,7 +7715,7 @@ def _recover_guide_dialog(state: WalkState, step: GuideStep, failed: str, dialog
         state.page.goto(state.home, wait_until="domcontentloaded", timeout=45000)
     except Exception as exc:
         error = type(exc).__name__
-    session = _session_stop_reason(state, step)
+    session = _landing_stop(str(getattr(state.page, "url", "") or ""))
     if session == "page-lost":
         return "", "The page left the org (blank or closed page), so the following steps were not run."
     if session == "login":
@@ -7728,8 +7728,23 @@ def _recover_guide_dialog(state: WalkState, step: GuideStep, failed: str, dialog
                     "so the following steps were not run.")
     actions.append("returned to the org home")
     if not _cover_cleared(state, step):
+        unrelated = _unnamed_modal(state.page, step.text or "", state=state)
+        if unrelated:
+            # A new pop-up on the home page: no W-080 close was tried here, so none is claimed.
+            return "", (f'"{unrelated[1]}" covered the page after the walk returned to the org home after '
+                        f"the failure in {failed}; no close was tried, so the following steps were not run.")
         return "", _covered_note(_covering_modal_title(state, step) or title, failed)
     return _recovered_note(title, failed, actions), ""
+
+
+def _landing_stop(url: str) -> str | None:
+    """Where a navigation landed, read from its URL without navigating: "login", "page-lost", or None."""
+    if not url or url.startswith("about:"):
+        return "page-lost"
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("login.") and host.endswith("salesforce.com"):
+        return "login"
+    return None
 
 
 def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[list[str], str]:
