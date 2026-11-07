@@ -855,6 +855,34 @@ class SessionStopNoteTests(unittest.TestCase):
         # a3 names the login
         self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
 
+    def test_login_on_not_frozen_pass_step(self):
+        """Login (B) on a not-frozen PASS step: accurate wording for later steps."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a1":
+                result = CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+                # Page lands on login after the PASS
+                state.page.url = "https://login.salesforce.com/"
+                return result
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check, "b1": run_check})
+
+        # a1 passes (not frozen)
+        self.assertEqual(outcome.statuses["a1"], "PASS")
+        # a2 and b1 are NOT_RUN with the login wording
+        self.assertEqual(outcome.statuses["a2"], "NOT_RUN")
+        self.assertEqual(outcome.statuses["b1"], "NOT_RUN")
+        self.assertEqual(outcome.notes["a2"], "The org session ended (sent to the login page), so the following steps were not run.")
+        self.assertEqual(outcome.notes["b1"], "The org session ended (sent to the login page), so the following steps were not run.")
+
 
 if __name__ == "__main__":
     unittest.main()
