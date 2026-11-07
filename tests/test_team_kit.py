@@ -313,7 +313,7 @@ class WatchdogTakeoverLimitTests(unittest.TestCase):
 
             # First takeover
             result = team_kit.watchdog_check(repo, team, NOW)
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
 
             # Within 60 minutes: should return NONE
             result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=30))
@@ -321,7 +321,7 @@ class WatchdogTakeoverLimitTests(unittest.TestCase):
 
             # After 60 minutes: should allow another takeover
             result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61))
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
 
 
 class WriteGuardSettingsProtectionTests(unittest.TestCase):
@@ -604,7 +604,7 @@ class WatchdogWaitingOwnerTests(unittest.TestCase):
             team_kit.save_plan(team, plan({"id": "a", "state": "next"}), NOW)
             results = [team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61 * i))
                        for i in range(4)]
-            self.assertEqual([r.split()[0] for r in results[:3]], ["TAKEOVER"] * 3)
+            self.assertEqual([r.split()[0] for r in results[:3]], ["LAUNCHED"] * 3)
             self.assertIn("WAITING owner", results[3])
             self.assertIn("3 takeovers", results[3])
 

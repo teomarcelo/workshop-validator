@@ -129,7 +129,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             result = watchdog_check(main_repo, team)
 
             # Should report TAKEOVER (not NONE) because no live producer
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
             self.assertIn("review", result)
             self.assertNotIn("NONE STALLED", result)
@@ -163,7 +163,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             result = watchdog_check(main_repo, team)
 
             # Should report TAKEOVER (not NONE) because no live producer
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
             self.assertIn("detached", result.lower())
             self.assertNotIn("NONE STALLED", result)
@@ -215,7 +215,7 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             result = watchdog_check(main_repo, team, now=now)
 
             # Should report TAKEOVER for real STALLED status (stale heartbeat), not blocked by untracked file
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
 
 

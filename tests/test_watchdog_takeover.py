@@ -68,11 +68,11 @@ class WatchdogTakeoverTests(unittest.TestCase):
         self._job(STALE)
         self._bound_producer(STALE)
         line = team_kit.watchdog_check(self.repo, self.team, NOW)
-        self.assertTrue(line.startswith("TAKEOVER"), line)
+        self.assertTrue(line.startswith("LAUNCHED"), line)
 
     def test_stale_job_and_no_claim_is_takeover(self):
         self._job(STALE)
-        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW).startswith("TAKEOVER"))
+        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW).startswith("LAUNCHED"))
 
     def test_quiet_but_reachable_producer_is_nudged(self):
         self._job(STALE)
