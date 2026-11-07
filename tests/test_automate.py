@@ -345,8 +345,9 @@ class KeepOrgTests(unittest.TestCase):
             self.assertEqual(gate["kept_org_reason"], {
                 "step_id": "s2", "verdict": "FALSE_FAILURE", "run_id": run_dir.name})
             self.assertEqual(next_org_index(gate), 1)
-            # Only gate.json changes; .gate.json.lock is the shared gate lock file.
-            self.assertEqual(sorted(p.name for p in root.iterdir() if p.name != ".gate.json.lock"),
+            # Only gate.json changes; .gate.json.lock is the shared gate lock file; automate.lock is the run lock.
+            self.assertEqual(sorted(p.name for p in root.iterdir()
+                                  if p.name not in {".gate.json.lock", "automate.lock"}),
                              ["gate.json", "runs"])
 
     def test_old_summary_reads_the_stop_from_board_order_and_verifier_list_format(self):
@@ -581,6 +582,239 @@ class KeepOrgTests(unittest.TestCase):
         summary = _summary(result, 1, 3, FAILED, "x", Path("run"))
         self.assertEqual(summary["stop_step"], "s1")
         self.assertIsNone(_summary(_run("NOT_RUN"), 0, 3, INCONCLUSIVE, "", Path("r"))["stop_step"])
+
+
+class RunLockTests(unittest.TestCase):
+    """Tests for the exclusive run lock on automate.lock."""
+
+    def test_second_run_while_lock_held_exits_2_with_refusal(self):
+        """A second automate run while the lock is held exits 2 and changes nothing."""
+        import fcntl
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            root.mkdir(parents=True, exist_ok=True)
+            # Set up minimal files
+            (root / "verification-orgs.json").write_text(
+                json.dumps({"orgs": [{"username": "a@example.test", "password": "pw"}]}), encoding="utf-8")
+            save_gate(root, {"org": 0, "frozen": False, "reason": ""})
+            (root / "history.json").write_text(json.dumps([]), encoding="utf-8")
+
+            # Start a subprocess that uses run_lock to hold the lock
+            code = f"""
+import os
+import time
+from pathlib import Path
+from workshop_validator.automate import run_lock
+
+root = Path({repr(str(root))})
+with run_lock(root):
+    print(os.getpid(), flush=True)  # tell parent the pid
+    time.sleep(10)  # hold the lock
+"""
+            holder = subprocess.Popen([sys.executable, "-c", code],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            try:
+                # Wait for the holder to write its pid
+                holder_pid = holder.stdout.readline().strip()
+                time.sleep(0.2)  # give it time to hold the lock
+
+                # Try to run automate while the holder has the lock
+                result = subprocess.run(
+                    [sys.executable, "-m", "workshop_validator.automate",
+                     "--guide", "/nonexistent.pdf", "--private-root", str(root), "--no-open"],
+                    capture_output=True, text=True, timeout=5
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(f"Refused: another walk is running (pid {holder_pid})", result.stdout)
+                # Nothing changed
+                gate = load_gate(root)
+                self.assertEqual(gate["org"], 0)
+                self.assertFalse(gate["frozen"])
+                history = json.loads((root / "history.json").read_text(encoding="utf-8"))
+                self.assertEqual(history, [])
+            finally:
+                holder.kill()
+                holder.wait()
+                holder.stdout.close()
+                holder.stderr.close()
+
+    def test_lock_released_after_exception(self):
+        """The lock is released after an exception inside run_next."""
+        import fcntl
+        import subprocess
+        import sys
+        from workshop_validator.automate import run_lock
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            # Take the lock and raise an exception
+            try:
+                with run_lock(root):
+                    raise ValueError("test exception")
+            except ValueError:
+                pass
+
+            # Lock should be released; another process can take it
+            lock_path = root / "automate.lock"
+            code = f"""
+import fcntl
+import os
+from pathlib import Path
+
+lock_path = Path({repr(str(lock_path))})
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("success")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+"""
+            result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("success", result.stdout)
+
+    def test_stale_lock_file_does_not_block(self):
+        """A stale lock file with a dead pid does not block if flock is not held."""
+        from workshop_validator.automate import run_lock
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            lock_path = root / "automate.lock"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            # Write a stale pid (no flock held)
+            lock_path.write_text("99999999", encoding="utf-8")
+            lock_path.chmod(0o600)
+
+            # Should be able to take the lock
+            with run_lock(root):
+                pass  # success
+
+    def test_lock_released_when_holder_dies(self):
+        """When the holder process dies, the lock is released and a new run can start."""
+        import signal
+        import subprocess
+        import sys
+        import time
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            lock_path = root / "automate.lock"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+            # Start a child that holds the lock and sleeps
+            code = f"""
+import fcntl
+import os
+import time
+from pathlib import Path
+
+lock_path = Path({repr(str(lock_path))})
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+os.write(fd, str(os.getpid()).encode('utf-8'))
+os.fsync(fd)
+time.sleep(300)  # long sleep
+"""
+            proc = subprocess.Popen([sys.executable, "-c", code])
+            time.sleep(0.5)  # let it take the lock
+
+            try:
+                # Kill it
+                proc.kill()
+                proc.wait(timeout=2)
+
+                # Now we should be able to take the lock
+                from workshop_validator.automate import run_lock
+                with run_lock(root):
+                    pass  # success
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait()
+
+    def test_reset_gate_refuses_while_walk_holds_lock(self):
+        """--reset-gate refuses while a walk holds the lock."""
+        import fcntl
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            root.mkdir(parents=True, exist_ok=True)
+            save_gate(root, {"org": 1, "frozen": True, "reason": "test freeze"})
+
+            # Hold the lock
+            lock_path = root / "automate.lock"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, b"54321")
+
+            try:
+                # Try to reset-gate while we hold the lock
+                result = subprocess.run(
+                    [sys.executable, "-m", "workshop_validator.automate",
+                     "--reset-gate", "--private-root", str(root)],
+                    capture_output=True, text=True, timeout=5
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Refused: another walk is running (pid 54321)", result.stdout)
+                # Gate unchanged
+                gate = load_gate(root)
+                self.assertTrue(gate["frozen"])
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def test_reset_gate_keep_org_refuses_while_walk_holds_lock(self):
+        """--reset-gate --keep-org refuses while a walk holds the lock."""
+        import fcntl
+        import subprocess
+        import sys
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            root.mkdir(parents=True, exist_ok=True)
+            # Set up a scenario for keep-org
+            run_id = "20260101T000000Z-org1"
+            run_dir = root / "runs" / "orgkey" / run_id
+            run_dir.mkdir(parents=True, exist_ok=True)
+            summary = {"org": 1, "run_id": run_id, "stop_step": "s1",
+                       "failures": [{"step_id": "s1"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            verdicts = {"run_id": run_id, "verdicts": [{"step_id": "s1", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            save_gate(root, {"org": 2, "frozen": True, "reason": "test", "last_run": run_id})
+
+            # Hold the lock
+            lock_path = root / "automate.lock"
+            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            os.write(fd, b"11111")
+
+            try:
+                # Try to reset-gate --keep-org while we hold the lock
+                result = subprocess.run(
+                    [sys.executable, "-m", "workshop_validator.automate",
+                     "--reset-gate", "--keep-org", str(run_dir), "--private-root", str(root)],
+                    capture_output=True, text=True, timeout=5
+                )
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("Refused: another walk is running (pid 11111)", result.stdout)
+                # Gate unchanged
+                gate = load_gate(root)
+                self.assertEqual(gate["org"], 2)
+                self.assertTrue(gate["frozen"])
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
 
 if __name__ == "__main__":

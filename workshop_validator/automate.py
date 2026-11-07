@@ -47,6 +47,7 @@ GATE_NAME = "gate.json"
 ORGS_NAME = "verification-orgs.json"
 ALIASES_NAME = "aliases.json"
 HISTORY_NAME = "history.json"
+LOCK_NAME = "automate.lock"
 
 SUCCESS, FAILED, INCONCLUSIVE = "success", "failed", "inconclusive"
 EXIT_CODES = {SUCCESS: 0, FAILED: 1, INCONCLUSIVE: 3}
@@ -82,6 +83,47 @@ def gate_lock(root: Path):
     fd = os.open(path.parent / f".{path.name}.lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+@contextlib.contextmanager
+def run_lock(root: Path):
+    """Exclusive non-blocking lock on automate.lock. One walk at a time.
+
+    If the lock is held, prints "Refused: another walk is running (pid N)" and raises SystemExit(2).
+    The holder's pid is written to the lock file. A stale file with a dead pid does not block
+    because flock is the source of truth.
+    """
+    lock_path = Path(root) / LOCK_NAME
+    lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        # Try non-blocking exclusive lock
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        # Lock is held; read the pid for the error message
+        try:
+            os.lseek(fd, 0, os.SEEK_SET)
+            pid_bytes = os.read(fd, 100)
+            pid = int(pid_bytes.decode("utf-8").strip()) if pid_bytes else 0
+        except (ValueError, OSError):
+            pid = 0
+        os.close(fd)
+        print(f"Refused: another walk is running (pid {pid})")
+        raise SystemExit(2)
+
+    # We have the lock; write our pid
+    try:
+        our_pid = str(os.getpid())
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, our_pid.encode("utf-8"))
+        os.fsync(fd)
         yield
     finally:
         try:
@@ -418,6 +460,13 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
 
     opener shows the live report in the default browser; None skips it.
     """
+    with run_lock(private_root):
+        return _run_next_locked(repo_root, private_root, guide, as_json=as_json, opener=opener)
+
+
+def _run_next_locked(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool = False,
+                     opener=webbrowser.open) -> int:
+    """The run body, called with the run lock held."""
     gate = load_gate(private_root)
     index = next_org_index(gate)
     if index is None:
@@ -512,12 +561,13 @@ def run_next(repo_root: Path, private_root: Path, guide: Path, *, as_json: bool 
 
 
 def reset_gate(private_root: Path) -> int:
-    def unfreeze(gate: dict) -> None:
-        gate["frozen"] = False
-        gate["reason"] = ""
-    gate = update_gate(private_root, unfreeze)
-    print(f"Gate open. Next run uses org {max(int(gate.get('org') or 0), gate_floor(gate)) + 1}.")
-    return 0
+    with run_lock(private_root):
+        def unfreeze(gate: dict) -> None:
+            gate["frozen"] = False
+            gate["reason"] = ""
+        gate = update_gate(private_root, unfreeze)
+        print(f"Gate open. Next run uses org {max(int(gate.get('org') or 0), gate_floor(gate)) + 1}.")
+        return 0
 
 
 _VERDICTS = {"CONFIRMED_PASS", "REAL", "FALSE_FAILURE", "FALSE_PASS", "UNCLEAR"}
@@ -593,8 +643,9 @@ def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     Only the gate's last run counts, and each run is kept at most once. Touches only
     gate.json. Refuses (exit 2, one line, nothing changed) otherwise.
     """
-    with gate_lock(private_root):  # the read, checks and write are one step
-        return _reset_gate_keep_org(private_root, run_dir)
+    with run_lock(private_root):
+        with gate_lock(private_root):  # the read, checks and write are one step
+            return _reset_gate_keep_org(private_root, run_dir)
 
 
 def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
