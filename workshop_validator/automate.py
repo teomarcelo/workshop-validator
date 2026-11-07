@@ -542,6 +542,16 @@ def _board_stop_step(run_dir: Path) -> str | None:
     return None if stop is None else stop.step_id
 
 
+def _board_steps(run_dir: Path) -> list[tuple[str, str]]:
+    """All steps from board.json as (step_id, status) in printed order."""
+    board = _read_json(run_dir / "board.json")
+    try:
+        return [(str(st["step_id"]), str(st["status"]))
+                for section in board["sections"] for task in section["tasks"] for st in task["steps"]]
+    except (KeyError, TypeError):
+        raise ValueError("malformed board.json") from None
+
+
 def _judged_steps(summary: dict, stop) -> list[tuple[str, str]]:
     """Steps keep-org must see verified FALSE_FAILURE, as (kind, step_id), first one first.
 
@@ -612,12 +622,22 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         if not isinstance(summary, dict) or isinstance(summary.get("org"), bool) \
                 or not isinstance(summary.get("org"), int) or summary["org"] < 1:
             raise ValueError("malformed summary.json")
-        stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
-        judged = _judged_steps(summary, stop)
+        # Try board.json first (W-167: check all steps for mixed results).
+        # For older runs without board.json, fall back to the summary's failures list.
+        board_json_path = run_dir / "board.json"
+        if board_json_path.is_file() and not board_json_path.is_symlink():
+            steps = _board_steps(run_dir)
+        else:
+            # Older runs: use the summary's failures list and stop step (original logic).
+            stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
+            if stop is not None and not isinstance(stop, str):
+                raise ValueError("malformed summary.json")
+            judged = _judged_steps(summary, stop)
+            # Rebuild steps list from judged for uniform processing.
+            # Old format treats all judged steps as needing FALSE_FAILURE.
+            steps = [(step_id, "UI_MISMATCH") for _, step_id in judged]
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
-        # Every verdict on each judged step must be FALSE_FAILURE; a mixed record keeps the move.
-        found = [(kind, step_id, verdicts.get(step_id)) for kind, step_id in judged]
     except ValueError as error:
         return refuse(str(error))
     except (OSError, TypeError):
@@ -627,11 +647,37 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     kept = gate.get("kept_org_reason")
     if isinstance(kept, dict) and kept.get("run_id") == run_id:
         return refuse("this run already kept its org")
-    for kind, step_id, given in found:
-        if given != {"FALSE_FAILURE"}:
-            return refuse(f"{kind} {step_id} is {'/'.join(sorted(given or ())) or 'not verified'}, "
+
+    # Separate real failures from other non-PASS steps
+    real_failures = [(step_id, status) for step_id, status in steps if status in _REAL_FAIL]
+    other_non_pass = [(step_id, status) for step_id, status in steps
+                      if status != "PASS" and status not in _REAL_FAIL]
+
+    # Check that no step has FALSE_PASS verdict
+    for step_id, _ in steps:
+        step_verdicts = verdicts.get(step_id, set())
+        if "FALSE_PASS" in step_verdicts:
+            return refuse(f"step {step_id} has FALSE_PASS verdict")
+
+    # Check that every real failure has exactly {"FALSE_FAILURE"} verdict
+    verified_false_failures = []
+    for step_id, status in real_failures:
+        step_verdicts = verdicts.get(step_id, set())
+        if step_verdicts != {"FALSE_FAILURE"}:
+            return refuse(f"failure step {step_id} is {'/'.join(sorted(step_verdicts or ())) or 'not verified'}, "
                           "not FALSE_FAILURE")
-    stop = judged[0][1]
+        verified_false_failures.append(step_id)
+
+    # Check that every other non-PASS step has an inconclusive status
+    inconclusive_statuses = _INCONCLUSIVE | {"NOT_RUN"}
+    for step_id, status in other_non_pass:
+        if status not in inconclusive_statuses:
+            return refuse(f"non-failure step {step_id} has status {status}, not inconclusive")
+
+    # Require at least one verified false failure for the org to have moved
+    if not verified_false_failures:
+        return refuse("no real failures to verify")
+
     run_index = summary["org"] - 1
     if run_index < gate_floor(gate):
         return refuse("that run used a retired org (W-098)")
@@ -641,10 +687,12 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         "org": run_index,
         "frozen": False,
         "reason": "",
-        "kept_org_reason": {"step_id": str(stop), "verdict": "FALSE_FAILURE", "run_id": run_id},
+        "kept_org_reason": {"verified_false_failures": verified_false_failures, "run_id": run_id},
     })
     _save_gate_locked(private_root, gate)
-    print(f"Gate open. Org kept: {judged[0][0]} {stop} was a FALSE_FAILURE. Next run uses org {run_index + 1}.")
+    failures_msg = ", ".join(verified_false_failures)
+    print(f"Gate open. Org kept: {len(verified_false_failures)} verified false failure(s) "
+          f"({failures_msg}). Next run uses org {run_index + 1}.")
     return 0
 
 
