@@ -80,12 +80,109 @@ th{{color:var(--text_secondary);font-weight:600}}.chip{{font-weight:600}}.muted{
 """
 
 
+def status_line(run_dir: Path | None = None) -> str:
+    """Generate one-line status from newest run or given run_dir."""
+    if run_dir is None:
+        # Find newest run
+        home = Path.home() / ".workshop-validator"
+        runs = home / "runs"
+        if not runs.exists():
+            return "No runs found"
+
+        # Find all run directories
+        run_dirs = []
+        for org_dir in runs.iterdir():
+            if org_dir.is_dir():
+                for run in org_dir.iterdir():
+                    if run.is_dir() and (run / "summary.json").exists():
+                        run_dirs.append(run)
+
+        if not run_dirs:
+            return "No runs found"
+
+        # Get newest by modification time
+        run_dir = max(run_dirs, key=lambda p: p.stat().st_mtime)
+
+    # Read summary.json and board.json
+    summary_file = run_dir / "summary.json"
+    board_file = run_dir / "board.json"
+
+    if not summary_file.exists():
+        return "No summary.json found"
+
+    try:
+        summary = json.loads(summary_file.read_text())
+    except (OSError, ValueError):
+        return "Cannot read summary.json"
+
+    # Read board.json if it exists
+    board = {}
+    if board_file.exists():
+        try:
+            board = json.loads(board_file.read_text())
+        except (OSError, ValueError):
+            pass
+
+    # Extract guide name
+    guide_name = summary.get("guide", "Unknown guide")
+
+    # Get furthest step (last step with status != NOT_RUN)
+    steps = board.get("steps", [])
+    furthest_step = "None"
+    for step in reversed(steps):
+        if step.get("status") != "NOT_RUN":
+            furthest_step = step.get("id", "Unknown")
+            break
+
+    # Count statuses
+    counts = {"PASS": 0, "NEEDS_REVIEW": 0, "FAIL": 0, "NOT_RUN": 0}
+    for step in steps:
+        status = step.get("status", "NOT_RUN")
+        if status in ("UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED", "AUTH_BLOCKED"):
+            counts["FAIL"] += 1
+        elif status in counts:
+            counts[status] += 1
+        else:
+            counts["FAIL"] += 1
+
+    # Get top 3 failures
+    failures = []
+    for step in steps:
+        status = step.get("status", "NOT_RUN")
+        if status in ("UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED", "AUTH_BLOCKED", "NEEDS_REVIEW"):
+            step_id = step.get("id", "Unknown")
+            reason = (step.get("note", "") or "")[:80]
+            failures.append(f"{step_id}: {status}: {reason}")
+            if len(failures) >= 3:
+                break
+
+    # Build status line
+    parts = [
+        guide_name,
+        furthest_step,
+        f"PASS {counts['PASS']} / NEEDS_REVIEW {counts['NEEDS_REVIEW']} / FAIL {counts['FAIL']} / NOT_RUN {counts['NOT_RUN']}"
+    ]
+
+    if failures:
+        parts.append(" | ".join(failures))
+
+    return "; ".join(parts)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Render the private team dashboard.")
     parser.add_argument("--repo", default=".")
     parser.add_argument("--private-root", default=None)
     parser.add_argument("--open", action="store_true", help="Open it in the default browser")
+    parser.add_argument("--status-line", action="store_true", help="Print one-line status")
+    parser.add_argument("--run-dir", help="Run directory for status-line")
     args = parser.parse_args(argv)
+
+    if args.status_line:
+        run_dir = Path(args.run_dir) if args.run_dir else None
+        print(status_line(run_dir))
+        return 0
+
     repo = Path(args.repo).resolve()
     team = team_kit.team_root(Path(args.private_root).expanduser() if args.private_root else None)
     now = datetime.now(timezone.utc)

@@ -34,7 +34,7 @@ VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b"
 # Legacy copies (no FORMAT line, no history): main's rule, case-sensitive, last match wins.
 LEGACY_VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
 PASSING = {"APPROVE", "CLEAR"}
-ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
+ALWAYS_REVIEWERS = ("code-reviewer",)
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
 OID_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 NOREPLY_PATTERN = re.compile(r"[^@\s]+@users\.noreply\.github\.com\Z")
@@ -338,6 +338,8 @@ SECURITY_FILES = {".claude/settings.json", ".claude/settings.local.json",
                   "workshop_validator/team_hooks.py", "workshop_validator/team_gates.py",
                   "workshop_validator/team_kit.py", "workshop_validator/watchdog.py",
                   "workshop_validator/public_safety.py", "workshop_validator/team_state.py"}
+PRIVACY_FILES = {"workshop_validator/private_runner.py", "workshop_validator/report.py",
+                 "workshop_validator/step_board.py", "workshop_validator/automate.py"}
 
 
 def required_reviewers(changed: list[str]) -> list[str]:
@@ -346,6 +348,8 @@ def required_reviewers(changed: list[str]) -> list[str]:
         roles.append("rule-auditor")
     if any(name.startswith(SECURITY_PREFIXES) or name in SECURITY_FILES for name in changed):
         roles.append("security-reviewer")
+    if any(name in PRIVACY_FILES for name in changed):
+        roles.append("privacy-reviewer")
     return roles
 
 
@@ -551,6 +555,10 @@ def merge_when_green(repo: Path, team: Path, pr: int, dry_run: bool = False, run
         print(f"merge-when-green: FAIL git fetch origin {base_name} {head} exited {fetched.returncode}")
         return 1
     if not merged_tree_gates(repo, head_oid, runner=runner):
+        return 1
+    # Safety scan on merged tree diff
+    if not safety_scan(repo, "origin/main", head_oid, runner=runner):
+        print("merge-when-green: FAIL safety scan blocked")
         return 1
     # New or changed tests must fail on base code: base = merge-base(PR base branch, head).
     if not prove_tests(repo, f"origin/{base_name}", head_oid, runner=runner):
@@ -1148,6 +1156,236 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
             _git(repo, "worktree", "prune", check=False, runner=runner)
 
 
+# ---- safety-scan -----------------------------------------------------------
+
+# Patterns for safety checks
+ORG_HOSTNAME = re.compile(r"\b(?!example\.)[a-z0-9-]+\.(my\.salesforce\.com|lightning\.force\.com)\b")
+EMAIL_RESERVED = ("example.com", "example.org", "test.com", "localhost", "users.noreply.github.com")
+USER_HOME = re.compile(r"/(?:Users|home)/[^/\s]+/")
+RUN_OUTPUT_PATH = re.compile(r"/runs/[^/]+/[0-9TZ-]+/")
+MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".webm", ".mov", ".pdf")
+PRIVATE_FILE_NAMES = ("verification-orgs.json", "browser-state.json", "lessons.json", "aliases.json")
+# Allowlisted test strings that contain private file names
+PRIVATE_FILE_ALLOWLIST = ("test_verification_orgs", "test_browser_state", "test_lessons", "test_aliases",
+                          "fake_aliases.json", "mock_lessons.json", "stub_orgs.json")
+# SHA-256 hashes (64 hex chars) that are allowlisted
+SHA256_ALLOWLIST = frozenset()
+LONG_HEX_BASE64 = re.compile(r"[A-Fa-f0-9]{40,}|[A-Za-z0-9+/]{40,}={0,2}")
+
+
+def safety_scan_checks(diff: str) -> dict[str, int]:
+    """Return hit counts for each safety check category."""
+    hits = {
+        "org-hostname": 0,
+        "email": 0,
+        "user-home": 0,
+        "run-output": 0,
+        "media": 0,
+        "private-files": 0,
+        "long-secrets": 0,
+    }
+    for file_path, line in added_lines(diff):
+        # org hostname
+        if ORG_HOSTNAME.search(line):
+            hits["org-hostname"] += 1
+        # email outside reserved domains
+        for match in EMAIL_PATTERN.finditer(line):
+            email = match.group(0)
+            domain = email.split("@")[-1].lower().strip('"\'')
+            if domain not in EMAIL_RESERVED:
+                hits["email"] += 1
+        # user home paths
+        if USER_HOME.search(line):
+            hits["user-home"] += 1
+        # run output paths
+        if RUN_OUTPUT_PATH.search(line):
+            hits["run-output"] += 1
+        # media extensions
+        if any(line.lower().endswith(ext) or f"{ext}\"" in line.lower() or f"{ext}'" in line.lower()
+               for ext in MEDIA_EXTENSIONS):
+            hits["media"] += 1
+        # private file names (unless in allowlist)
+        for private_name in PRIVATE_FILE_NAMES:
+            if private_name in line and not any(allowed in line for allowed in PRIVATE_FILE_ALLOWLIST):
+                hits["private-files"] += 1
+        # long hex or base64 strings (unless allowlisted SHA-256)
+        for match in LONG_HEX_BASE64.finditer(line):
+            token = match.group(0)
+            # Skip if it's an allowlisted SHA-256 hash
+            if len(token) == 64 and token.lower() in SHA256_ALLOWLIST:
+                continue
+            hits["long-secrets"] += 1
+    return hits
+
+
+def safety_scan(repo: Path, base_ref: str, head_sha: str, runner=None) -> bool:
+    """Run public_safety and scan diff for safety violations. Return True if clear."""
+    run = runner or _default_runner
+    python = repo / ".venv" / "bin" / "python"
+
+    # Run public_safety first
+    result = run([str(python), "-m", "workshop_validator.public_safety"], repo)
+    if result.returncode:
+        print("SAFETY: BLOCK public_safety failed")
+        return False
+
+    # Get diff
+    diff = _git(repo, "diff", base_ref, head_sha, runner=runner)
+    hits = safety_scan_checks(diff)
+
+    # Print each check with hit count
+    for check, count in hits.items():
+        print(f"  {check}: {count} hit(s)")
+
+    # BLOCK if any hits
+    if any(hits.values()):
+        print("SAFETY: BLOCK")
+        return False
+
+    print("SAFETY: CLEAR")
+    return True
+
+
+# ---- prove -----------------------------------------------------------------
+
+def prove_command(repo: Path, base_ref: str, test_modules: list[str], mutants_file: str | None, runner=None) -> bool:
+    """Run prove: tests pass on head, fail on base, and mutants are killed."""
+    run = runner or _default_runner
+    python = repo / ".venv" / "bin" / "python"
+
+    # (a) Run tests on working tree
+    print("prove: running tests on working tree")
+    env_vars = {"RUN_BROWSER_SMOKE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    env = {**os.environ, **env_vars}
+    result = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+                           cwd=repo, capture_output=True, text=True, env=env, timeout=300)
+
+    if result.returncode:
+        # Check for skipped or failed tests
+        if "FAILED" in result.stderr or "ERROR" in result.stderr:
+            print("PROVE: FAIL tests failed on head")
+            return False
+        print("PROVE: FAIL tests failed on head")
+        return False
+
+    # Check for skipped tests
+    if "skipped=" in result.stderr and not result.stderr.endswith("skipped=0"):
+        # Parse to see if any tests were skipped
+        import re
+        skip_match = re.search(r'skipped=(\d+)', result.stderr)
+        if skip_match and int(skip_match.group(1)) > 0:
+            print("PROVE: FAIL tests skipped on head")
+            return False
+
+    # (b) Run tests on base in temp worktree
+    print("prove: running tests on base")
+    with tempfile.TemporaryDirectory(prefix="prove-", dir=None) as tmp_root:
+        os.chmod(tmp_root, 0o700)
+        tmp = Path(tmp_root)
+        base_tree = tmp / "base"
+
+        try:
+            _git(repo, "worktree", "add", "--detach", str(base_tree), base_ref, runner=runner)
+
+            # Copy test files to base tree
+            for test_mod in test_modules:
+                test_file = test_mod.replace(".", "/") + ".py"
+                src = repo / test_file
+                dst = base_tree / test_file
+                if src.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(src.read_bytes())
+
+            # Run tests on base
+            result_base = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+                                        cwd=base_tree, capture_output=True, text=True, env=env, timeout=300)
+
+            # Tests should fail on base
+            if result_base.returncode == 0:
+                # Find which tests passed on base (they should have failed)
+                print("PROVE: FAIL tests passed on base (should fail)")
+                return False
+
+            # Parse failing test names
+            failing_tests = []
+            for line in result_base.stderr.splitlines():
+                if line.startswith("FAIL:") or line.startswith("ERROR:"):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        failing_tests.append(parts[1])
+
+            if not failing_tests:
+                print("PROVE: FAIL no tests failed on base")
+                return False
+
+            print(f"prove: {len(failing_tests)} test(s) fail on base")
+
+        finally:
+            _git(repo, "worktree", "remove", "--force", str(base_tree), check=False, runner=runner)
+
+    # (c) Run mutants if provided
+    if mutants_file:
+        print("prove: running mutants")
+        try:
+            with open(mutants_file, 'r') as f:
+                mutants = json.load(f)
+        except (OSError, ValueError) as e:
+            print(f"PROVE: FAIL cannot read mutants file: {e}")
+            return False
+
+        if not isinstance(mutants, list):
+            print("PROVE: FAIL mutants file is not a list")
+            return False
+
+        for i, mutant in enumerate(mutants):
+            if not isinstance(mutant, dict) or "file" not in mutant or "find" not in mutant or "replace" not in mutant:
+                print(f"PROVE: FAIL mutant {i} missing required fields")
+                return False
+
+            print(f"prove: testing mutant {i+1}/{len(mutants)}: {mutant['file']}")
+
+            with tempfile.TemporaryDirectory(prefix="prove-mutant-", dir=None) as tmp_root:
+                os.chmod(tmp_root, 0o700)
+                tmp = Path(tmp_root)
+                mutant_tree = tmp / "mutant"
+
+                try:
+                    _git(repo, "worktree", "add", "--detach", str(mutant_tree), "HEAD", runner=runner)
+
+                    # Apply mutant
+                    target_file = mutant_tree / mutant["file"]
+                    if not target_file.exists():
+                        print(f"PROVE: FAIL mutant file {mutant['file']} not found")
+                        return False
+
+                    content = target_file.read_text()
+                    if mutant["find"] not in content:
+                        print(f"PROVE: FAIL mutant find string not in {mutant['file']}")
+                        return False
+
+                    mutated = content.replace(mutant["find"], mutant["replace"], 1)
+                    target_file.write_text(mutated)
+
+                    # Run tests on mutant
+                    result_mutant = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+                                                  cwd=mutant_tree, capture_output=True, text=True,
+                                                  env=env, timeout=300)
+
+                    # Mutant should be killed (tests should fail)
+                    if result_mutant.returncode == 0:
+                        print(f"PROVE: FAIL mutant survived: {mutant['file']}")
+                        return False
+
+                finally:
+                    _git(repo, "worktree", "remove", "--force", str(mutant_tree), check=False, runner=runner)
+
+        print(f"prove: {len(mutants)} mutant(s) killed")
+
+    # (d) Final result
+    print("PROVE: PASS")
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Producer-team merge gates.")
     parser.add_argument("--repo", default=".")
@@ -1162,6 +1400,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("clock12")
     pt = sub.add_parser("prove-tests")
     pt.add_argument("pr", type=int)
+    prove_parser = sub.add_parser("prove")
+    prove_parser.add_argument("--base", required=True, help="Base ref to compare against")
+    prove_parser.add_argument("--tests", required=True, nargs="+", help="Test modules to run")
+    prove_parser.add_argument("--mutants", help="JSON file with mutants")
+    safety_parser = sub.add_parser("safety-scan")
+    safety_parser.add_argument("--base", required=True, help="Base ref")
+    safety_parser.add_argument("--head", required=True, help="Head SHA")
     mwg = sub.add_parser("merge-when-green")
     mwg.add_argument("pr", type=int)
     mwg.add_argument("--dry-run", action="store_true")
@@ -1187,6 +1432,10 @@ def main(argv: list[str] | None = None) -> int:
             print(f"prove-tests: UNPROVEN cannot read head and base of PR #{args.pr}")
             return 1
         return 0 if prove_tests(repo, f"origin/{base_name}", head_oid) else 1
+    if args.cmd == "prove":
+        return 0 if prove_command(repo, args.base, args.tests, args.mutants) else 1
+    if args.cmd == "safety-scan":
+        return 0 if safety_scan(repo, args.base, args.head) else 1
     if args.cmd == "merge-when-green":
         return merge_when_green(repo, team, args.pr, args.dry_run)
     if args.cmd == "worktree-cleanup":
