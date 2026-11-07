@@ -287,105 +287,92 @@ class TestOpenFlowBrowser(unittest.TestCase):
         from playwright.sync_api import sync_playwright
         from workshop_validator.guide_walk import attempt_step, WalkState
 
-        flows_html = """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Flows</title></head>
-        <body>
-            <h1>Flows</h1>
-            <div role="grid">
-                <a role="link" href="builder.html">Test Flow Alpha</a>
-                <a role="link" href="builder.html">Other Flow</a>
-            </div>
-        </body>
-        </html>
-        """
+        flows_html = """<!DOCTYPE html>
+<html>
+<head><title>Flows</title></head>
+<body>
+    <h1>Flows</h1>
+    <div role="grid">
+        <a role="link" href="/builder">Test Flow Alpha</a>
+        <a role="link" href="/builder">Other Flow</a>
+    </div>
+</body>
+</html>"""
 
-        builder_html = """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Flow Builder</title></head>
-        <body>
-            <h1>Test Flow Alpha</h1>
-            <builder_platform_interaction-canvas style="display: block; width: 100px; height: 100px;"></builder_platform_interaction-canvas>
-            <button>Toggle Toolbox</button>
-        </body>
-        </html>
-        """
+        builder_html = """<!DOCTYPE html>
+<html>
+<head><title>Flow Builder</title></head>
+<body>
+    <h1>Test Flow Alpha</h1>
+    <builder_platform_interaction-canvas style="display: block; width: 100px; height: 100px;"></builder_platform_interaction-canvas>
+    <button>Toggle Toolbox</button>
+</body>
+</html>"""
 
-        import tempfile
-        import os
-        with tempfile.TemporaryDirectory() as tmpdir:
-            flows_path = os.path.join(tmpdir, "flows.html")
-            builder_path = os.path.join(tmpdir, "builder.html")
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
 
-            with open(flows_path, "w") as f:
-                f.write(flows_html)
-            with open(builder_path, "w") as f:
-                f.write(builder_html)
+            # Intercept navigation to serve our synthetic HTML
+            def handle_route(route):
+                if "/setup/flows" in route.request.url:
+                    route.fulfill(body=flows_html, content_type="text/html")
+                elif "/builder" in route.request.url:
+                    route.fulfill(body=builder_html, content_type="text/html")
+                else:
+                    route.continue_()
 
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                page.goto(f"file://{flows_path}")
+            page.route("**/*", handle_route)
 
-                # Hack the URL to look like /setup/flows
-                page.evaluate("window.history.replaceState({}, '', '/setup/flows')")
+            # Navigate to the flows page
+            page.goto("https://example.lightning.force.com/setup/flows")
 
-                step = _step("Open the Flow Test Flow Alpha.")
-                state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
+            step = _step("Open the Flow Test Flow Alpha.")
+            state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
-                result = attempt_step(state, step, 0)
+            result = attempt_step(state, step, 0)
 
-                browser.close()
+            browser.close()
 
-                self.assertEqual(result.status, "PASS")
-                self.assertIn("Test Flow Alpha", result.note)
+            self.assertEqual(result.status, "PASS")
+            self.assertIn("Test Flow Alpha", result.note)
 
     def test_open_flow_browser_needs_review_with_duplicate_rows(self):
         """Real browser: duplicate rows returns NEEDS_REVIEW."""
         from playwright.sync_api import sync_playwright
         from workshop_validator.guide_walk import attempt_step, WalkState
 
-        flows_html = """
-        <!DOCTYPE html>
-        <html>
-        <head><title>Flows</title></head>
-        <body>
-            <h1>Flows</h1>
-            <div role="grid">
-                <a role="link" href="builder.html">Duplicate Flow</a>
-                <a role="link" href="builder.html">Duplicate Flow</a>
-            </div>
-        </body>
-        </html>
-        """
+        flows_html = """<!DOCTYPE html>
+<html>
+<head><title>Flows</title></head>
+<body>
+    <h1>Flows</h1>
+    <div role="grid">
+        <a role="link" href="/builder">Duplicate Flow</a>
+        <a role="link" href="/builder">Duplicate Flow</a>
+    </div>
+</body>
+</html>"""
 
-        import tempfile
-        import os
-        with tempfile.TemporaryDirectory() as tmpdir:
-            flows_path = os.path.join(tmpdir, "flows.html")
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
 
-            with open(flows_path, "w") as f:
-                f.write(flows_html)
+            # Intercept navigation to serve our synthetic HTML
+            page.route("**/*", lambda route: route.fulfill(body=flows_html, content_type="text/html"))
 
-            with sync_playwright() as p:
-                browser = p.chromium.launch()
-                page = browser.new_page()
-                page.goto(f"file://{flows_path}")
+            # Navigate to the flows page
+            page.goto("https://example.lightning.force.com/setup/flows")
 
-                # Hack the URL to look like /setup/flows
-                page.evaluate("window.history.replaceState({}, '', '/setup/flows')")
+            step = _step("Open the Flow Duplicate Flow.")
+            state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
 
-                step = _step("Open the Flow Duplicate Flow.")
-                state = WalkState(page=page, timeout_s=5, interval_s=0.5, page_wait_s=2)
+            result = attempt_step(state, step, 0)
 
-                result = attempt_step(state, step, 0)
+            browser.close()
 
-                browser.close()
-
-                self.assertEqual(result.status, "NEEDS_REVIEW")
-                self.assertIn("Found 2 flows", result.note)
+            self.assertEqual(result.status, "NEEDS_REVIEW")
+            self.assertIn("Found 2 flows", result.note)
 
 
 if __name__ == "__main__":
