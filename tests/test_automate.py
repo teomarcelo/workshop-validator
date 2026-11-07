@@ -604,22 +604,41 @@ class RunLockTests(unittest.TestCase):
             save_gate(root, {"org": 0, "frozen": False, "reason": ""})
             (root / "history.json").write_text(json.dumps([]), encoding="utf-8")
 
-            # Create and hold the lock in this process
-            lock_path = root / "automate.lock"
-            lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            os.write(fd, b"12345")  # fake pid
+            # Start a subprocess that holds the lock and writes its pid
+            code = f"""
+import fcntl
+import os
+import time
+from pathlib import Path
 
+root = Path({repr(str(root))})
+lock_path = root / "automate.lock"
+lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+fcntl.flock(fd, fcntl.LOCK_EX)
+our_pid = str(os.getpid())
+os.ftruncate(fd, 0)
+os.lseek(fd, 0, os.SEEK_SET)
+os.write(fd, our_pid.encode('utf-8'))
+os.fsync(fd)
+print(our_pid, flush=True)  # tell parent the pid
+time.sleep(10)  # hold the lock
+"""
+            holder = subprocess.Popen([sys.executable, "-c", code],
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             try:
-                # Try to run automate while we hold the lock
+                # Wait for the holder to write its pid
+                holder_pid = holder.stdout.readline().strip()
+                time.sleep(0.2)  # give it time to hold the lock
+
+                # Try to run automate while the holder has the lock
                 result = subprocess.run(
                     [sys.executable, "-m", "workshop_validator.automate",
                      "--guide", "/nonexistent.pdf", "--private-root", str(root), "--no-open"],
                     capture_output=True, text=True, timeout=5
                 )
                 self.assertEqual(result.returncode, 2)
-                self.assertIn("Refused: another walk is running (pid 12345)", result.stdout)
+                self.assertIn(f"Refused: another walk is running (pid {holder_pid})", result.stdout)
                 # Nothing changed
                 gate = load_gate(root)
                 self.assertEqual(gate["org"], 0)
@@ -627,8 +646,10 @@ class RunLockTests(unittest.TestCase):
                 history = json.loads((root / "history.json").read_text(encoding="utf-8"))
                 self.assertEqual(history, [])
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                holder.kill()
+                holder.wait()
+                holder.stdout.close()
+                holder.stderr.close()
 
     def test_lock_released_after_exception(self):
         """The lock is released after an exception inside run_next."""
