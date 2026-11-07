@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import unicodedata
@@ -431,34 +432,41 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
 # ---- review verdicts -------------------------------------------------------
 
 ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
-HEAD_OID = re.compile(r"^[0-9a-f]{40}$")  # Full 40-hex only
-HEAD_OID_SHORT = re.compile(r"^[0-9a-f]{7,40}$")  # For resolving to full
+HEAD_OID = re.compile(r"[0-9a-f]{40}")  # Full 40-hex only; always used with fullmatch
+# Any line that looks like a verdict, even quoted or decorated ("> VERDICT:", "**verdict:").
+VERDICT_LIKE_LINE = re.compile(r"^\W*VERDICT\s*:", re.MULTILINE | re.IGNORECASE)
 
 
 def reviews_dir(team: Path) -> Path:
     return team / "reviews"
 
 
-def _resolve_full_head(pr: int, head: str) -> str:
-    """Resolve a short head to the PR's full headRefOid, or refuse unless given 40 hex."""
-    head = head.strip().lower()
-    if HEAD_OID.match(head):
-        return head
-    if not HEAD_OID_SHORT.match(head):
-        raise ValueError("head must be 7 to 40 hex characters")
-    # Try to get full headRefOid from GitHub
+def _full_head(head: str) -> str:
+    """Return the head in lower case, or refuse unless it is exactly 40 hex characters.
+
+    Short heads are never resolved: a short or stale prefix could name another commit.
+    """
+    value = (head or "").strip().lower()
+    if not HEAD_OID.fullmatch(value):
+        raise ValueError("head is not 40 hex characters; pass the full 40-hex headRefOid "
+                         "(gh pr view <N> --json headRefOid); short heads are refused")
+    return value
+
+
+def _open_checked(path: Path, flags: int, what: str) -> int:
+    """Open without following a symlink; refuse unless a regular file with one link."""
+    fd = os.open(path, flags | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0), 0o600)
     try:
-        result = subprocess.run(
-            ["gh", "pr", "view", str(pr), "--json", "headRefOid"],
-            capture_output=True, text=True, check=True, timeout=10
-        )
-        data = json.loads(result.stdout)
-        full_head = data.get("headRefOid", "").strip().lower()
-        if not HEAD_OID.match(full_head):
-            raise ValueError(f"gh pr view returned invalid headRefOid: {full_head}")
-        return full_head
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, KeyError) as e:
-        raise ValueError(f"Could not resolve short head {head} to full headRefOid: {e}")
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{what} is not a regular file")
+        if info.st_nlink != 1:
+            raise ValueError(f"{what} has hard links (st_nlink != 1)")
+        os.fchmod(fd, 0o600)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
 
 
 def save_review(team: Path, pr: int, role: str, head: str, reply: str,
@@ -477,8 +485,7 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
         raise ValueError("pr must be a positive number")
     if not ROLE_NAME.match(role or ""):
         raise ValueError("role must be lower-case letters, digits and dashes")
-    # Resolve to full 40-hex head
-    full_head = _resolve_full_head(pr, head)
+    full_head = _full_head(head)
     body = (reply or "").strip()
     if not body:
         raise ValueError("reviewer reply on stdin is empty")
@@ -487,7 +494,11 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
     verdict_match = team_gates.VERDICT.search(body)
     if not verdict_match:
         raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
-    # Parse verdict once here (case-insensitive), store it
+    # One verdict rule: a reply with more than one verdict-like line is refused, so a quoted
+    # "VERDICT: APPROVE" inside a VETO can never be read as the verdict by anyone.
+    if len(VERDICT_LIKE_LINE.findall(body)) != 1:
+        raise ValueError("reviewer reply must contain exactly one VERDICT line; "
+                         "remove quoted or repeated VERDICT lines")
     verdict = verdict_match.group(1).upper()
     # Validate supersedes parameters
     if (supersedes_ts is None) != (supersedes_reason is None):
@@ -500,7 +511,7 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     # Build JSON Lines record
-    timestamp = datetime.now(timezone.utc).isoformat()
+    timestamp = datetime.now(timezone.utc).isoformat(timespec="microseconds")
     record = {
         "head": full_head,
         "ts": timestamp,
@@ -512,40 +523,25 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
     }
     json_line = json.dumps(record, ensure_ascii=False) + "\n"
 
-    # Append to history with hard-link check
-    history_fd = os.open(history_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    latest_content = f"HEAD: {full_head}\nFORMAT: 2\n{body}\n"
+
+    # Check both files before writing either. The latest copy is opened without O_TRUNC,
+    # so a hard-linked or odd file is refused before a single byte of it changes.
+    history_fd = _open_checked(history_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, "history path")
     try:
-        stat_info = os.fstat(history_fd)
-        import stat as stat_module
-        if not stat_module.S_ISREG(stat_info.st_mode):
-            raise ValueError("history path is not a regular file")
-        if stat_info.st_nlink != 1:
-            raise ValueError("history path has hard links (st_nlink != 1)")
-        os.fchmod(history_fd, 0o600)
+        fd = _open_checked(path, os.O_WRONLY | os.O_CREAT, "latest copy path")
+    except BaseException:
+        os.close(history_fd)
+        raise
+    try:
         with os.fdopen(history_fd, "a", encoding="utf-8") as handle:
             handle.write(json_line)
-            history_fd = None  # fdopen took ownership
-    finally:
-        if history_fd is not None:
-            os.close(history_fd)
-
-    # Write the latest copy with FORMAT: 2 and hard-link check
-    latest_content = f"HEAD: {full_head}\nFORMAT: 2\n{body}\n"
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
-    try:
-        stat_info = os.fstat(fd)
-        import stat as stat_module
-        if not stat_module.S_ISREG(stat_info.st_mode):
-            raise ValueError("latest copy path is not a regular file")
-        if stat_info.st_nlink != 1:
-            raise ValueError("latest copy path has hard links (st_nlink != 1)")
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(latest_content)
-            fd = None  # fdopen took ownership
-    finally:
-        if fd is not None:
-            os.close(fd)
+    except BaseException:
+        os.close(fd)
+        raise
+    with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        os.ftruncate(handle.fileno(), 0)
+        handle.write(latest_content)
     return path
 
 
@@ -651,7 +647,7 @@ def main(argv: list[str] | None = None) -> int:
     rev = sub.add_parser("review", help="Save a reviewer reply (stdin) as reviews/pr-N-ROLE.md")
     rev.add_argument("--pr", type=int, required=True)
     rev.add_argument("--role", required=True)
-    rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
+    rev.add_argument("--head", required=True, help="The full 40-hex PR headRefOid the reviewer saw")
     rev.add_argument("--supersedes", help="Timestamp of a prior verdict this review supersedes")
     rev.add_argument("--reason", help="Reason for superseding a prior verdict")
     dec = sub.add_parser("decide", help="Append decision row and render dashboard")
