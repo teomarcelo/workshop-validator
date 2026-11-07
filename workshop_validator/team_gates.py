@@ -143,17 +143,76 @@ def is_review_stale(content: str, head_oid: str) -> bool:
     return not (len(review_oid) >= 7 and head_oid.startswith(review_oid))
 
 
+def _parse_review_history(history_path: Path, head_oid: str) -> list[dict]:
+    """Parse history file into records with head, timestamp, verdict, supersedes."""
+    if not history_path.exists():
+        return []
+    content = history_path.read_text(encoding="utf-8")
+    records = []
+    for block in content.split("--- REVIEW RECORD ---"):
+        block = block.strip()
+        if not block:
+            continue
+        lines = block.splitlines()
+        record = {"head": None, "timestamp": None, "verdict": None, "supersedes": None}
+        for line in lines:
+            if line.startswith("HEAD:"):
+                record["head"] = line.split(":", 1)[1].strip()
+            elif line.startswith("TIMESTAMP:"):
+                record["timestamp"] = line.split(":", 1)[1].strip()
+            elif line.startswith("SUPERSEDES:"):
+                record["supersedes"] = line.split(":", 1)[1].strip()
+        verdicts = VERDICT.findall(block)
+        if verdicts:
+            record["verdict"] = verdicts[-1]
+        # Only include records for the current head
+        if record["head"] and record["head"] == head_oid and record["verdict"]:
+            records.append(record)
+    return records
+
+
+def _check_blocking_verdicts(records: list[dict]) -> str | None:
+    """Return blocking verdict with timestamp, or None if not blocked."""
+    # Build a map of superseded timestamps
+    superseded = set()
+    for record in records:
+        if record.get("supersedes"):
+            parts = record["supersedes"].split(None, 1)
+            if len(parts) >= 2 and parts[1].strip():  # Must have timestamp and non-empty reason
+                superseded.add(parts[0])
+    # Check for any VETO or BLOCK that is not superseded
+    for record in records:
+        if record["verdict"] in ("VETO", "BLOCK"):
+            if record["timestamp"] not in superseded:
+                ts = record["timestamp"][:19] if record["timestamp"] else "unknown"
+                return f"{record['verdict']} at {ts}"
+    return None
+
+
 def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict[str, str]:
-    """Load review verdicts. If head_oid is given, mark stale reviews as STALE."""
+    """Load review verdicts. If head_oid is given, mark stale reviews as STALE.
+
+    Check history for any VETO or BLOCK verdicts for the current head that are not superseded.
+    """
     verdicts = {}
     for path in sorted(reviews.glob(f"pr-{pr}-*.md")):
         role = path.stem[len(f"pr-{pr}-"):]
+        if role.endswith(".history"):
+            continue
         content = path.read_text(encoding="utf-8")
         found = VERDICT.findall(content)
         verdict = found[-1] if found else "MISSING"
         # Fail closed: empty/missing head_oid or stale review marks PASSING verdicts as STALE
         if verdict in PASSING and (not head_oid or not head_oid.strip() or is_review_stale(content, head_oid)):
             verdict = "STALE"
+        # Check history for blocking verdicts
+        if head_oid and head_oid.strip():
+            history_path = reviews / f"pr-{pr}-{role}.history.md"
+            if history_path.exists():
+                records = _parse_review_history(history_path, head_oid)
+                blocking = _check_blocking_verdicts(records)
+                if blocking:
+                    verdict = blocking
         verdicts[role] = verdict
     return verdicts
 

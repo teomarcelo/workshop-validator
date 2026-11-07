@@ -438,8 +438,12 @@ def reviews_dir(team: Path) -> Path:
     return team / "reviews"
 
 
-def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
+def save_review(team: Path, pr: int, role: str, head: str, reply: str,
+                supersedes_ts: str | None = None, supersedes_reason: str | None = None) -> Path:
     """Write reviews/pr-<pr>-<role>.md with 'HEAD: <head>' as its first line (0600).
+
+    Append to reviews/pr-<pr>-<role>.history.md with a UTC timestamp for each record.
+    If supersedes_ts and supersedes_reason are given, add a SUPERSEDES line.
 
     This is the only way the producer saves a verdict; the write guard denies the
     Write and Edit tools in reviews/ so a session cannot hand-write one by mistake.
@@ -458,11 +462,36 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str) -> Path:
     from . import team_gates
     if not team_gates.VERDICT.search(body):
         raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
+    # Validate supersedes parameters
+    if (supersedes_ts is None) != (supersedes_reason is None):
+        raise ValueError("supersedes_ts and supersedes_reason must both be provided or both be None")
+    if supersedes_ts and not supersedes_reason.strip():
+        raise ValueError("supersedes_reason must not be empty")
+
     path = reviews_dir(team) / f"pr-{pr}-{role}.md"
+    history_path = reviews_dir(team) / f"pr-{pr}-{role}.history.md"
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    # Build the record with timestamp
+    timestamp = datetime.now(timezone.utc).isoformat()
+    record_lines = [f"HEAD: {head}", f"TIMESTAMP: {timestamp}"]
+    if supersedes_ts and supersedes_reason:
+        record_lines.append(f"SUPERSEDES: {supersedes_ts} {supersedes_reason.strip()}")
+    record_lines.append(body)
+    record = "\n".join(record_lines) + "\n"
+
+    # Append to history (O_APPEND never truncates)
+    history_fd = os.open(history_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(history_fd, "a", encoding="utf-8") as handle:
+        handle.write("--- REVIEW RECORD ---\n")
+        handle.write(record)
+        handle.write("\n")
+    history_path.chmod(0o600)
+
+    # Write the latest copy (O_TRUNC is intentional here for the latest-only file)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0), 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(f"HEAD: {head}\n{body}\n")
+        handle.write(record)
     path.chmod(0o600)
     return path
 
@@ -570,6 +599,8 @@ def main(argv: list[str] | None = None) -> int:
     rev.add_argument("--pr", type=int, required=True)
     rev.add_argument("--role", required=True)
     rev.add_argument("--head", required=True, help="The PR headRefOid the reviewer saw")
+    rev.add_argument("--supersedes", help="Timestamp of a prior verdict this review supersedes")
+    rev.add_argument("--reason", help="Reason for superseding a prior verdict")
     dec = sub.add_parser("decide", help="Append decision row and render dashboard")
     dec.add_argument("--id", required=True, help="Decision ID (e.g., W-001)")
     dec.add_argument("--status", required=True, help="Decision status (RECOMMENDED, NOTED, OPEN, RESOLVED, SUPERSEDED)")
@@ -608,7 +639,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "review":
         try:
-            path = save_review(team, args.pr, args.role, args.head, sys.stdin.read())
+            path = save_review(team, args.pr, args.role, args.head, sys.stdin.read(),
+                             supersedes_ts=args.supersedes, supersedes_reason=args.reason)
         except (ValueError, OSError) as exc:
             print(f"review: REFUSED {exc}", file=sys.stderr)
             return 2
