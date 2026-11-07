@@ -604,25 +604,17 @@ class RunLockTests(unittest.TestCase):
             save_gate(root, {"org": 0, "frozen": False, "reason": ""})
             (root / "history.json").write_text(json.dumps([]), encoding="utf-8")
 
-            # Start a subprocess that holds the lock and writes its pid
+            # Start a subprocess that uses run_lock to hold the lock
             code = f"""
-import fcntl
 import os
 import time
 from pathlib import Path
+from workshop_validator.automate import run_lock
 
 root = Path({repr(str(root))})
-lock_path = root / "automate.lock"
-lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
-fcntl.flock(fd, fcntl.LOCK_EX)
-our_pid = str(os.getpid())
-os.ftruncate(fd, 0)
-os.lseek(fd, 0, os.SEEK_SET)
-os.write(fd, our_pid.encode('utf-8'))
-os.fsync(fd)
-print(our_pid, flush=True)  # tell parent the pid
-time.sleep(10)  # hold the lock
+with run_lock(root):
+    print(os.getpid(), flush=True)  # tell parent the pid
+    time.sleep(10)  # hold the lock
 """
             holder = subprocess.Popen([sys.executable, "-c", code],
                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
