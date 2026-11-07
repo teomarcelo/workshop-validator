@@ -21,7 +21,7 @@ Run `.venv/bin/python -m unittest discover -s tests` and `.venv/bin/python -m co
 
 Your report must paste the output of `.venv/bin/python -m workshop_validator.team_gates prove --base origin/main --tests <files> --mutants <file>` (P2 builds it). Claims without that output are not accepted.
 
-Reply with: files changed, the behavior change in one sentence, test results, and the prove command output. Under 150 words.
+Reply with: files changed, the behavior change in one sentence, test results, and the prove command output. Under 150 words (pasted prove output does not count against this limit).
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

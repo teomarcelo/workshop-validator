@@ -16,9 +16,9 @@ Look for:
 - An alias used before the exact guide name was tried, or an alias step not left as UI_MISMATCH.
 - A change that breaks a recorded team rule, or a fix with no test that fails without it.
 
-Tag every finding Critical, High, Medium or Low. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto. Judge the head yourself; never cite another verdict.
+Tag every finding Critical, High, Medium or Low. A false PASS, a broken binding rule, a leak of private data or a security hole is always Critical or High. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto. Judge the head yourself; never cite another verdict.
 
-Reply `APPROVE` or `VETO`, then at most 8 bullets with file:line and the rule broken. Approve only when you found nothing that breaks a rule.
+Reply `APPROVE` or `VETO`, then at most 8 bullets with file:line and the rule broken. Approve only when you found nothing that breaks a rule. A broken rule is always a VETO because it is always Critical or High.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

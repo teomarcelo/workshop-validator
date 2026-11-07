@@ -10,13 +10,13 @@ through review. No paid API is used.
 | `/validate-guide` (orchestrator) | Sonnet | Runs the loop, keeps budgets, tracks state via `team_state`, renders the report |
 | `run-operator` | Haiku | One `automate --json` run; returns the sanitized summary. Never reads credentials |
 | `step-verifier` | Sonnet | Visual verification from `walk.webm` frames; verdicts per step (batches of ~20) |
-| `failure-triager` | Sonnet | First failing step or step-verifier verdict; classifies the cause; writes a fix brief |
+| `failure-triager` | Sonnet | Failing steps and step-verifier verdicts; classifies causes; writes fix briefs |
 | `salesforce-doc-validator` (global) | Sonnet, Opus when ambiguous | Confirms a suspected UI rename against current Salesforce docs |
 | `check-fixer` | Sonnet | Smallest code fix plus a synthetic test |
 | `test-runner` | Haiku | Unit, compile, browser smoke and gates; fast-fails on unit or compile RED |
 | `rule-auditor` | Sonnet | Independent review of the diff against CLAUDE.md; can veto |
 | `lessons-keeper` | Haiku | Records each root cause (cause, fix, `never:` rule, PR) and each team mistake |
-| `safety-scanner` | Haiku | `public_safety` plus a staged-diff scan for leaks |
+| `safety-scanner` (until P2 merges) | Haiku | `public_safety` plus a staged-diff scan for leaks |
 | `git-publisher` | Haiku | Branch `automation/*`, commit, push, `gh pr create`, watch CI |
 
 ## Loop
@@ -26,10 +26,10 @@ through review. No paid API is used.
    - **Quick mode** (default): all non-PASS + PASS rows with `suspect` flags.
    - **Full mode** (`--mode full`): every step.
    - Batches of ~20 steps, ≤4 parallel batches.
-4. Triage: failure-triager on step-verifier verdicts or the first failure; confirm renames against docs.
+4. Triage: failure-triager on step-verifier verdicts; confirm renames against docs.
 5. Fix (check-fixer) → test (test-runner) → review (rule-auditor), at most 2 rework rounds.
-6. `automate --reset-gate`, re-run. At most 3 fix iterations.
-7. Lessons, report, then safety-scanner → git-publisher when code changed. `team_state finish`.
+6. `automate --reset-gate`, re-run. At most 3 runs (replaces: at most 3 fix iterations).
+7. Lessons, report, then safety-scanner (until P2 merges) → git-publisher when code changed. `team_state finish`.
 
 ## Self-healing
 Every failure leaves a lesson that changes what the team does next time.
@@ -111,7 +111,7 @@ Gates: `docs/MERGE-GATES.md`.
 2. Start a fresh executor (Sonnet, effort high) in its own worktree, or the
    `feature` workflow (`.claude/workflows/feature.js`: build, test, review, fix, re-review).
 3. Push, open a PR with the executor's report in the body.
-4. Fresh reviewers reply with a `VERDICT:` line. Reviewers tag every finding Critical, High, Medium or Low. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto; the producer copies them into one follow-up list in the register. At most 2 review rounds per PR. After round 2, the producer either merges with a follow-up row for what is left, or parks the PR. Reviewer sets: walk or check code gets code-reviewer and rule-auditor; gate, hook, CI, watchdog and agent-file code add security-reviewer; private_runner, report and output paths add privacy-reviewer. The safety check is the P2 script, run by the gate, not an agent. The producer saves each reply with `team_kit review --pr <N> --role <role> --head <headRefOid>`, which writes `reviews/pr-<N>-<role>.md` with `HEAD: <sha>` first. Only saved reviews count.
+4. Fresh reviewers reply with a `VERDICT:` line. Reviewers tag every finding Critical, High, Medium or Low. A false PASS, a broken binding rule, a leak of private data or a security hole is always Critical or High. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto; the producer copies them into one follow-up list in the register. At most 2 review rounds per PR. After round 2, merge with a follow-up row only when every open finding is Medium or Low. An open Critical or High finding parks the PR. A VETO is never superseded just to end the rounds. Reviewer sets: walk or check code gets code-reviewer and rule-auditor; gate, hook, CI, watchdog and agent-file code add security-reviewer; private_runner, report and output paths add privacy-reviewer. The safety check is the P2 script, run by the gate, not an agent. Until P2 (team_gates safety-scan) merges, safety-scanner still runs and must CLEAR. The producer saves each reply with `team_kit review --pr <N> --role <role> --head <headRefOid>`, which writes `reviews/pr-<N>-<role>.md` with `HEAD: <sha>` first. Only saved reviews count.
 5. Critical and High findings go to a new agent. At most 2 review rounds per PR.
 6. `team_gates merge-when-green <N>`: CI, verdicts, merged-tree gates,
    squash merge, main CI, same-turn revert PR when red.

@@ -1,6 +1,6 @@
 ---
 name: validate-guide
-description: Validate a Salesforce workshop guide PDF end to end - run it on the current verification org, triage the first failure, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
+description: Validate a Salesforce workshop guide PDF end to end - run it on the current verification org, triage failures, fix the validator, re-run, render the HTML report, and open a PR. Use when the user runs /validate-guide <pdf>.
 model: sonnet
 ---
 
@@ -27,7 +27,7 @@ The lock prevents concurrent runs.
 - At preflight, run `.venv/bin/python -m workshop_validator.lessons --rules` and paste
   the rules into the prompts of failure-triager, check-fixer and rule-auditor.
 - **Team failures are lessons too.** Whenever test-runner is RED, rule-auditor
-  vetoes, the same first failure repeats, an agent errors or returns nothing
+  vetoes, an agent errors or returns nothing
   usable, or a command in this skill fails, record it at once:
   `.venv/bin/python -m workshop_validator.lessons --record team --title "<agent/phase>" --cause "<what went wrong>" --fix "<what you did>" --never "<rule>"`.
   If the failure is in this skill or an agent file itself, say so in the final reply
@@ -42,13 +42,12 @@ to this guide's latest report on every other instance.
 
 ## Budgets
 - At most 3 runs per invocation.
+- At most 6 guide runs per guide per day across sessions.
 - Stop when a run shows no change from the last one (same counts and the same failure set), on AUTH_BLOCKED, or when `automate` exits 2 (refused / all orgs used).
 - Never retry around HTTP 429 (Option A). Never use more than one new org per iteration.
 
 ## Loop
-1. **Preflight.** `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`;
-   test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules
-   (`lessons --rules`).
+1. **Preflight.** Refuse to start a run if this session started before the last merge to `.claude/agents/` (compare the session start with `git log -1 --format=%cI -- .claude/agents/`); then fast-forward main with `git pull --ff-only` on main only. `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`; test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules (`lessons --rules`).
 2. **Run.** `team_state advance --phase run`. run-operator (background) with the PDF.
    **Never leave a run unattended:** while waiting, `team_state heartbeat` every
    2–3 minutes. Read its exit code and summary.
@@ -86,11 +85,10 @@ to this guide's latest report on every other instance.
    `.venv/bin/python -m workshop_validator.step_board --history ~/.workshop-validator`.
    The browser already shows the report; it reloads on its own only while running, so
    `open <run_dir>/report.html` once more after re-rendering.
-10. **Publish** (only if code changed): `team_state advance --phase publish`. safety-scanner
+10. **Publish** (only if code changed): `team_state advance --phase publish`. safety-scanner (until P2 merges)
    must be CLEAR, then git-publisher with the changed paths, the test result, the
    auditor verdict and the outcome counts. `team_state log --agent git-publisher --action pr-created --link <url>`, re-render.
 11. `team_state finish --outcome <outcome>`.
-12. After a walk-fix merge, the next step is a `/validate-guide` run in a fresh session, with `git pull --ff-only` first and a check that the session started after the last change to `.claude/agents/`.
 
 ## Final reply to the user
 Outcome (VERIFIED / FAILED / INCOMPLETE), mode (quick/full), verified step count,
