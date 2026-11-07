@@ -302,6 +302,26 @@ class KeepOrgMixedTests(unittest.TestCase):
             self.assertEqual(self._keep(root, run_dir), 2)
             self.assertEqual((root / "gate.json").read_bytes(), before)
 
+    def test_non_failure_with_non_inconclusive_status_refused(self):
+        """A non-failure step with a non-inconclusive status is refused."""
+        # RUNNING is a status that exists during a walk but shouldn't be final
+        with tempfile.TemporaryDirectory() as folder:
+            steps = [
+                ("s1", "PASS"),
+                ("s2", "RUNNING"),  # Invalid final status
+                ("s3", "UI_MISMATCH"),
+                ("s4", "NOT_RUN"),
+            ]
+            verdicts = {
+                "s1": ["CONFIRMED_PASS"],
+                "s3": ["FALSE_FAILURE"],
+            }
+            root, run_dir = _make_run(folder, steps=steps, verdicts=verdicts)
+
+            before = (root / "gate.json").read_bytes()
+            self.assertEqual(self._keep(root, run_dir), 2)
+            self.assertEqual((root / "gate.json").read_bytes(), before)
+
 
 if __name__ == "__main__":
     unittest.main()
