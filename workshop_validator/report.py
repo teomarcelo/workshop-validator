@@ -37,6 +37,7 @@ class ReportStep:
     suspect: tuple[str, ...] = ()
     snapshot: str = ""
     guide_note: str = ""
+    freeze: bool = False
 
 
 def render_report(run_id: str, steps: list[ReportStep], *, inventory_verified: bool = False) -> str:

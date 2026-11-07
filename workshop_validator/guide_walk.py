@@ -64,6 +64,8 @@ class CheckResult:
     # W-105: the outcome was read from the page, reached differently than the guide says.
     # Shown on PASS rows only, as "Guide differs: <guide_note>".
     guide_note: str = ""
+    # W-137: structured stop_walk flag for mandatory own-value fields, so pop-up notes cannot hide it.
+    stop_walk: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,8 @@ class WalkOutcome:
     snapshots: dict[str, str] = field(default_factory=dict)
     # PASS steps whose outcome was reached differently than the guide says (W-105).
     guide_notes: dict[str, str] = field(default_factory=dict)
+    # W-137: which steps were frozen (for filtering summary failures).
+    freezes: dict[str, bool] = field(default_factory=dict)
 
 
 def norm(value: str | None) -> str:
@@ -2900,7 +2904,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
         # Find the first visible AND editable match
@@ -2915,7 +2919,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
         nth = getattr(field, "nth", None)
@@ -2958,7 +2962,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
     if _input(target).strip():
@@ -2966,7 +2970,8 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
     # Empty field: check if mandatory
     step_text = step.text or ""
     if _is_field_mandatory(step_text, label):
-        return CheckResult("NEEDS_REVIEW", OWN_VALUE_EMPTY.format(label=label), (), freeze=True)
+        note = OWN_VALUE_EMPTY.format(label=label)
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True, stop_walk=True)
     return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
@@ -7502,7 +7507,8 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult(
             "NEEDS_REVIEW",
             f"The validator has no action for this step yet: {_snippet(text)}. "
-            "It stopped here so later steps are not run out of order.",
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one.",
             (),
             freeze=True,
         )
@@ -7546,15 +7552,42 @@ def _overrun_result(result, state: WalkState) -> CheckResult:
     return CheckResult("NOT_RUN", OVERRUN_NOTE, ())
 
 
-def _session_blocked(state: WalkState, step: GuideStep) -> bool:
+def _session_stop_reason(state: WalkState, step: GuideStep) -> str | None:
+    """Check why the session stopped, if it did.
+
+    Returns:
+        "page-lost" if the page left the org (blank or closed)
+        "login" if sent to the login page and cannot return
+        None if the session is still active
+    """
     if not _page_open(state):
-        return True
+        return "page-lost"
     if "login.salesforce.com" in norm(step.text):
-        return False
+        return None
     url = str(getattr(state.page, "url", "") or "")
     host = (urlparse(url).hostname or "").lower()
     if host.startswith("login.") and host.endswith("salesforce.com"):
-        return not return_home(state)
+        if not return_home(state):
+            return "login"
+    return None
+
+
+def _session_blocked(state: WalkState, step: GuideStep) -> bool:
+    """Thin wrapper for compatibility. Returns True if the session stopped for any reason."""
+    return _session_stop_reason(state, step) is not None
+
+
+def _should_stop_walk(result: CheckResult) -> bool:
+    """Check if a result should stop the whole walk (W-135/W-137 exceptions).
+
+    Returns True if the walk should stop completely (mandatory own-value field via stop_walk flag).
+    Returns False if only the task should be blocked (W-117 path).
+
+    Note: ENV_BLOCKED and AUTH_BLOCKED stop the walk through other checks in the walk loop.
+    """
+    # Mandatory own-value field stops the walk (W-137 structured flag)
+    if result.stop_walk:
+        return True
     return False
 
 
@@ -7572,7 +7605,9 @@ def _step_error(exc: BaseException) -> CheckResult:
 
 
 # W-117: a stopping real failure blocks only the rest of its task; the walk goes on at the next task.
-_TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL")
+# W-135: a frozen NEEDS_REVIEW (except mandatory own-value, ENV_BLOCKED, AUTH_BLOCKED)
+# also blocks only its task.
+_TASK_BLOCKING = ("UI_MISMATCH", "FUNCTIONAL_FAIL", "NEEDS_REVIEW")
 BLOCKED_BY_PREFIX = "blocked by "
 AFTER_FAILURE_FLAG = "after-earlier-failure"
 
@@ -7697,6 +7732,7 @@ def walk_guide(
     timestamps: dict[str, tuple[float, float]] = {}
     snapshots: dict[str, str] = {}
     guide_notes: dict[str, str] = {}
+    freezes: dict[str, bool] = {}
     executed: list[str] = []
     total = len(steps)
     if progress is not None:
@@ -7802,8 +7838,15 @@ def walk_guide(
                 and AFTER_FAILURE_FLAG not in result.suspect:
             # W-117: a later task of an exercise that already failed may depend on it.
             result = replace(result, suspect=(*result.suspect, AFTER_FAILURE_FLAG))
+        # W-137: only frozen NEEDS_REVIEW feeds the suspect flag; other TASK_BLOCKING as before.
         if result.status in _TASK_BLOCKING:
-            failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
+            if result.status == "NEEDS_REVIEW":
+                # Only frozen NEEDS_REVIEW feeds failed_in
+                if result.freeze:
+                    failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
+            else:
+                # UI_MISMATCH and FUNCTIONAL_FAIL feed failed_in as before
+                failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
         if skipped is None:
             _forget_closed_dialogs(state)
         t_end = _clock()
@@ -7830,20 +7873,45 @@ def walk_guide(
             suspects[step.step_id] = result.suspect
         if result.status == "PASS" and result.guide_note:
             guide_notes[step.step_id] = result.guide_note
+        if result.freeze:
+            freezes[step.step_id] = True
         if video_origin is not None:
             timestamps[step.step_id] = (t_start - video_origin, t_end - video_origin)
         executed.append(step.step_id)
         if heartbeat is not None:
             heartbeat("", index, total, step.step_id, result.status, t_end)
-        if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step):
-            # W-117: the rest of this task is NOT_RUN; the walk resumes at the next task.
+        # Compute session stop reason once per step
+        session_stop = _session_stop_reason(state, step)
+        if result.freeze and result.status in _TASK_BLOCKING and session_stop is None \
+                and not _should_stop_walk(result):
+            # W-117/W-135: the rest of this task is NOT_RUN; the walk resumes at the next task.
             failed_task, failed_step = _task_key(step, task_positions), step.step_id
             failed_note = result.note or ""
-        elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
-            if result.freeze:
+        elif result.freeze or result.status == "ENV_BLOCKED" or session_stop is not None:
+            if result.freeze and session_stop is not None:
+                # Session-stopped on a frozen step: add the session-stopped sentence to this step's note,
+                # removing any misleading "goes on" claim, and give later steps a clear note.
+                note = result.note or ""
+                # Remove the misleading "goes on at the next task" clause if present
+                note = note.replace("The walk goes on at the next task, if there is one.", "").strip()
+                if session_stop == "page-lost":
+                    stop_sentence = "The page left the org (blank or closed page), so the walk stopped here."
+                    later_note = f"Not run: the page left the org at {step.step_id}, so the walk stopped."
+                else:  # "login"
+                    stop_sentence = "The org session ended (sent to the login page), so the walk stopped here."
+                    later_note = f"Not run: the org session ended at {step.step_id}, so the walk stopped."
+                notes[step.step_id] = f"{note} {stop_sentence}".strip()
+                blocked = later_note
+            elif result.freeze:
                 blocked = result.note or "The following steps were not run."
             else:
-                blocked = "The org session was blocked, so the following steps were not run."
+                # ENV_BLOCKED or session stop on a non-frozen step
+                if session_stop == "page-lost":
+                    blocked = "The page left the org (blank or closed page), so the following steps were not run."
+                elif session_stop == "login":
+                    blocked = "The org session ended (sent to the login page), so the following steps were not run."
+                else:
+                    blocked = "The org session was blocked, so the following steps were not run."
     return WalkOutcome(
-        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes,
+        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes,
     )

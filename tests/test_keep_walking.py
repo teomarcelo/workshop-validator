@@ -142,8 +142,15 @@ class StopBehaviorKeptTests(unittest.TestCase):
     def test_auth_blocked_stops(self):
         self.assertWalkStopped({"a2": _frozen("AUTH_BLOCKED")})
 
-    def test_needs_review_stop_still_stops(self):
-        self.assertWalkStopped({"a2": _frozen("NEEDS_REVIEW")})
+    def test_mandatory_own_value_needs_review_stops(self):
+        """Mandatory own-value NEEDS_REVIEW with stop_walk=True stops the walk."""
+        self.assertWalkStopped({
+            "a2": lambda state, step: CheckResult(
+                "NEEDS_REVIEW",
+                "Sample Field is empty. The guide asks for the learner's own value.",
+                (), freeze=True, stop_walk=True
+            )
+        })
 
     def test_failure_that_closed_the_browser_stops(self):
         def closed(state, step):
@@ -151,7 +158,10 @@ class StopBehaviorKeptTests(unittest.TestCase):
             return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
 
         outcome = self.assertWalkStopped({"a2": closed})
-        self.assertEqual(outcome.notes["b1"], "Sample control was not found.")
+        # Page-lost: a2 gets the failure note + page-lost sentence, later steps name it
+        self.assertIn("Sample control was not found.", outcome.notes["a2"])
+        self.assertIn("The page left the org (blank or closed page), so the walk stopped here.", outcome.notes["a2"])
+        self.assertEqual(outcome.notes["b1"], "Not run: the page left the org at a2, so the walk stopped.")
 
 
 def _add_popup(page, title, *buttons):

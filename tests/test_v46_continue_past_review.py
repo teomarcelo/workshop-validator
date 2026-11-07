@@ -1,0 +1,888 @@
+"""W-135: a frozen NEEDS_REVIEW blocks only its task, except for mandatory own-value fields.
+
+Synthetic guides and fake checks only. Real browser tests only where W-117 uses them.
+"""
+
+import contextlib
+import io
+import json
+import tempfile
+import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+from workshop_validator.automate import FAILED, _summary, gate_outcome_of, load_gate, save_gate
+from workshop_validator.guide_inventory import GuideInventory, GuideStep
+from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
+from workshop_validator.report import ReportStep
+
+from tests.test_guide_walk import Clock, Page
+
+EX_A = "Exercise 1: Sample Alpha"
+EX_B = "Exercise 2: Sample Beta"
+HOME = "https://example.lightning.force.com/lightning/page/home"
+AFTER_FAILURE_FLAG = "after-earlier-failure"
+
+
+def _step(step_id, exercise, task, number):
+    return GuideStep(step_id, 1, exercise, task, number, f"Do sample action {step_id}.",
+                     (90.0, 10.0, 400.0, 24.0), None, ())
+
+
+def _ok(state, step):
+    return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+
+def _walk(page, items, results):
+    """RESULTS maps a step id to a run(state, step) function; every other step passes."""
+    calls = []
+
+    def run(state, step):
+        calls.append(step.step_id)
+        return results.get(step.step_id, _ok)(state, step)
+
+    clock = Clock()
+    outcome = walk_guide(
+        page, GuideInventory(1, tuple(items), (), ()),
+        checks=(GuideCheck("sample", lambda item: True, run),),
+        timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+    )
+    return outcome, calls
+
+
+def _frozen(status, note="Sample control was not found."):
+    return lambda state, step: CheckResult(status, note, (), freeze=True)
+
+
+TWO_TASKS = (
+    _step("a1", EX_A, "Task 1: Sample one", "1"),
+    _step("a2", EX_A, "Task 1: Sample one", "2"),
+    _step("a3", EX_A, "Task 1: Sample one", "3"),
+    _step("b1", EX_A, "Task 2: Sample two", "1"),
+    _step("b2", EX_A, "Task 2: Sample two", "2"),
+)
+
+
+class FrozenNeedsReviewTests(unittest.TestCase):
+    def test_frozen_needs_review_blocks_only_its_task(self):
+        """A frozen NEEDS_REVIEW in task A blocks A's later steps, but task B runs."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Clicked Sample, but no change could be read from the page.")
+        })
+        self.assertEqual(outcome.statuses["a1"], "PASS")
+        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a3"].startswith("blocked by a2"), outcome.notes["a3"])
+        self.assertNotIn("a3", calls)
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertEqual(outcome.statuses["b2"], "PASS")
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+
+    def test_later_pass_after_needs_review_is_flagged_suspect(self):
+        """A PASS in a later task after a frozen NEEDS_REVIEW gets the suspect flag."""
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Sample miss.")
+        })
+        self.assertIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b1", ()))
+        self.assertIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b2", ()))
+        # A pass before the NEEDS_REVIEW is not flagged.
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("a1", ()))
+
+    def test_mandatory_own_value_needs_review_stops_everything(self):
+        """Mandatory own-value NEEDS_REVIEW with stop_walk=True still stops the walk."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult(
+                "NEEDS_REVIEW",
+                "Sample Field is empty. The guide asks for the learner's own value, "
+                "and the validator does not invent one.",
+                (), freeze=True, stop_walk=True
+            )
+        })
+        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+        self.assertEqual(calls[-1], "a2")
+        for later in ("a3", "b1", "b2"):
+            self.assertEqual(outcome.statuses[later], "NOT_RUN")
+            self.assertFalse(outcome.notes[later].startswith("blocked by"), outcome.notes[later])
+
+    def test_env_blocked_still_stops_everything(self):
+        """ENV_BLOCKED keeps the full stop."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("ENV_BLOCKED", "Sample pop-up covered the page.")
+        })
+        self.assertEqual(calls[-1], "a2")
+        for later in ("a3", "b1", "b2"):
+            self.assertEqual(outcome.statuses[later], "NOT_RUN")
+            self.assertFalse(outcome.notes[later].startswith("blocked by"), outcome.notes[later])
+
+    def test_auth_blocked_still_stops_everything(self):
+        """AUTH_BLOCKED keeps the full stop."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("AUTH_BLOCKED", "Sample session blocked.")
+        })
+        self.assertEqual(calls[-1], "a2")
+        for later in ("a3", "b1", "b2"):
+            self.assertEqual(outcome.statuses[later], "NOT_RUN")
+            self.assertFalse(outcome.notes[later].startswith("blocked by"), outcome.notes[later])
+
+    def test_non_frozen_needs_review_does_not_block(self):
+        """A non-frozen NEEDS_REVIEW behaves as today (no task blocking)."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult("NEEDS_REVIEW", "Sample pick not shown.", ())
+        })
+        self.assertEqual(calls, ["a1", "a2", "a3", "b1", "b2"])
+        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+        self.assertEqual(outcome.statuses["a3"], "PASS")
+        self.assertNotIn("blocked by", outcome.notes.get("a3", ""))
+
+    def test_unfrozen_needs_review_not_in_failures_and_no_suspect(self):
+        """Unfrozen NEEDS_REVIEW is not listed in failures and doesn't add suspect flag."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult("NEEDS_REVIEW", "Sample pick not shown.", ())
+        })
+        steps = tuple(
+            ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
+            for item in TWO_TASKS
+        )
+        result = SimpleNamespace(signed_in=True, report_steps=steps)
+        summary = _summary(result, 0, 3, FAILED, "", Path("r"))
+        # Unfrozen NEEDS_REVIEW should NOT be in failures
+        self.assertEqual(summary["failures"], [])
+        # Later passes should NOT have the suspect flag
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("a3", ()))
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b1", ()))
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b2", ()))
+
+    def test_frozen_needs_review_then_real_failure_lists_both(self):
+        """Both failures are listed; the gate judges the real failure."""
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "First sample review."),
+            "b1": _frozen("UI_MISMATCH", "Second sample miss."),
+        })
+        steps = tuple(
+            ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
+            for item in TWO_TASKS
+        )
+        result = SimpleNamespace(signed_in=True, report_steps=steps)
+        summary = _summary(result, 0, 3, FAILED, "First sample review.", Path("r"))
+        self.assertEqual(len(summary["failures"]), 2)
+        self.assertEqual(summary["failures"][0], {
+            "step_id": "a2", "status": "NEEDS_REVIEW", "note": "First sample review."
+        })
+        self.assertEqual(summary["failures"][1], {
+            "step_id": "b1", "status": "UI_MISMATCH", "note": "Second sample miss."
+        })
+        # The gate should still judge the real failure (UI_MISMATCH), not the NEEDS_REVIEW
+        self.assertEqual(gate_outcome_of(result), FAILED)
+
+    def test_no_step_becomes_pass_from_this_change(self):
+        """No step is PASS because of this change."""
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Sample review.")
+        })
+        # a3 is NOT_RUN (blocked by a2), not PASS
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        # b1 and b2 would have been PASS anyway (no change there)
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertEqual(outcome.statuses["b2"], "PASS")
+
+
+class SourceTests(unittest.TestCase):
+    """Test that _act_own sets stop_walk flag for mandatory fields."""
+
+    def test_act_own_empty_mandatory_field_returns_stop_walk_true(self):
+        """Direct call to _act_own with empty mandatory field returns stop_walk=True."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+
+        # Create mocks
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N001", 1, "Exercise 1", "Task 1", "1",
+                        "First Name: (your first name) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return a field
+        mock_field = Mock()
+        mock_field.nth = lambda i: Mock()
+
+        with patch('workshop_validator.guide_walk.labeled', return_value=mock_field), \
+             patch('workshop_validator.guide_walk._count', return_value=1), \
+             patch('workshop_validator.guide_walk._is_editable_field', return_value=True), \
+             patch('workshop_validator.guide_walk._input', return_value=""), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "First Name")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "NEEDS_REVIEW")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for empty mandatory field")
+            self.assertTrue(result.freeze)
+
+    def test_act_own_mandatory_field_not_found_returns_stop_walk_true(self):
+        """Direct call to _act_own with mandatory field not found returns stop_walk=True."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N002", 1, "Exercise 1", "Task 1", "2",
+                        "Email: (your email) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return None (field not found)
+        with patch('workshop_validator.guide_walk.labeled', return_value=None), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "Email")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "UI_MISMATCH")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for mandatory field not found")
+            self.assertTrue(result.freeze)
+
+
+def _add_popup(page, title, *buttons):
+    """Add a popup dialog with buttons to a Page instance."""
+    dialog = ("dialog", f"{title}\nA short synthetic tip for a new org")
+    inside = [("h2", title), *(("button", name) for name in buttons)]
+    page.roles.add(dialog)
+    page.roles.update(inside)
+    page.children[dialog] = inside
+    return dialog
+
+
+class PopUpNotesTests(unittest.TestCase):
+    """Test that stop_walk flag survives when pop-up notes are added in the walk loop."""
+
+    def test_popup_note_added_during_mandatory_step_preserves_stop_walk(self):
+        """Pop-up note added during mandatory step; stop_walk survives and walk stops."""
+        # This check returns stop_walk=True and adds a popup note to state
+        def mandatory_with_popup(state, step):
+            # Add a popup note (simulating W-080 pop-up close)
+            state.popup_notes.append("Environment: closed Sample pop-up (W-080).")
+            return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
+
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {"a2": mandatory_with_popup})
+        # The walk must stop at a2 (stop_walk=True preserved), not continue to b1
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+        # Verify the popup note was added
+        self.assertIn("closed Sample pop-up", outcome.notes["a2"])
+        # b1 and b2 are NOT_RUN because the walk stopped (not blocked by)
+        for later in ("a3", "b1", "b2"):
+            self.assertEqual(outcome.statuses[later], "NOT_RUN")
+            self.assertFalse(outcome.notes.get(later, "").startswith("blocked by"))
+
+    def test_boundary_note_before_mandatory_first_step_preserves_stop_walk(self):
+        """Boundary note added before mandatory first step of next task; walk stops."""
+        page = Page(HOME, body="Home")
+        THREE_TASKS = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("b1", EX_A, "Task 2", "1"),  # First step of task 2, mandatory
+            _step("b2", EX_A, "Task 2", "2"),
+            _step("c1", EX_A, "Task 3", "1"),
+        )
+        shown = {}
+
+        def fail_with_popup(state, step):
+            shown["dialog"] = _add_popup(page, "Sample Tip", "Close")
+            return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
+
+        def mandatory_step(state, step):
+            return CheckResult("NEEDS_REVIEW", "Empty mandatory field.", (), freeze=True, stop_walk=True)
+
+        page.on_click = lambda kind, name: page.roles.discard(shown["dialog"]) if name == "Close" else None
+        outcome, calls = _walk(page, THREE_TASKS, {
+            "a1": fail_with_popup,  # Blocks a2, creates popup, walk continues to task 2
+            "b1": mandatory_step,  # First step of task 2, mandatory
+        })
+
+        # a1 fails and blocks a2
+        self.assertEqual(outcome.statuses["a1"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["a2"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a2"].startswith("blocked by"))
+
+        # Walk continues to b1, which closes the popup and then stops the walk
+        self.assertEqual(calls, ["a1", "b1"])
+        self.assertEqual(outcome.statuses["b1"], "NEEDS_REVIEW")
+        self.assertIn('closed "Sample Tip" pop-up', outcome.notes["b1"])
+
+        # b2 and c1 are NOT_RUN because walk stopped
+        self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
+        self.assertEqual(outcome.statuses["c1"], "NOT_RUN")
+        self.assertFalse(outcome.notes.get("b2", "").startswith("blocked by"))
+        self.assertFalse(outcome.notes.get("c1", "").startswith("blocked by"))
+
+
+class SummaryAndGateTests(unittest.TestCase):
+    def test_summary_lists_needs_review_failure_and_counts_blocked_steps(self):
+        """summary.json lists frozen NEEDS_REVIEW as a failure and counts blocked steps."""
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Sample review note.")
+        })
+        steps = tuple(
+            ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
+            for item in TWO_TASKS
+        )
+        result = SimpleNamespace(signed_in=True, report_steps=steps)
+        summary = _summary(result, 0, 3, FAILED, "Sample review note.", Path("r"))
+        self.assertEqual(summary["failures"], [{
+            "step_id": "a2", "status": "NEEDS_REVIEW", "note": "Sample review note."
+        }])
+        self.assertEqual(summary["first_failure"]["step_id"], "a2")
+        self.assertEqual(summary["blocked_steps"], 1)  # a3 is blocked
+
+    def test_needs_review_before_real_failure_gate_judges_real_failure(self):
+        """When frozen NEEDS_REVIEW comes before a real failure, the gate judges the real failure."""
+        # This is the W-121 rule: the gate judges the first real failure
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Sample review."),
+            "b1": _frozen("UI_MISMATCH", "Sample real failure."),
+        })
+        steps = tuple(
+            ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
+            for item in TWO_TASKS
+        )
+        result = SimpleNamespace(signed_in=True, report_steps=steps)
+        summary = _summary(result, 0, 3, FAILED, "Sample review.", Path("r"))
+        # Gate outcome is still FAILED based on the real failure
+        self.assertEqual(gate_outcome_of(result), FAILED)
+        # Keep-org would need both failures verified FALSE_FAILURE
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            run_id = "20990101T000000Z-org2"
+            run_dir = root / "runs" / "org-0000000000" / run_id
+            run_dir.mkdir(parents=True)
+            summary_data = {**summary, "run_dir": str(run_dir), "guide_name": "guide.pdf"}
+            (run_dir / "summary.json").write_text(json.dumps(summary_data), encoding="utf-8")
+            # Verify only the real failure
+            rows = [{"step_id": "b1", "verdict": "FALSE_FAILURE", "frames": "f.png"}]
+            (run_dir / "verdicts.json").write_text(
+                json.dumps({"run_id": run_id, "verdicts": rows}), encoding="utf-8"
+            )
+            save_gate(root, {"org": 2, "frozen": True, "reason": "x", "last_run": run_id})
+            from workshop_validator.automate import main as automate_main
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                code = automate_main(
+                    ["--reset-gate", "--keep-org", str(run_dir), "--private-root", str(root)]
+                )
+            # Should refuse because a2 (frozen NEEDS_REVIEW) is not verified
+            self.assertEqual(code, 2)
+            self.assertIn("failure step a2 is not verified", out.getvalue())
+
+
+class FreezePlumbingTests(unittest.TestCase):
+    """Test that the freeze flag is correctly handled in _inventory_report."""
+
+    def test_inventory_report_preserves_freeze_flag(self):
+        """_inventory_report builds ReportStep with freeze=True when freezes dict says so."""
+        from workshop_validator.private_runner import _inventory_report
+        from workshop_validator.guide_inventory import GuideInventory
+
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+        inventory = GuideInventory(1, steps, (), ())
+        statuses = {"a1": "PASS", "a2": "NEEDS_REVIEW", "a3": "NOT_RUN"}
+        notes = {"a2": "Sample review.", "a3": "blocked by a2"}
+        freezes = {"a2": True}
+
+        report_steps = _inventory_report(inventory, statuses, notes, {}, {}, {}, {}, {}, freezes)
+
+        self.assertEqual(len(report_steps), 3)
+        self.assertFalse(report_steps[0].freeze)  # a1
+        self.assertTrue(report_steps[1].freeze)   # a2
+        self.assertFalse(report_steps[2].freeze)  # a3
+
+    def test_frozen_needs_review_appears_in_summary_failures(self):
+        """A frozen NEEDS_REVIEW is listed in summary.json failures."""
+        from workshop_validator.private_runner import _inventory_report
+
+        outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": _frozen("NEEDS_REVIEW", "Sample review.")
+        })
+
+        # Build report_steps through _inventory_report, as run_uploaded_guide does
+        inventory = GuideInventory(1, TWO_TASKS, (), ())
+        report_steps = _inventory_report(
+            inventory,
+            outcome.statuses,
+            outcome.notes,
+            {},  # evidence
+            {},  # timestamps
+            {},  # suspects
+            {},  # snapshots
+            {},  # guide_notes
+            outcome.freezes  # freezes dict from outcome
+        )
+
+        result = SimpleNamespace(signed_in=True, report_steps=report_steps)
+        summary = _summary(result, 0, 3, FAILED, "Sample review.", Path("r"))
+
+        # Frozen NEEDS_REVIEW should be in failures
+        self.assertEqual(len(summary["failures"]), 1)
+        self.assertEqual(summary["failures"][0], {
+            "step_id": "a2", "status": "NEEDS_REVIEW", "note": "Sample review."
+        })
+
+    def test_report_steps_from_outcome_passes_freezes(self):
+        """_report_steps_from_outcome extracts freezes from outcome and passes to _inventory_report.
+
+        This is the sole caller path in run_uploaded_guide, so deleting getattr(outcome, "freezes", None)
+        from the helper will fail this test.
+        """
+        from workshop_validator.private_runner import _report_steps_from_outcome
+
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+        inventory = GuideInventory(1, steps, (), ())
+
+        # Create a fake outcome with freezes
+        outcome = SimpleNamespace(
+            statuses={"a1": "PASS", "a2": "NEEDS_REVIEW", "a3": "NOT_RUN"},
+            notes={"a2": "Sample review.", "a3": "blocked by a2"},
+            evidence={},
+            timestamps={},
+            suspects={},
+            freezes={"a2": True}
+        )
+
+        report_steps = _report_steps_from_outcome(inventory, outcome, "user@example.com", "pass123")
+
+        # Verify freeze flag made it through
+        self.assertEqual(len(report_steps), 3)
+        self.assertFalse(report_steps[0].freeze)  # a1
+        self.assertTrue(report_steps[1].freeze)   # a2
+        self.assertFalse(report_steps[2].freeze)  # a3
+
+        # Also verify it appears in failures
+        result = SimpleNamespace(signed_in=True, report_steps=report_steps)
+        summary = _summary(result, 0, 3, FAILED, "Sample review.", Path("r"))
+        self.assertEqual(len(summary["failures"]), 1)
+        self.assertEqual(summary["failures"][0]["step_id"], "a2")
+
+
+class NotFoundPathTests(unittest.TestCase):
+    """Test the not-found paths at :2922 and :2965 with mandatory own-value fields."""
+
+    def test_mandatory_field_no_visible_element_stops_walk(self):
+        """Mandatory own-value field with no visible element stops the walk."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N001", 1, "Exercise 1", "Task 1", "1",
+                        "First Name: (your first name) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return a field with count=0
+        mock_field = Mock()
+        mock_field.nth = lambda i: Mock()
+
+        with patch('workshop_validator.guide_walk.labeled', return_value=mock_field), \
+             patch('workshop_validator.guide_walk._count', return_value=0), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "First Name")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "UI_MISMATCH")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for mandatory field not visible")
+            self.assertTrue(result.freeze)
+            self.assertIn("no visible element", result.note)
+
+    def test_mandatory_field_no_editable_element_stops_walk(self):
+        """Mandatory own-value field with no editable element stops the walk."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N002", 1, "Exercise 1", "Task 1", "2",
+                        "Email: (your email) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return a field
+        mock_field = Mock()
+        mock_candidate = Mock()
+        mock_candidate.is_visible = lambda: True
+        mock_field.nth = lambda i: mock_candidate
+
+        with patch('workshop_validator.guide_walk.labeled', return_value=mock_field), \
+             patch('workshop_validator.guide_walk._count', return_value=1), \
+             patch('workshop_validator.guide_walk._is_editable_field', return_value=False), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "Email")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "UI_MISMATCH")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for mandatory field not editable")
+            self.assertTrue(result.freeze)
+            self.assertIn("no editable element", result.note)
+
+
+class WalkLevelMandatoryFieldTests(unittest.TestCase):
+    """Test mandatory own-value field detection through the full walk_guide."""
+
+    def test_walk_stops_on_mandatory_empty_field(self):
+        """walk_guide stops when it finds an empty mandatory own-value field."""
+        page = Page(HOME, body="Home")
+
+        # Create a mandatory own-value field step
+        mandatory_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                  "Sample Code is required: (your code)",
+                                  (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            mandatory_step,
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        # Mock labeled to return an empty field locator for Sample Code
+        mock_field = Mock()
+        mock_element = Mock()
+        mock_element.is_visible = lambda: True
+        mock_element.evaluate = lambda script: ""  # Empty field
+        mock_field.nth = lambda i: mock_element
+
+        def mock_labeled(page_arg, name):
+            if "Sample Code" in name:
+                return mock_field
+            return None
+
+        with patch('workshop_validator.guide_walk.labeled', side_effect=mock_labeled), \
+             patch('workshop_validator.guide_walk._count', return_value=1), \
+             patch('workshop_validator.guide_walk._is_editable_field', return_value=True), \
+             patch('workshop_validator.guide_walk._input', return_value=""):
+
+            clock = Clock()
+            # Only a1 and a3 match the check; a2 has no catalog match
+            def matches_catalog(step):
+                return step.step_id in ("a1", "a3")
+
+            outcome = walk_guide(
+                page, GuideInventory(1, steps, (), ()),
+                checks=(GuideCheck("sample", matches_catalog, run_check),),
+                timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            )
+
+            # The walk should stop at a2; only a1 is in calls (a2 doesn't match, a3 not reached)
+            self.assertEqual(calls, ["a1"])
+            self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
+            self.assertTrue(outcome.freezes.get("a2", False))
+            self.assertIn("Sample Code", outcome.notes["a2"])
+
+            # a3 is NOT_RUN, not blocked (walk stopped at a2)
+            self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+            self.assertFalse(outcome.notes.get("a3", "").startswith("blocked by"))
+
+
+class UnknownIntentNoteTests(unittest.TestCase):
+    """Test the note text for steps with unknown intent (no action)."""
+
+    def test_unknown_intent_note_with_next_task(self):
+        """Unknown intent step gets correct note and next task runs."""
+        page = Page(HOME, body="Home")
+
+        # Create a step with text that has no recognized action pattern
+        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                "The sample setup is complete",
+                                (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            unknown_step,
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+        # All steps match the check except a2 (unknown intent falls through to attempt_step)
+        def matches_catalog(step):
+            return step.step_id in ("a1", "a3", "b1")
+
+        outcome = walk_guide(
+            page, GuideInventory(1, steps, (), ()),
+            checks=(GuideCheck("sample", matches_catalog, run_check),),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+        # Verify the exact note text
+        expected_note = (
+            "The validator has no action for this step yet: The sample setup is complete. "
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one."
+        )
+        self.assertEqual(outcome.notes["a2"], expected_note)
+
+        # a3 should be blocked by a2
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a3"].startswith("blocked by a2"))
+
+        # b1 should have run (next task)
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertIn("b1", calls)
+
+    def test_unknown_intent_note_in_last_task(self):
+        """Unknown intent step in last task gets same note text."""
+        page = Page(HOME, body="Home")
+
+        # Create a step with text that has no recognized action pattern
+        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                "This completes the sample configuration",
+                                (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            unknown_step,
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+        # Only a1 and a3 match the catalog
+        def matches_catalog(step):
+            return step.step_id in ("a1", "a3")
+
+        outcome = walk_guide(
+            page, GuideInventory(1, steps, (), ()),
+            checks=(GuideCheck("sample", matches_catalog, run_check),),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+        # Verify the exact same note text (accurate for last task too)
+        expected_note = (
+            "The validator has no action for this step yet: This completes the sample configuration. "
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one."
+        )
+        self.assertEqual(outcome.notes["a2"], expected_note)
+
+        # a3 should be blocked by a2
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a3"].startswith("blocked by a2"))
+
+        # No more steps ran after a2
+        self.assertEqual(calls, ["a1"])
+
+
+class SessionStopNoteTests(unittest.TestCase):
+    """Test session-stop notes for page-lost vs login cases."""
+
+    def test_page_lost_frozen_failure(self):
+        """Page-lost (A) on frozen failure: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                # Set page URL to about:blank to simulate page-lost
+                state.page.url = "about:blank"
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2's note: failure + page-lost sentence
+        self.assertIn("Sample control not found.", outcome.notes["a2"])
+        self.assertIn("The page left the org (blank or closed page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the page-lost
+        self.assertEqual(outcome.notes["a3"], "Not run: the page left the org at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the page left the org at a2, so the walk stopped.")
+
+    def test_page_lost_with_stop_walk(self):
+        """Page-lost (A) with stop_walk (mandatory own-value): accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "about:blank"
+                return CheckResult("NEEDS_REVIEW", "Sample field is empty.", (), freeze=True, stop_walk=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2's note: field empty + page-lost sentence
+        self.assertIn("Sample field is empty.", outcome.notes["a2"])
+        self.assertIn("The page left the org (blank or closed page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the page-lost
+        self.assertEqual(outcome.notes["a3"], "Not run: the page left the org at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the page left the org at a2, so the walk stopped.")
+
+    def test_login_frozen_failure(self):
+        """Login (B) on frozen failure: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                # Set page URL to login.salesforce.com
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        # Mock return_home to fail
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2's note: failure + login sentence
+        self.assertIn("Sample control not found.", outcome.notes["a2"])
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the login
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the org session ended at a2, so the walk stopped.")
+
+    def test_login_return_home_fails_once(self):
+        """Login (B) where return_home fails once then works: still stops with login wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        call_count = {"n": 0}
+
+        def mock_return_home(state):
+            call_count["n"] += 1
+            return call_count["n"] > 1  # Fail first, then succeed
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', side_effect=mock_return_home):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # Should stop with login wording (called once, returned False)
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
+        # Verify return_home was called only once
+        self.assertEqual(call_count["n"], 1)
+
+    def test_page_lost_on_passed_not_frozen_step(self):
+        """Page-lost (A) on a passed, not-frozen step: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                result = CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+                # Set page URL to blank after the PASS
+                state.page.url = "about:blank"
+                return result
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2 passes, then page-lost is detected
+        self.assertEqual(outcome.statuses["a2"], "PASS")
+        # a3 gets the page-lost note
+        self.assertEqual(outcome.notes["a3"], "The page left the org (blank or closed page), so the following steps were not run.")
+
+    def test_login_on_frozen_env_blocked_step(self):
+        """Login (B) on a frozen ENV_BLOCKED step: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("ENV_BLOCKED", "Sample modal covered the page.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2 is ENV_BLOCKED with freeze, gets login sentence
+        self.assertEqual(outcome.statuses["a2"], "ENV_BLOCKED")
+        self.assertIn("Sample modal covered the page.", outcome.notes["a2"])
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        # a3 names the login
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
+
+    def test_login_on_not_frozen_pass_step(self):
+        """Login (B) on a not-frozen PASS step: accurate wording for later steps."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a1":
+                result = CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+                # Page lands on login after the PASS
+                state.page.url = "https://login.salesforce.com/"
+                return result
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check, "b1": run_check})
+
+        # a1 passes (not frozen)
+        self.assertEqual(outcome.statuses["a1"], "PASS")
+        # a2 and b1 are NOT_RUN with the login wording
+        self.assertEqual(outcome.statuses["a2"], "NOT_RUN")
+        self.assertEqual(outcome.statuses["b1"], "NOT_RUN")
+        self.assertEqual(outcome.notes["a2"], "The org session ended (sent to the login page), so the following steps were not run.")
+        self.assertEqual(outcome.notes["b1"], "The org session ended (sent to the login page), so the following steps were not run.")
+
+
+if __name__ == "__main__":
+    unittest.main()
