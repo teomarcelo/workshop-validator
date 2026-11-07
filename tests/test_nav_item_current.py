@@ -35,8 +35,14 @@ def files_page(current_text, before=False, hidden=False):
         page.hidden.add(item)
     page.css = {NAV_CURRENT: [item] if before else []}
 
+    # P005N004: Files content area heading appears only after opening Files
+    content_heading = ("heading", "Files")
+
     def opened(url):
         page.css[NAV_CURRENT] = [item]
+        # Add the Files heading only after the Files home is opened
+        if "ContentDocument" in url:
+            page.roles.add(content_heading)
 
     page.on_goto = opened
     return page
