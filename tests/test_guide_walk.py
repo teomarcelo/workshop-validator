@@ -2265,6 +2265,179 @@ class WalkTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["c"], "PASS")
         self.assertIn(("click", "button", "Save"), page.events)
 
+    def test_screen_flow_without_new_opens_the_builder(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Screen Flow"
+            if name == "Screen Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 2: Flows", "Task 1: Screen.", "2",
+            "Create a Screen Flow.",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["flow"], "PASS")
+        self.assertIn("Flow Builder", outcome.notes["flow"])
+        self.assertIn("flowBuilder", page.url)
+
+    def test_autolaunched_flow_opens_the_builder(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Autolaunched Flow Screen Flow"
+            if name == "Autolaunched Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 3: Autolaunched", "Task 1: Flow.", "1",
+            "Create a new Autolaunched Flow (No Trigger).",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["flow"], "PASS")
+        self.assertIn("Flow Builder", outcome.notes["flow"])
+        self.assertIn("flowBuilder", page.url)
+
+    def test_autolaunched_flow_without_new_opens_the_builder(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Autolaunched Flow Screen Flow"
+            if name == "Autolaunched Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 3: Autolaunched", "Task 1: Flow.", "2",
+            "Create an Autolaunched Flow (No Trigger).",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["flow"], "PASS")
+        self.assertIn("Flow Builder", outcome.notes["flow"])
+        self.assertIn("flowBuilder", page.url)
+
+    def test_autolaunched_flow_clicks_correct_tile_not_screen_flow(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        clicked_flow_type = []
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Autolaunched Flow Screen Flow"
+            if name in ("Autolaunched Flow", "Screen Flow"):
+                clicked_flow_type.append(name)
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 3: Autolaunched", "Task 1: Flow.", "1",
+            "Create a new Autolaunched Flow (No Trigger).",
+        )
+        outcome = self.walk(page, (item,))
+        self.assertEqual(outcome.statuses["flow"], "PASS")
+        self.assertEqual(clicked_flow_type, ["Autolaunched Flow"])
+        self.assertNotIn("Screen Flow", clicked_flow_type)
+
+    def test_autolaunched_flow_not_offered_is_ui_mismatch(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Screen Flow"
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 3: Autolaunched", "Task 1: Flow.", "1",
+            "Create a new Autolaunched Flow (No Trigger).",
+        )
+        clock = Clock()
+        state = guide_walk.WalkState(page=page, timeout_s=1, interval_s=0.5, clock=clock, sleeper=clock.sleep, page_wait_s=1)
+        result = guide_walk.run_autolaunched_flow(state, item)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("Autolaunched Flow was not offered", result.note)
+        self.assertTrue(result.freeze)
+
+    def test_autolaunched_flow_delayed_dialog_needs_review(self):
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        clicks = []
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                clicks.append("New Flow")
+                # Dialog doesn't show immediately
+                if len(clicks) > 3:
+                    page.body = "New Automation Autolaunched Flow"
+            if name == "Autolaunched Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+        item = step(
+            "flow", "Exercise 3: Autolaunched", "Task 1: Flow.", "1",
+            "Create a new Autolaunched Flow (No Trigger).",
+        )
+        clock = Clock()
+        state = guide_walk.WalkState(page=page, timeout_s=1, interval_s=0.5, clock=clock, sleeper=clock.sleep, page_wait_s=1)
+        result = guide_walk.run_autolaunched_flow(state, item)
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("Autolaunched Flow was not offered", result.note)
+
 
 class LiveWaitTests(unittest.TestCase):
     def test_first_loading_poll_is_not_a_failure(self):
