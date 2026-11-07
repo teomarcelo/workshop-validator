@@ -7552,16 +7552,29 @@ def _overrun_result(result, state: WalkState) -> CheckResult:
     return CheckResult("NOT_RUN", OVERRUN_NOTE, ())
 
 
-def _session_blocked(state: WalkState, step: GuideStep) -> bool:
+def _session_stop_reason(state: WalkState, step: GuideStep) -> str | None:
+    """Check why the session stopped, if it did.
+
+    Returns:
+        "page-lost" if the page left the org (blank or closed)
+        "login" if sent to the login page and cannot return
+        None if the session is still active
+    """
     if not _page_open(state):
-        return True
+        return "page-lost"
     if "login.salesforce.com" in norm(step.text):
-        return False
+        return None
     url = str(getattr(state.page, "url", "") or "")
     host = (urlparse(url).hostname or "").lower()
     if host.startswith("login.") and host.endswith("salesforce.com"):
-        return not return_home(state)
-    return False
+        if not return_home(state):
+            return "login"
+    return None
+
+
+def _session_blocked(state: WalkState, step: GuideStep) -> bool:
+    """Thin wrapper for compatibility. Returns True if the session stopped for any reason."""
+    return _session_stop_reason(state, step) is not None
 
 
 def _should_stop_walk(result: CheckResult) -> bool:
@@ -7867,24 +7880,38 @@ def walk_guide(
         executed.append(step.step_id)
         if heartbeat is not None:
             heartbeat("", index, total, step.step_id, result.status, t_end)
-        if result.freeze and result.status in _TASK_BLOCKING and not _session_blocked(state, step) \
+        # Compute session stop reason once per step
+        session_stop = _session_stop_reason(state, step)
+        if result.freeze and result.status in _TASK_BLOCKING and session_stop is None \
                 and not _should_stop_walk(result):
             # W-117/W-135: the rest of this task is NOT_RUN; the walk resumes at the next task.
             failed_task, failed_step = _task_key(step, task_positions), step.step_id
             failed_note = result.note or ""
-        elif result.freeze or result.status == "ENV_BLOCKED" or _session_blocked(state, step):
-            if result.freeze and _session_blocked(state, step):
-                # Session-blocked on a frozen step: add the session-blocked sentence to this step's note,
+        elif result.freeze or result.status == "ENV_BLOCKED" or session_stop is not None:
+            if result.freeze and session_stop is not None:
+                # Session-stopped on a frozen step: add the session-stopped sentence to this step's note,
                 # removing any misleading "goes on" claim, and give later steps a clear note.
                 note = result.note or ""
                 # Remove the misleading "goes on at the next task" clause if present
                 note = note.replace("The walk goes on at the next task, if there is one.", "").strip()
-                notes[step.step_id] = f"{note} The org session was blocked, so the walk stopped here.".strip()
-                blocked = f"Not run: the session was blocked at {step.step_id}, so the walk stopped."
+                if session_stop == "page-lost":
+                    stop_sentence = "The page left the org (blank or closed page), so the walk stopped here."
+                    later_note = f"Not run: the page left the org at {step.step_id}, so the walk stopped."
+                else:  # "login"
+                    stop_sentence = "The org session ended (sent to the login page), so the walk stopped here."
+                    later_note = f"Not run: the org session ended at {step.step_id}, so the walk stopped."
+                notes[step.step_id] = f"{note} {stop_sentence}".strip()
+                blocked = later_note
             elif result.freeze:
                 blocked = result.note or "The following steps were not run."
             else:
-                blocked = "The org session was blocked, so the following steps were not run."
+                # ENV_BLOCKED or session stop on a non-frozen step
+                if session_stop == "page-lost":
+                    blocked = "The page left the org (blank or closed page), so the following steps were not run."
+                elif session_stop == "login":
+                    blocked = "The org session ended (sent to the login page), so the following steps were not run."
+                else:
+                    blocked = "The org session was blocked, so the following steps were not run."
     return WalkOutcome(
         statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes,
     )

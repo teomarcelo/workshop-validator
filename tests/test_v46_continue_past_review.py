@@ -694,67 +694,12 @@ class UnknownIntentNoteTests(unittest.TestCase):
         self.assertEqual(calls, ["a1"])
 
 
-class SessionBlockNoteTests(unittest.TestCase):
-    """Test that session-blocked steps get correct notes."""
+class SessionStopNoteTests(unittest.TestCase):
+    """Test session-stop notes for page-lost vs login cases."""
 
-    def test_session_block_on_unknown_intent_step(self):
-        """Session block on unknown intent: step's note adds session sentence, later steps name it."""
+    def test_page_lost_frozen_failure(self):
+        """Page-lost (A) on frozen failure: accurate wording."""
         page = Page(HOME, body="Home")
-
-        # Create an unknown intent step
-        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
-                                "Configuration review complete",
-                                (0, 0, 0, 0), None, ())
-        steps = (
-            _step("a1", EX_A, "Task 1", "1"),
-            unknown_step,
-            _step("a3", EX_A, "Task 1", "3"),
-            _step("b1", EX_A, "Task 2", "1"),
-        )
-
-        calls = []
-
-        def run_check(state, step):
-            calls.append(step.step_id)
-            # Simulate session block on a2 by patching _session_blocked
-            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
-
-        clock = Clock()
-        # Only a1, a3, and b1 match the catalog; a2 is unknown intent
-        def matches_catalog(step):
-            return step.step_id in ("a1", "a3", "b1")
-
-        with patch('workshop_validator.guide_walk._session_blocked') as mock_session:
-            # Return True when checking a2 after the step
-            def session_blocked_check(state, step):
-                return step.step_id == "a2"
-            mock_session.side_effect = session_blocked_check
-
-            outcome = walk_guide(
-                page, GuideInventory(1, steps, (), ()),
-                checks=(GuideCheck("sample", matches_catalog, run_check),),
-                timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
-            )
-
-        # a2's note must contain the unknown intent text AND the session-blocked sentence
-        self.assertIn("The validator has no action for this step yet", outcome.notes["a2"])
-        self.assertIn("The org session was blocked, so the walk stopped here.", outcome.notes["a2"])
-        # a2's note must NOT claim the walk goes on
-        self.assertNotIn("The walk goes on", outcome.notes["a2"])
-
-        # a3's note must name the session block and a2
-        self.assertEqual(outcome.notes["a3"], "Not run: the session was blocked at a2, so the walk stopped.")
-
-        # b1's note must be the same
-        self.assertEqual(outcome.notes["b1"], "Not run: the session was blocked at a2, so the walk stopped.")
-
-        # Only a1 ran
-        self.assertEqual(calls, ["a1"])
-
-    def test_session_block_on_ordinary_failing_step(self):
-        """Session block on ordinary failing step: later steps get session-block note."""
-        page = Page(HOME, body="Home")
-
         steps = (
             _step("a1", EX_A, "Task 1", "1"),
             _step("a2", EX_A, "Task 1", "2"),
@@ -762,38 +707,153 @@ class SessionBlockNoteTests(unittest.TestCase):
             _step("b1", EX_A, "Task 2", "1"),
         )
 
-        calls = []
-
         def run_check(state, step):
-            calls.append(step.step_id)
             if step.step_id == "a2":
+                # Set page URL to about:blank to simulate page-lost
+                state.page.url = "about:blank"
                 return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
             return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
 
-        clock = Clock()
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
 
-        with patch('workshop_validator.guide_walk._session_blocked') as mock_session:
-            # Return True when checking a2 after the step
-            def session_blocked_check(state, step):
-                return step.step_id == "a2"
-            mock_session.side_effect = session_blocked_check
-
-            outcome = walk_guide(
-                page, GuideInventory(1, steps, (), ()),
-                checks=(GuideCheck("sample", lambda s: True, run_check),),
-                timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
-            )
-
-        # a2's note should have the failure note AND the session-blocked sentence
+        # a2's note: failure + page-lost sentence
         self.assertIn("Sample control not found.", outcome.notes["a2"])
-        self.assertIn("The org session was blocked, so the walk stopped here.", outcome.notes["a2"])
+        self.assertIn("The page left the org (blank or closed page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the page-lost
+        self.assertEqual(outcome.notes["a3"], "Not run: the page left the org at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the page left the org at a2, so the walk stopped.")
 
-        # Later steps get the clear session-block note
-        self.assertEqual(outcome.notes["a3"], "Not run: the session was blocked at a2, so the walk stopped.")
-        self.assertEqual(outcome.notes["b1"], "Not run: the session was blocked at a2, so the walk stopped.")
+    def test_page_lost_with_stop_walk(self):
+        """Page-lost (A) with stop_walk (mandatory own-value): accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
 
-        # Only a1 and a2 ran
-        self.assertEqual(calls, ["a1", "a2"])
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "about:blank"
+                return CheckResult("NEEDS_REVIEW", "Sample field is empty.", (), freeze=True, stop_walk=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2's note: field empty + page-lost sentence
+        self.assertIn("Sample field is empty.", outcome.notes["a2"])
+        self.assertIn("The page left the org (blank or closed page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the page-lost
+        self.assertEqual(outcome.notes["a3"], "Not run: the page left the org at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the page left the org at a2, so the walk stopped.")
+
+    def test_login_frozen_failure(self):
+        """Login (B) on frozen failure: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                # Set page URL to login.salesforce.com
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        # Mock return_home to fail
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2's note: failure + login sentence
+        self.assertIn("Sample control not found.", outcome.notes["a2"])
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        # Later steps name the login
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
+        self.assertEqual(outcome.notes["b1"], "Not run: the org session ended at a2, so the walk stopped.")
+
+    def test_login_return_home_fails_once(self):
+        """Login (B) where return_home fails once then works: still stops with login wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        call_count = {"n": 0}
+
+        def mock_return_home(state):
+            call_count["n"] += 1
+            return call_count["n"] > 1  # Fail first, then succeed
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("UI_MISMATCH", "Sample control not found.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', side_effect=mock_return_home):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # Should stop with login wording (called once, returned False)
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
+        # Verify return_home was called only once
+        self.assertEqual(call_count["n"], 1)
+
+    def test_page_lost_on_passed_not_frozen_step(self):
+        """Page-lost (A) on a passed, not-frozen step: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                result = CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+                # Set page URL to blank after the PASS
+                state.page.url = "about:blank"
+                return result
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2 passes, then page-lost is detected
+        self.assertEqual(outcome.statuses["a2"], "PASS")
+        # a3 gets the page-lost note
+        self.assertEqual(outcome.notes["a3"], "The page left the org (blank or closed page), so the following steps were not run.")
+
+    def test_login_on_frozen_env_blocked_step(self):
+        """Login (B) on a frozen ENV_BLOCKED step: accurate wording."""
+        page = Page(HOME, body="Home")
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        def run_check(state, step):
+            if step.step_id == "a2":
+                state.page.url = "https://login.salesforce.com/"
+                return CheckResult("ENV_BLOCKED", "Sample modal covered the page.", (), freeze=True)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        with patch('workshop_validator.guide_walk.return_home', return_value=False):
+            outcome, _calls = _walk(page, steps, {"a1": run_check, "a2": run_check})
+
+        # a2 is ENV_BLOCKED with freeze, gets login sentence
+        self.assertEqual(outcome.statuses["a2"], "ENV_BLOCKED")
+        self.assertIn("Sample modal covered the page.", outcome.notes["a2"])
+        self.assertIn("The org session ended (sent to the login page), so the walk stopped here.", outcome.notes["a2"])
+        # a3 names the login
+        self.assertEqual(outcome.notes["a3"], "Not run: the org session ended at a2, so the walk stopped.")
 
 
 if __name__ == "__main__":
