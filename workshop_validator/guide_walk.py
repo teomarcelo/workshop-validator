@@ -2989,6 +2989,9 @@ def _intent_for(text: str) -> _Intent:
     words = _expected_words(text)
     if words:
         return _Intent("observe", words)
+    if re.search(r'\bopen the flow\b', norm(text), re.I):
+        flow_name = re.sub(r'.*\bopen the flow\s+', '', text, flags=re.I).strip(' .')
+        return _Intent("open_flow", flow_name)
     urls = re.findall(r"https?://[^\s]+", text or "")
     low = norm(text)
     if urls and any(word in low for word in ("enter", "navigate", "open", "go to", "address")):
@@ -4066,6 +4069,60 @@ def _flow_builder_open(page) -> bool:
     if not _builder_canvas_visible(page):
         return False
     return present(page, "button", "Toggle Toolbox")
+
+
+def _read_builder_flow_label(page) -> str | None:
+    """Read the flow label from the Flow Builder header. Returns None if unreadable."""
+    try:
+        # The flow label is typically shown in a heading or title element in the builder header
+        # Try common patterns: heading with the flow name, or a title/label element
+        for root in _roots(page):
+            # Try to find a heading that contains the flow label
+            # Flow Builder typically shows the label prominently at the top
+            try:
+                # Look for headings (h1, h2) that might contain the flow label
+                headings = root.locator("h1, h2, [role='heading']").all()
+                for heading in headings:
+                    if not _visible(heading):
+                        continue
+                    try:
+                        text = (heading.inner_text(timeout=1000) or "").strip()
+                        # Skip empty headings and generic builder titles
+                        if text and text.lower() not in {"flow builder", "flows", "setup"}:
+                            return text
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # Try looking for a labeled textbox or input with "Flow Label" or "Label"
+            try:
+                loc = _labeled(root, "Flow Label")
+                if loc and _visible(loc):
+                    try:
+                        text = (_first(loc).inner_text(timeout=500) or "").strip()
+                        if text:
+                            return text
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            try:
+                loc = _labeled(root, "Label")
+                if loc and _visible(loc):
+                    try:
+                        # Make sure it's not some other label field
+                        text = (_first(loc).inner_text(timeout=500) or "").strip()
+                        if text and len(text) < 200:  # Reasonable flow label length
+                            return text
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
 
 
 CANVAS_UNKNOWN_NOTE = "Flow Builder looks open but its canvas was not recognised; the canvas check needs review."
@@ -6911,6 +6968,94 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
     return passed(step, "opened-url", f"Opened {url}. The page showed {_snippet(snapshot)}.")
 
 
+def _act_open_flow(state: WalkState, step: GuideStep, flow_name: str, opened: dict) -> CheckResult | None:
+    """Open a named flow from the Flows list page."""
+    # URL guard applies only BEFORE the click
+    if not opened["done"]:
+        url = str(getattr(state.page, "url", "") or "")
+        if "/setup/flows" not in url.lower():
+            return CheckResult(
+                "UI_MISMATCH",
+                f"Cannot open flow {flow_name}: not on the Flows list page. URL: {_snippet(url)}",
+                (),
+                freeze=True,
+            )
+
+        # Find all matching flow rows by exact label in the Flows list region
+        # Search for the flow link across frames, but count only in the first frame that has it
+        flow_link = None
+        match_count = 0
+        for root in _roots(state.page):
+            try:
+                # Look for rows with the flow name as a link
+                loc = root.get_by_role("link", name=flow_name, exact=True)
+                if loc:
+                    count = _count(loc)
+                    if count > 0:
+                        flow_link = loc
+                        match_count = count
+                        break  # Use first frame that has the flow
+            except Exception:
+                pass
+
+        # Check for duplicates
+        if match_count == 0:
+            return None  # StillLoading will poll
+        if match_count > 1:
+            return CheckResult(
+                "NEEDS_REVIEW",
+                f"Found {match_count} flows with the exact label {flow_name}. The validator cannot choose which one to open.",
+                (),
+                freeze=True,
+            )
+        try:
+            _first(flow_link).click(timeout=8000)
+            opened["done"] = True
+        except Exception:
+            opened["error"] = True
+            opened["done"] = True
+
+    # Check for errors from the click attempt
+    if opened.get("error"):
+        return CheckResult(
+            "UI_MISMATCH",
+            f"Found flow {flow_name} but the click failed.",
+            (),
+            freeze=True,
+        )
+
+    # Follow the builder (same tab or new tab)
+    if not _focus_builder(state):
+        return None  # StillLoading will poll
+
+    # Read the flow label from the builder header for PASS evidence
+    flow_label = _read_builder_flow_label(state.page)
+    if flow_label is None:
+        if page_is_loading(state.page):
+            return None  # StillLoading
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"Flow Builder opened but the flow label could not be read from the header. Expected: {flow_name}",
+            (),
+            freeze=True,
+        )
+
+    # Verify the builder's label matches the guide's named flow (exact, trimmed)
+    if norm(flow_label.strip()) != norm(flow_name.strip()):
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"Flow Builder opened for a different flow. Expected: {flow_name}. Builder shows: {flow_label}",
+            (),
+            freeze=True,
+        )
+
+    return passed(
+        step,
+        f"flow-opened:{flow_label}",
+        f"Flow Builder opened for {flow_label}. Clicked: {_snippet(flow_name)}.",
+    )
+
+
 TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
 
 
@@ -7272,6 +7417,8 @@ def _try_named(state: WalkState, step: GuideStep, intent: _Intent, name: str, op
         return _act_observe(state, step, name)
     if intent.kind == "open":
         return _act_open(state, step, intent.target, opened)
+    if intent.kind == "open_flow":
+        return _act_open_flow(state, step, intent.target, opened)
     if intent.kind == "fill":
         return _act_fill(state, step, intent.target, intent.value)
     if intent.kind == "own":
