@@ -7507,8 +7507,8 @@ def attempt_step(state: WalkState, step: GuideStep) -> CheckResult:
         return CheckResult(
             "NEEDS_REVIEW",
             f"The validator has no action for this step yet: {_snippet(text)}. "
-            "No matching action was found. The rest of this task was not run, "
-            "so its steps stay in order. The walk went on at the next task.",
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one.",
             (),
             freeze=True,
         )

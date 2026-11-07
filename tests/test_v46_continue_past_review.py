@@ -596,5 +596,103 @@ class WalkLevelMandatoryFieldTests(unittest.TestCase):
             self.assertFalse(outcome.notes.get("a3", "").startswith("blocked by"))
 
 
+class UnknownIntentNoteTests(unittest.TestCase):
+    """Test the note text for steps with unknown intent (no action)."""
+
+    def test_unknown_intent_note_with_next_task(self):
+        """Unknown intent step gets correct note and next task runs."""
+        page = Page(HOME, body="Home")
+
+        # Create a step with text that has no recognized action pattern
+        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                "The sample setup is complete",
+                                (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            unknown_step,
+            _step("a3", EX_A, "Task 1", "3"),
+            _step("b1", EX_A, "Task 2", "1"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+        # All steps match the check except a2 (unknown intent falls through to attempt_step)
+        def matches_catalog(step):
+            return step.step_id in ("a1", "a3", "b1")
+
+        outcome = walk_guide(
+            page, GuideInventory(1, steps, (), ()),
+            checks=(GuideCheck("sample", matches_catalog, run_check),),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+        # Verify the exact note text
+        expected_note = (
+            "The validator has no action for this step yet: The sample setup is complete. "
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one."
+        )
+        self.assertEqual(outcome.notes["a2"], expected_note)
+
+        # a3 should be blocked by a2
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a3"].startswith("blocked by a2"))
+
+        # b1 should have run (next task)
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertIn("b1", calls)
+
+    def test_unknown_intent_note_in_last_task(self):
+        """Unknown intent step in last task gets same note text."""
+        page = Page(HOME, body="Home")
+
+        # Create a step with text that has no recognized action pattern
+        unknown_step = GuideStep("a2", 1, EX_A, "Task 1", "2",
+                                "This completes the sample configuration",
+                                (0, 0, 0, 0), None, ())
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            unknown_step,
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+
+        calls = []
+
+        def run_check(state, step):
+            calls.append(step.step_id)
+            return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+
+        clock = Clock()
+        # Only a1 and a3 match the catalog
+        def matches_catalog(step):
+            return step.step_id in ("a1", "a3")
+
+        outcome = walk_guide(
+            page, GuideInventory(1, steps, (), ()),
+            checks=(GuideCheck("sample", matches_catalog, run_check),),
+            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+        )
+
+        # Verify the exact same note text (accurate for last task too)
+        expected_note = (
+            "The validator has no action for this step yet: This completes the sample configuration. "
+            "The rest of this task was not run, so its steps stay in order. "
+            "The walk goes on at the next task, if there is one."
+        )
+        self.assertEqual(outcome.notes["a2"], expected_note)
+
+        # a3 should be blocked by a2
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertTrue(outcome.notes["a3"].startswith("blocked by a2"))
+
+        # No more steps ran after a2
+        self.assertEqual(calls, ["a1"])
+
+
 if __name__ == "__main__":
     unittest.main()
