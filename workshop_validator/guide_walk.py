@@ -3635,6 +3635,21 @@ def _focus_inside(handle) -> bool:
         return False
 
 
+def _escape_inside(page, handle) -> tuple[bool, bool]:
+    """Press Escape once, only with focus inside this dialog. Returns (pressed, raised).
+
+    Escape goes to the focused element: never into a guide field that still holds focus.
+    """
+    if not _focus_inside(handle):
+        return False, False
+    keyboard = getattr(page, "keyboard", None)
+    try:
+        keyboard.press("Escape")
+    except Exception:
+        return False, True
+    return True, False
+
+
 def _close_dialog(state: WalkState, dialog, promo_page=None) -> CloseAttempt:
     """Close this dialog with its own dismiss control (exact name), else Escape. Returns what happened.
 
@@ -3660,16 +3675,9 @@ def _close_dialog(state: WalkState, dialog, promo_page=None) -> CloseAttempt:
             button.click(timeout=5000)
         except Exception:
             click_raised = True
-    elif _focus_inside(handle):
-        # Escape goes to the focused element: only with focus inside the pop-up,
-        # never into a guide field that still holds focus.
+    else:
         page_for_escape = promo_page if promo_page is not None else state.page
-        keyboard = getattr(page_for_escape, "keyboard", None)
-        try:
-            keyboard.press("Escape")
-            escape_pressed = True
-        except Exception:
-            escape_raised = True
+        escape_pressed, escape_raised = _escape_inside(page_for_escape, handle)
 
     still_visible = not _dialog_gone(state, handle)
     return CloseAttempt(
@@ -7643,6 +7651,87 @@ def _covering_modal_title(state: WalkState, step: GuideStep) -> str | None:
     return None
 
 
+def _guide_dialog_cover(state: WalkState, step: GuideStep):
+    """(dialog, title) of a dialog a guide step opened that still covers the page, or None.
+
+    None whenever an unrelated pop-up covers the page: that one keeps W-080, never W-142.
+    """
+    if _unnamed_modal(state.page, step.text or "", state=state):
+        return None
+    step_norm = norm(step.text or "")
+    recorded = _recorded_dialogs(state.page, state)
+    for item, title, _text in _visible_dialogs(state.page):
+        if title and norm(title) not in step_norm and _is_recorded(title, recorded) \
+                and _read_attr(item, "aria-modal") == "true":
+            return item, title
+    return None
+
+
+def _cover_cleared(state: WalkState, step: GuideStep) -> bool:
+    """Poll (state.interval_s) until the page is loaded and no dialog covers it, up to page_wait_s."""
+    start = state.clock()
+    polls = 0
+    while True:
+        loading = _loading(state.page)
+        if not loading and _covering_modal_title(state, step) is None:
+            return True
+        if _wait_done(state, start) or (polls >= 2 and not loading):
+            return False
+        _sleep(state, state.interval_s)
+        polls += 1
+
+
+def _covered_note(title: str, failed: str) -> str:
+    return (f'"{title}" still covered the page after the failure in {failed}; '
+            "the walk could not close it, so the following steps were not run.")
+
+
+def _recovered_note(title: str, failed: str, actions: list[str]) -> str:
+    return (f'Environment: the guide\'s own dialog "{title}" was still open after the blocked task {failed}; '
+            f"the walk {' and '.join(actions)}, then started this task (owner rule W-144).")
+
+
+def _recover_guide_dialog(state: WalkState, step: GuideStep, failed: str, dialog, title: str) -> tuple[str, str]:
+    """W-142/W-144/W-145: the guide's own dialog still covers the page after the blocked task FAILED.
+
+    Escape once (only with focus inside the dialog), then a real navigation to the org home
+    recorded at walk start. Nothing inside the dialog is clicked. Returns (note, stop note);
+    the note names only the actions that happened, and it is never PASS evidence.
+    """
+    actions: list[str] = []
+    try:
+        handle = dialog.element_handle(timeout=2000)
+    except Exception:
+        handle = None  # Unreadable: no Escape is pressed; the navigation still runs.
+    pressed, _raised = _escape_inside(state.page, handle)
+    if pressed:
+        actions.append("pressed Escape")
+        if _cover_cleared(state, step):
+            return _recovered_note(title, failed, actions), ""
+    if not org_host(state.home):
+        return "", _covered_note(_covering_modal_title(state, step) or title, failed)
+    error = ""
+    try:
+        state.page.goto(state.home, wait_until="domcontentloaded", timeout=45000)
+    except Exception as exc:
+        error = type(exc).__name__
+    session = _session_stop_reason(state, step)
+    if session == "page-lost":
+        return "", "The page left the org (blank or closed page), so the following steps were not run."
+    if session == "login":
+        return "", "The org session ended (sent to the login page), so the following steps were not run."
+    if error:
+        return "", (f"The walk could not finish the return to the org home after the failure in {failed} "
+                    f"({error}), so the following steps were not run.")
+    if not org_host(str(getattr(state.page, "url", "") or "")):
+        return "", (f"The return to the org home after the failure in {failed} did not reach the org, "
+                    "so the following steps were not run.")
+    actions.append("returned to the org home")
+    if not _cover_cleared(state, step):
+        return "", _covered_note(_covering_modal_title(state, step) or title, failed)
+    return _recovered_note(title, failed, actions), ""
+
+
 def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[list[str], str]:
     """Before STEP starts the next task after FAILED: close unrelated pop-ups (W-080, W-081).
 
@@ -7651,8 +7740,6 @@ def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[
     A closed browser or a lost session already stopped the walk at the failure itself.
     """
     closed: list[str] = []
-    recovery_actions: list[str] = []
-    dialog_title_at_start: str | None = None
     try:
         for _ in range(_POPUP_CLOSE_LIMIT):
             title, _attempt = _close_unrelated_popup(state, step)
@@ -7660,57 +7747,16 @@ def _clear_before_task(state: WalkState, step: GuideStep, failed: str) -> tuple[
                 break
             closed.append(_popup_note(title))
         covering = _covering_modal_title(state, step)
-
-        # W-142: recover from guide's own dialog left open by blocked task
-        if covering:
-            dialog_title_at_start = covering
-            # Try Escape first
-            keyboard = getattr(state.page, "keyboard", None)
-            if keyboard is not None:
-                try:
-                    keyboard.press("Escape")
-                    recovery_actions.append("pressed Escape")
-                except Exception:
-                    pass
-                # Wait for load (poll about 2 s, up to about page_wait_s)
-                start = state.clock()
-                polls = 0
-                while state.clock() - start < state.page_wait_s:
-                    _sleep(state, state.interval_s)
-                    polls += 1
-                    try:
-                        covering = _covering_modal_title(state, step)
-                        if not covering:
-                            break
-                        # If page is not loading and dialog is still there, stop waiting
-                        if polls >= 2 and not _loading(state.page):
-                            break
-                    except Exception:
-                        break
-                try:
-                    covering = _covering_modal_title(state, step)
-                except Exception:
-                    pass
-
-            # If still covered, return home
-            if covering:
-                if return_home(state):
-                    recovery_actions.append("returned to the org home")
-                    covering = _covering_modal_title(state, step)
-                elif _session_stop_reason(state, step):
-                    return closed, _session_stop_reason(state, step)
-
+        guide = _guide_dialog_cover(state, step) if covering else None
+        if guide is not None:
+            # W-142/W-145: only the guide's own dialog, never an unrelated pop-up (W-080 above).
+            note, stop = _recover_guide_dialog(state, step, failed, *guide)
+            return (closed + [note] if note else closed), stop
     except Exception as exc:
         return closed, (f"The page could not be read after the failure in {failed} "
                         f"({type(exc).__name__}), so the following steps were not run.")
     if covering:
-        return closed, (f'"{covering}" still covered the page after the failure in {failed}; '
-                        "the walk could not close it, so the following steps were not run.")
-    # Add recovery note to the step's environment notes
-    if recovery_actions:
-        action_text = " and ".join(recovery_actions)
-        note = f'The dialog "{dialog_title_at_start}" from the blocked task {failed} was still open; the walk {action_text}, then started this task.'
-        closed.append(note)
+        return closed, _covered_note(covering, failed)
     return closed, ""
 
 

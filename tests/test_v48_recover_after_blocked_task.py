@@ -1,429 +1,278 @@
-"""W-142: recover from guide's own dialog left open after blocked task.
+"""W-142/W-144/W-145: recover from the guide's own dialog left open after a blocked task.
 
-After a task is blocked (W-135), a dialog the guide opened in that task can still cover the
-page when the next task starts. The walk now tries Escape, then return_home, before stopping.
+At the first step of a task that starts right after a blocked task, a dialog a guide step
+opened can still cover the page. The walk presses Escape once (only with focus inside the
+dialog), then navigates for real to the org home recorded at walk start. It never clicks
+inside the dialog. Unrelated pop-ups keep W-080.
 
-Real browser tests with synthetic HTML only. No clicks inside the dialog.
+Real browser, synthetic HTML, every URL served by a local route (no network).
+Each test runs through walk_guide.
 """
 
 import os
 import unittest
-from types import SimpleNamespace
+from unittest.mock import patch
 
 try:
-    from playwright.sync_api import sync_playwright
+    from playwright.sync_api import Error as PlaywrightError, Keyboard, Locator, sync_playwright
 except ImportError:
     sync_playwright = None
 
-from workshop_validator import guide_walk
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
-from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
-
-from tests.test_guide_walk import Clock, Page, Loc
-from unittest.mock import patch
+from workshop_validator.guide_walk import CheckResult, GuideCheck, _open_guide_dialog, walk_guide
 
 SMOKE = sync_playwright is not None and os.environ.get("RUN_BROWSER_SMOKE") == "1"
 EX_A = "Exercise 1: Sample Alpha"
 HOME = "https://example.lightning.force.com/lightning/page/home"
+LOGIN = "https://login.salesforce.com/?wv=synthetic"
+TITLE = "New Sample Screen"
+RECOVERED = f'Environment: the guide\'s own dialog "{TITLE}" was still open after the blocked task a2; the walk '
+TODAY_STOP = (f'"{TITLE}" still covered the page after the failure in a2; '
+              "the walk could not close it, so the following steps were not run.")
 
 
-def _step(step_id, exercise, task, number, text=None):
-    return GuideStep(step_id, 1, exercise, task, number, text or f"Do sample action {step_id}.",
+def _step(step_id, task, number):
+    return GuideStep(step_id, 1, EX_A, task, number, f"Do sample action {step_id}.",
                      (90.0, 10.0, 400.0, 24.0), None, ())
+
+
+TWO_TASKS = (
+    _step("a1", "Task 1: Sample one", "1"),
+    _step("a2", "Task 1: Sample one", "2"),
+    _step("a3", "Task 1: Sample one", "3"),
+    _step("b1", "Task 2: Sample two", "1"),
+    _step("b2", "Task 2: Sample two", "2"),
+)
+
+_SCRIPT = """<script>
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') wvEvent('escape:' + (document.activeElement && document.activeElement.id || 'none'));
+  }, true);
+  const field = document.getElementById('field');
+  field.addEventListener('keydown', () => wvEvent('field-keydown'));
+  field.addEventListener('input', () => wvEvent('field-input'));
+  const box = document.getElementById('box');
+  if (box) {
+    box.addEventListener('click', () => wvEvent('dialog-click'), true);
+    const cancel = document.getElementById('cancel');
+    if (cancel) cancel.addEventListener('click', () => box.remove());
+    if (box.dataset.escape === 'closes') {
+      document.addEventListener('keydown', (e) => { if (e.key === 'Escape') box.remove(); });
+    }
+  }
+</script>"""
+
+
+def page_html(dialog_title=None, *, escape_closes=False, focusable=True, modal=True):
+    """A synthetic org page with a guide field and, optionally, one dialog over it."""
+    dialog = ""
+    if dialog_title:
+        buttons = '<button id="cancel">Cancel</button><button id="save">Save</button>' if focusable else ""
+        dialog = (f'<div id="box" role="dialog" aria-modal="{"true" if modal else "false"}" '
+                  f'aria-labelledby="box-title" data-escape="{"closes" if escape_closes else "ignores"}" '
+                  'style="position:fixed;inset:0;background:#fff;z-index:50">'
+                  f'<h2 id="box-title">{dialog_title}</h2><p>Made-up sample dialog body.</p>{buttons}</div>')
+    return ("<!doctype html><html><head><title>Sample Home</title></head><body>"
+            '<main><h1>Sample Home</h1><label for="field">Sample Field</label>'
+            f'<input id="field" value="kept value"></main>{dialog}{_SCRIPT}</body></html>')
+
+
+LOGIN_HTML = ("<!doctype html><html><head><title>Sample Login</title></head><body>"
+              '<form><label for="username">Username</label><input id="username"></form></body></html>')
 
 
 def _ok(state, step):
     return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
 
 
-def _frozen(status, note="Sample control was not found."):
-    return lambda state, step: CheckResult(status, note, (), freeze=True)
+def _opens_guide_dialog(state, step):
+    _open_guide_dialog(state, TITLE)
+    return _ok(state, step)
 
 
-def _add_modal_dialog(page, title, *buttons):
-    """Add a modal dialog with buttons to a Page instance (aria-modal=true)."""
-    from workshop_validator.guide_walk import norm
-    dialog = ("dialog", f"{title}\nSample description")
-    inside = [("h2", title), *(("button", name) for name in buttons)]
-    page.roles.add(dialog)
-    page.roles.update(inside)
-    page.children[dialog] = inside
-    # Mark as guide dialog
-    page._guide_dialogs = {norm(title)}
-    # Store modal dialogs so get_attribute_patched can detect them
-    if not hasattr(page, "_modal_dialogs"):
-        page._modal_dialogs = set()
-    page._modal_dialogs.add(dialog)
-    return dialog
-
-
-# Patch get_attribute to handle aria-modal for modal dialogs
-_original_get_attribute = Loc.get_attribute
-
-
-def _get_attribute_patched(self, name, timeout=None):
-    if name == "aria-modal" and hasattr(self.page, "_modal_dialogs"):
-        if (self.kind, self.name) in self.page._modal_dialogs:
-            return "true"
-    return _original_get_attribute(self, name, timeout)
-
-
-def _walk(page, items, results, use_real_time=False):
-    """RESULTS maps a step id to a run(state, step) function; every other step passes."""
-    calls = []
-
-    def run(state, step):
-        calls.append(step.step_id)
-        return results.get(step.step_id, _ok)(state, step)
-
-    if use_real_time:
-        # For browser tests: use real time and sleep
-        outcome = walk_guide(
-            page, GuideInventory(1, tuple(items), (), ()),
-            checks=(GuideCheck("sample", lambda item: True, run),),
-            timeout_s=0, interval_s=1, page_wait_s=5,
-        )
-    else:
-        # For fake tests: use fake clock
-        clock = Clock()
-        outcome = walk_guide(
-            page, GuideInventory(1, tuple(items), (), ()),
-            checks=(GuideCheck("sample", lambda item: True, run),),
-            timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep, page_wait_s=5,
-        )
-    return outcome, calls
-
-
-TWO_TASKS = (
-    _step("a1", EX_A, "Task 1: Sample one", "1"),
-    _step("a2", EX_A, "Task 1: Sample one", "2"),
-    _step("a3", EX_A, "Task 1: Sample one", "3"),
-    _step("b1", EX_A, "Task 2: Sample two", "1"),
-    _step("b2", EX_A, "Task 2: Sample two", "2"),
-)
-
-
-class FakeTests(unittest.TestCase):
-    """Fake-page tests to prove the logic; real browser tests prove it works in a browser."""
-
-    def setUp(self):
-        """Patch Loc.get_attribute to handle aria-modal."""
-        self.patcher = patch.object(Loc, 'get_attribute', _get_attribute_patched)
-        self.patcher.start()
-
-    def tearDown(self):
-        """Restore original get_attribute."""
-        self.patcher.stop()
-
-    def test_no_recovery_when_no_task_blocked(self):
-        """No Escape or navigation when no task was blocked (dialog open mid-task)."""
-        page = Page(HOME)
-        # Add a dialog that does not close on Escape
-        _add_modal_dialog(page, "New Sample Screen", "Cancel")
-
-        # All steps in the same task; no task is blocked
-        same_task_steps = (
-            _step("a1", EX_A, "Task 1: Sample one", "1"),
-            _step("a2", EX_A, "Task 1: Sample one", "2"),
-            _step("a3", EX_A, "Task 1: Sample one", "3"),
-        )
-        outcome, calls = _walk(page, same_task_steps, {})
-        # All steps run (no recovery triggered)
-        self.assertEqual(calls, ["a1", "a2", "a3"])
-        self.assertEqual(outcome.statuses["a1"], "PASS")
-        self.assertEqual(outcome.statuses["a2"], "PASS")
-        self.assertEqual(outcome.statuses["a3"], "PASS")
-        # No recovery note on any step
-        self.assertNotIn("pressed Escape", outcome.notes.get("a1", ""))
-        self.assertNotIn("pressed Escape", outcome.notes.get("a2", ""))
-        self.assertNotIn("pressed Escape", outcome.notes.get("a3", ""))
-
-    def test_dialog_closes_on_escape_task_runs(self):
-        """A guide dialog that closes on Escape: task B runs with recovery note."""
-        page = Page(HOME)
-        dialog = _add_modal_dialog(page, "New Sample Screen")
-
-        # When Escape is pressed, remove the dialog
-        def on_key(key):
-            if key == "Escape":
-                page.roles.discard(dialog)
-                page._modal_dialogs.discard(dialog)
-        page.on_key = on_key
-
-        outcome, calls = _walk(page, TWO_TASKS, {
-            "a2": _frozen("NEEDS_REVIEW", "Sample field was not found.")
-        })
-        # a2 frozen blocks a3, but b1 and b2 run
-        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
-        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
-        self.assertEqual(outcome.statuses["b1"], "PASS")
-        self.assertEqual(outcome.statuses["b2"], "PASS")
-        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
-        # b1 carries the recovery note
-        self.assertIn("New Sample Screen", outcome.notes["b1"])
-        self.assertIn("pressed Escape", outcome.notes["b1"])
-        self.assertIn("blocked task a2", outcome.notes["b1"])
-
-    def test_dialog_ignores_escape_return_home_clears(self):
-        """A dialog that ignores Escape; return_home clears it: task B runs, note names both actions."""
-        from workshop_validator import guide_walk as gw_module
-
-        page = Page(HOME)
-        dialog = _add_modal_dialog(page, "New Sample Screen")
-
-        # Dialog ignores Escape (no on_key handler)
-        # Mock return_home to remove the dialog and return True
-        original_return_home = gw_module.return_home
-        def mock_return_home(state):
-            page.roles.discard(dialog)
-            page._modal_dialogs.discard(dialog)
-            return True
-
-        with patch.object(gw_module, 'return_home', side_effect=mock_return_home):
-            outcome, calls = _walk(page, TWO_TASKS, {
-                "a2": _frozen("UI_MISMATCH", "Sample control not found.")
-            })
-
-        self.assertEqual(outcome.statuses["a2"], "UI_MISMATCH")
-        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
-        self.assertEqual(outcome.statuses["b1"], "PASS")
-        self.assertEqual(outcome.statuses["b2"], "PASS")
-        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
-        # b1 carries both actions in the note
-        self.assertIn("New Sample Screen", outcome.notes["b1"])
-        self.assertIn("pressed Escape", outcome.notes["b1"])
-        self.assertIn("returned to the org home", outcome.notes["b1"])
-        self.assertIn("blocked task a2", outcome.notes["b1"])
-
-    def test_dialog_survives_both_walk_stops(self):
-        """A dialog that survives Escape and return_home: walk stops with today's note."""
-        page = Page(HOME)
-        _add_modal_dialog(page, "New Sample Screen")
-        # Dialog never goes away (no on_escape or on_goto handlers)
-
-        outcome, calls = _walk(page, TWO_TASKS, {
-            "a2": _frozen("FUNCTIONAL_FAIL", "Sample change did not happen.")
-        })
-        self.assertEqual(outcome.statuses["a2"], "FUNCTIONAL_FAIL")
-        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
-        # b1 and b2 are NOT_RUN with the stop note
-        self.assertEqual(outcome.statuses["b1"], "NOT_RUN")
-        self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
-        self.assertEqual(calls, ["a1", "a2"])
-        # b1 has the stop note
-        self.assertIn("still covered the page after the failure in a2", outcome.notes["b1"])
-        self.assertIn("New Sample Screen", outcome.notes["b1"])
-
-    def test_later_step_needing_blocked_state_fails_on_its_own(self):
-        """A step in task B that needed blocked task's state fails, is never PASS."""
-        page = Page(HOME)
-        dialog = _add_modal_dialog(page, "New Sample Screen")
-
-        def on_key(key):
-            if key == "Escape":
-                page.roles.discard(dialog)
-                page._modal_dialogs.discard(dialog)
-        page.on_key = on_key
-
-        outcome, calls = _walk(page, TWO_TASKS, {
-            "a2": _frozen("NEEDS_REVIEW", "Sample field was not found."),
-            "b1": _frozen("UI_MISMATCH", "Sample screen was not found (needs state from a2).")
-        })
-        # a2 frozen blocks a3; dialog recovers, b1 runs and fails, b2 is blocked
-        self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
-        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
-        self.assertEqual(outcome.statuses["b1"], "UI_MISMATCH")
-        self.assertEqual(outcome.statuses["b2"], "NOT_RUN")
-        self.assertEqual(calls, ["a1", "a2", "b1"])
-        # b1 is not PASS, it has the recovery note and its own failure
-        self.assertIn("Sample screen was not found", outcome.notes["b1"])
-        self.assertIn("pressed Escape", outcome.notes["b1"])
+def _frozen(status):
+    return lambda state, step: CheckResult(status, "Sample control was not found.", (), freeze=True)
 
 
 @unittest.skipUnless(SMOKE, "RUN_BROWSER_SMOKE=1 not set")
-class BrowserTests(unittest.TestCase):
-    """Real browser tests on synthetic HTML."""
+class RecoverAfterBlockedTaskBrowserTests(unittest.TestCase):
 
-    def test_escape_closes_dialog_no_clicks_inside(self):
-        """Escape closes the dialog; no clicks happen inside it (listener counts 0)."""
-        from workshop_validator.guide_walk import _open_guide_dialog
+    @classmethod
+    def setUpClass(cls):
+        cls._pw = sync_playwright().start()
+        cls.browser = cls._pw.chromium.launch()
 
-        html = """<!doctype html><html><head><title>Sample Home</title></head><body>
-        <main><h1>Sample Home</h1><p>Made-up home page.</p></main>
-        <div id="new-screen" role="dialog" aria-modal="true" aria-labelledby="screen-title"
-          style="position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:50">
-          <h2 id="screen-title">New Sample Screen</h2>
-          <p>Made-up screen builder.</p>
-          <button id="cancel-btn">Cancel</button>
-          <button id="save-btn">Save</button>
-        </div>
-        <script>
-          window.dialogClicks = 0;
-          document.getElementById('new-screen').addEventListener('click', () => {
-            window.dialogClicks += 1;
-          }, true);
-          document.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-              document.getElementById('new-screen').remove();
-            }
-          });
-        </script></body></html>"""
+    @classmethod
+    def tearDownClass(cls):
+        cls.browser.close()
+        cls._pw.stop()
 
-        home_url = "https://example.lightning.force.com/lightning/page/home"
+    def setUp(self):
+        self.page = self.browser.new_page()
+        self.addCleanup(self.page.close)
+        self.events = []
+        self.navs = []
+        self.served = {"home": "", "home_mode": "html"}
+        self.page.expose_function("wvEvent", lambda event: self.events.append(event))
+        self.page.route("https://login.salesforce.com/**", self._login_route)
+        self.page.route("https://example.lightning.force.com/**", self._home_route)
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            # Navigate to org URL first, then set content
-            page.goto(home_url)
-            page.set_content(html)
+    def _login_route(self, route):
+        route.fulfill(status=200, body=LOGIN_HTML, content_type="text/html")
 
-            # Simulate a1 opening the dialog (record it as a guide dialog)
-            def a1_opens_dialog(state, step):
-                _open_guide_dialog(state, "New Sample Screen")
-                return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+    def _home_route(self, route):
+        mode = self.served["home_mode"]
+        if mode == "abort":
+            route.abort()
+        elif mode == "login":
+            route.fulfill(status=302, headers={"Location": LOGIN})
+        else:
+            route.fulfill(status=200, body=self.served["home"], content_type="text/html")
 
-            outcome, calls = _walk(page, TWO_TASKS, {
-                "a1": a1_opens_dialog,
-                "a2": _frozen("NEEDS_REVIEW", "Sample field not found.")
-            }, use_real_time=True)
+    def _start(self, start_html, home_html=None, home_mode="html", focus_field=False):
+        """Open the org home with START_HTML; later visits to the home get HOME_HTML or HOME_MODE."""
+        self.served["home"] = start_html
+        self.page.goto(HOME)
+        if focus_field:
+            self.page.focus("#field")
+        self.served["home"] = home_html if home_html is not None else start_html
+        self.served["home_mode"] = home_mode
+        self.page.on("framenavigated",
+                     lambda frame: self.navs.append(frame.url) if frame == self.page.main_frame else None)
 
-            # Check no clicks inside dialog
-            click_count = page.evaluate("() => window.dialogClicks")
-            self.assertEqual(click_count, 0, "No clicks should happen inside the dialog")
+    def _walk(self, results, items=TWO_TASKS):
+        calls = []
 
-            # Check recovery happened
-            self.assertEqual(outcome.statuses["b1"], "PASS")
-            self.assertIn("pressed Escape", outcome.notes["b1"])
-            self.assertIn("New Sample Screen", outcome.notes["b1"])
+        def run(state, step):
+            calls.append(step.step_id)
+            return results.get(step.step_id, _ok)(state, step)
 
-            browser.close()
+        outcome = walk_guide(
+            self.page, GuideInventory(1, tuple(items), (), ()),
+            checks=(GuideCheck("sample", lambda item: True, run),),
+            timeout_s=0, interval_s=1, page_wait_s=5,
+        )
+        self.page.wait_for_timeout(300)  # let page bindings reach Python
+        return outcome, calls
 
-    def test_return_home_after_escape_fails(self):
-        """Dialog ignores Escape; return_home clears it; note names both actions."""
-        from workshop_validator.guide_walk import _open_guide_dialog
-        from workshop_validator import guide_walk as gw_module
+    def _escapes(self):
+        return [event for event in self.events if event.startswith("escape:")]
 
-        html_with_dialog = """<!doctype html><html><head><title>Sample Home</title></head><body>
-        <main><h1>Sample Home</h1><p>Made-up home page.</p></main>
-        <div id="new-screen" role="dialog" aria-modal="true" aria-labelledby="screen-title"
-          style="position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:50">
-          <h2 id="screen-title">New Sample Screen</h2>
-          <p>Made-up screen builder.</p>
-          <button>Cancel</button>
-          <button>Save</button>
-        </div>
-        <script>
-          window.dialogClicks = 0;
-          document.getElementById('new-screen').addEventListener('click', () => {
-            window.dialogClicks += 1;
-          }, true);
-          // Dialog ignores Escape (no keydown handler)
-        </script></body></html>"""
+    def test_dialog_closes_on_escape_task_runs(self):
+        self._start(page_html(TITLE, escape_closes=True))
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(outcome.statuses["a3"], "NOT_RUN")
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "pressed Escape, then started this task "
+                         "(owner rule W-144). done")
+        self.assertEqual(self.events.count("dialog-click"), 0, self.events)
+        self.assertEqual(len(self._escapes()), 1, self.events)
+        self.assertEqual(self.navs, [])
 
-        html_without_dialog = """<!doctype html><html><head><title>Sample Home</title></head><body>
-        <main><h1>Sample Home</h1><p>Made-up home page.</p></main>
-        <script>
-          window.dialogClicks = 0;
-        </script></body></html>"""
+    def test_ui_mismatch_block_then_guide_dialog_recovers(self):
+        """W-145: a frozen real failure (W-117) blocks a task the same way as NEEDS_REVIEW."""
+        self._start(page_html(TITLE, escape_closes=True))
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("UI_MISMATCH")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertIn(RECOVERED + "pressed Escape, then started", outcome.notes["b1"])
+        self.assertEqual(self.navs, [])
 
-        home_url = "https://example.lightning.force.com/lightning/page/home"
+    def test_dialog_ignores_escape_real_navigation_home(self):
+        self._start(page_html(TITLE), home_html=page_html())
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("UI_MISMATCH")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(outcome.statuses["b1"], "PASS")
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "pressed Escape and returned to the org home, "
+                         "then started this task (owner rule W-144). done")
+        self.assertEqual(self.navs, [HOME])
+        self.assertEqual(len(self._escapes()), 1, self.events)
+        self.assertEqual(self.events.count("dialog-click"), 0, self.events)
 
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            page = browser.new_page()
-            page.goto(home_url)
-            page.set_content(html_with_dialog)
+    def test_dialog_survives_escape_and_navigation_stops_with_today_note(self):
+        self._start(page_html(TITLE))  # the home also serves the dialog
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("FUNCTIONAL_FAIL")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.statuses["b1"], "NOT_RUN")
+        self.assertEqual(outcome.notes["b1"], TODAY_STOP)
+        self.assertEqual(outcome.notes["b2"], TODAY_STOP)
+        self.assertEqual(self.navs, [HOME])
+        self.assertEqual(self.events.count("dialog-click"), 0, self.events)
 
-            # Mock return_home to navigate and remove the dialog
-            original_return_home = gw_module.return_home
-            def mock_return_home(state):
-                # Navigate away and back, removing the dialog
-                state.page.set_content(html_without_dialog)
-                return True
+    def test_home_redirects_to_login_full_session_sentence(self):
+        self._start(page_html(TITLE), home_mode="login")
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        sentence = "The org session ended (sent to the login page), so the following steps were not run."
+        self.assertEqual(outcome.notes["b1"], sentence)
+        self.assertEqual(outcome.notes["b2"], sentence)
+        self.assertTrue(self.navs and all(url == LOGIN for url in self.navs), self.navs)
 
-            # Simulate a1 opening the dialog (record it as a guide dialog)
-            def a1_opens_dialog(state, step):
-                _open_guide_dialog(state, "New Sample Screen")
-                return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
+    def test_focus_in_guide_field_outside_dialog_no_escape_into_field(self):
+        """The dialog cannot take focus: Escape is skipped, the navigation still runs."""
+        self._start(page_html(TITLE, focusable=False), home_html=page_html(), focus_field=True)
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(self.events.count("field-keydown"), 0, self.events)
+        self.assertEqual(self.events.count("field-input"), 0, self.events)
+        self.assertEqual(self._escapes(), [])
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "returned to the org home, then started this task "
+                         "(owner rule W-144). done")
+        self.assertEqual(self.navs, [HOME])
 
-            with patch.object(gw_module, 'return_home', side_effect=mock_return_home):
-                outcome, calls = _walk(page, TWO_TASKS, {
-                    "a1": a1_opens_dialog,
-                    "a2": _frozen("UI_MISMATCH", "Sample control not found.")
-                }, use_real_time=True)
+    def test_unrelated_popup_keeps_today_behaviour(self):
+        """A pop-up no guide step opened, that W-080 cannot close: no recovery, today's note."""
+        self._start(page_html("Sample Notice", focusable=False), home_html=page_html())
+        outcome, calls = self._walk({"a2": _frozen("UI_MISMATCH")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.notes["b1"], '"Sample Notice" still covered the page after the failure in a2; '
+                         "the walk could not close it, so the following steps were not run.")
+        self.assertNotIn("blocked task", outcome.notes["b1"])
+        self.assertEqual(self.navs, [])
 
-            # Check no clicks inside dialog
-            click_count = page.evaluate("() => window.dialogClicks")
-            self.assertEqual(click_count, 0, "No clicks should happen inside the dialog")
+    def test_no_blocked_task_no_recovery_at_next_task(self):
+        """Only after a blocked task: a guide dialog open at a normal task start is left alone."""
+        self._start(page_html(TITLE, escape_closes=True), home_html=page_html())
+        outcome, calls = self._walk({"a1": _opens_guide_dialog})
+        self.assertEqual(calls, ["a1", "a2", "a3", "b1", "b2"])
+        self.assertEqual(outcome.notes["b1"], "done")
+        self.assertEqual(self._escapes(), [])
+        self.assertEqual(self.navs, [])
 
-            # Check both recovery actions in note
-            self.assertEqual(outcome.statuses["b1"], "PASS")
-            self.assertIn("pressed Escape", outcome.notes["b1"])
-            self.assertIn("returned to the org home", outcome.notes["b1"])
-            self.assertIn("New Sample Screen", outcome.notes["b1"])
+    def test_escape_raises_no_escape_note_navigation_runs(self):
+        self._start(page_html(TITLE), home_html=page_html())
+        with patch.object(Keyboard, "press", side_effect=PlaywrightError("synthetic keyboard failure")):
+            outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "returned to the org home, then started this task "
+                         "(owner rule W-144). done")
+        self.assertEqual(self.navs, [HOME])
 
-            browser.close()
+    def test_dialog_handle_unreadable_no_escape_navigation_runs(self):
+        real = Locator.element_handle
 
-    def test_dialog_survives_both_actions_walk_stops(self):
-        """Dialog survives Escape and return_home; walk stops with today's note."""
-        from workshop_validator.guide_walk import _open_guide_dialog
+        def element_handle(loc, *args, **kwargs):
+            if kwargs.get("timeout") == 2000:  # the recovery's own read of the dialog
+                raise PlaywrightError("synthetic handle failure")
+            return real(loc, *args, **kwargs)
 
-        # A non-dismissible dialog (ignores Escape, stays after navigation)
-        html = """<!doctype html><html><head><title>Sample Home</title></head><body>
-        <main><h1>Sample Home</h1><p>Made-up home page.</p></main>
-        <div id="sticky-dialog" role="dialog" aria-modal="true" aria-labelledby="sticky-title"
-          style="position:fixed;inset:0;background:rgba(255,255,255,0.96);z-index:50">
-          <h2 id="sticky-title">Sticky Sample Dialog</h2>
-          <p>Made-up persistent dialog.</p>
-        </div>
-        <script>
-          // Dialog ignores Escape and survives navigation
-          window.dialogClicks = 0;
-          document.getElementById('sticky-dialog').addEventListener('click', () => {
-            window.dialogClicks += 1;
-          }, true);
-        </script></body></html>"""
+        self._start(page_html(TITLE, escape_closes=True), home_html=page_html())
+        with patch.object(Locator, "element_handle", element_handle):
+            outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2", "b1", "b2"])
+        self.assertEqual(self._escapes(), [])
+        self.assertEqual(outcome.notes["b1"], RECOVERED + "returned to the org home, then started this task "
+                         "(owner rule W-144). done")
+        self.assertEqual(self.navs, [HOME])
 
-        home_url = "https://example.lightning.force.com/lightning/page/home"
-
-        with sync_playwright() as p:
-            browser = p.chromium.launch()
-            context = browser.new_context()
-            page = context.new_page()
-
-            def handle_route(route):
-                if "example.lightning.force.com" in route.request.url:
-                    # Return HTML with the same dialog still present
-                    route.fulfill(body=html, content_type="text/html")
-                else:
-                    route.continue_()
-
-            page.route("**/*", handle_route)
-            page.goto(home_url)
-            page.set_content(html)
-
-            # Simulate a1 opening the dialog (record it as a guide dialog)
-            def a1_opens_dialog(state, step):
-                _open_guide_dialog(state, "Sticky Sample Dialog")
-                return CheckResult("PASS", "done", (f"{step.step_id}:sample-done",))
-
-            outcome, calls = _walk(page, TWO_TASKS, {
-                "a1": a1_opens_dialog,
-                "a2": _frozen("FUNCTIONAL_FAIL", "Sample change did not happen.")
-            }, use_real_time=True)
-
-            # Check no clicks inside dialog
-            click_count = page.evaluate("() => window.dialogClicks")
-            self.assertEqual(click_count, 0, "No clicks should happen inside the dialog")
-
-            # Walk should stop
-            self.assertEqual(calls, ["a1", "a2"])
-            self.assertEqual(outcome.statuses["b1"], "NOT_RUN")
-            self.assertIn("still covered the page after the failure in a2", outcome.notes["b1"])
-            self.assertIn("Sticky Sample Dialog", outcome.notes["b1"])
-
-            browser.close()
+    def test_navigation_fails_true_stop_note(self):
+        self._start(page_html(TITLE), home_mode="abort")
+        outcome, calls = self._walk({"a1": _opens_guide_dialog, "a2": _frozen("NEEDS_REVIEW")})
+        self.assertEqual(calls, ["a1", "a2"])
+        self.assertEqual(outcome.notes["b1"], "The walk could not finish the return to the org home after the "
+                         "failure in a2 (Error), so the following steps were not run.")
+        self.assertNotIn("returned to the org home", outcome.notes["b1"])
 
 
 if __name__ == "__main__":
