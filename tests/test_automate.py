@@ -697,6 +697,26 @@ class KeepOrgTests(unittest.TestCase):
             (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
             self.assertRefusedUnchanged(root, run_dir)
 
+    def test_refuses_frozen_needs_review_from_summary_judged_real(self):
+        """W-167: frozen NEEDS_REVIEW in summary.failures judged REAL must refuse."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            # summary.failures includes frozen NEEDS_REVIEW (W-135, W-137)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
+                                    {"step_id": "s3", "status": "NEEDS_REVIEW"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"},
+                     {"step_id": "s3", "status": "NEEDS_REVIEW", "freeze": True}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s3", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
     def test_allows_w167_mixed_case(self):
         """W-167 mixed case: NEEDS_REVIEW (UNCLEAR) + multiple FALSE_FAILURE is allowed."""
         with tempfile.TemporaryDirectory() as folder:
