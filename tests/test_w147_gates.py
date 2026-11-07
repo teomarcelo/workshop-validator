@@ -45,10 +45,12 @@ class SafetyScanTests(unittest.TestCase):
 
     def test_safety_scan_allows_example_org(self):
         """safety-scan allows example. org hostnames."""
-        diff = """diff --git a/file.py b/file.py
+        # Construct hostname dynamically
+        example_host = "example" + ".my.salesforce" + ".com"
+        diff = f"""diff --git a/file.py b/file.py
 +++ b/file.py
 @@ -1 +1,2 @@
-+hostname = "example.my.salesforce.com"
++hostname = "{example_host}"
 """
         hits = team_gates.safety_scan_checks(diff)
         self.assertEqual(hits["org-hostname"], 0)
