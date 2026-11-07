@@ -6582,6 +6582,14 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     after_counts = {t: after_scoped.get(t, 0) for t in target_names if len(t) > 3}
     after_dialogs = _count_visible_dialogs(state.page)
 
+    # When the walk opened Files home from Setup, no evidence path can prove Files content opened
+    if opened_files_home:
+        note = (
+            "Opened the Files home. The validator cannot yet prove the Files content opened; "
+            "step-verifier judges this step."
+        )
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+
     # Check for after-state evidence
     evidence_desc = None
 
