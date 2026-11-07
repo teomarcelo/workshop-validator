@@ -2989,6 +2989,9 @@ def _intent_for(text: str) -> _Intent:
     words = _expected_words(text)
     if words:
         return _Intent("observe", words)
+    if re.search(r'\bopen the flow\b', norm(text), re.I):
+        flow_name = re.sub(r'.*\bopen the flow\s+', '', text, flags=re.I).strip(' .')
+        return _Intent("open_flow", flow_name)
     urls = re.findall(r"https?://[^\s]+", text or "")
     low = norm(text)
     if urls and any(word in low for word in ("enter", "navigate", "open", "go to", "address")):
@@ -6911,6 +6914,34 @@ def _act_open(state: WalkState, step: GuideStep, url: str, opened: dict) -> Chec
     return passed(step, "opened-url", f"Opened {url}. The page showed {_snippet(snapshot)}.")
 
 
+def _act_open_flow(state: WalkState, step: GuideStep, flow_name: str) -> CheckResult | None:
+    """Open a named flow from the Flows list page."""
+    url = str(getattr(state.page, "url", "") or "")
+    if "/setup/flows" not in url.lower():
+        return None
+
+    # Find the flow row by its Flow Label
+    flow_link = _locator_for_name(state.page, flow_name)
+    if flow_link is None:
+        return None
+
+    # Click the flow name link
+    if not _click_locator(flow_link):
+        return None
+
+    # Wait for Flow Builder to open
+    if not _flow_builder_open(state.page):
+        return None
+
+    # Read the flow name from Flow Builder for evidence
+    builder_url = str(getattr(state.page, "url", "") or "")
+    return passed(
+        step,
+        "flow-opened",
+        f"Flow Builder opened for {flow_name}. URL: {_snippet(builder_url)}.",
+    )
+
+
 TEXT_ONLY_DROPDOWN_NOTE = "dropdown found by visible text only; option not picked."
 
 
@@ -7272,6 +7303,8 @@ def _try_named(state: WalkState, step: GuideStep, intent: _Intent, name: str, op
         return _act_observe(state, step, name)
     if intent.kind == "open":
         return _act_open(state, step, intent.target, opened)
+    if intent.kind == "open_flow":
+        return _act_open_flow(state, step, intent.target)
     if intent.kind == "fill":
         return _act_fill(state, step, intent.target, intent.value)
     if intent.kind == "own":
