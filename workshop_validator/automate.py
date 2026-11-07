@@ -758,8 +758,10 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         for row in failures:
             if row["step_id"] not in board_statuses:
                 return refuse(f"summary failure {row['step_id']} is missing from the board")
-            # Check that board shows this as a real failure, not PASS or other status.
-            if board_statuses[row["step_id"]] not in _REAL_FAIL:
+            # W-135, W-137: NEEDS_REVIEW in failures is valid (frozen); check that board shows
+            # this as a real failure or NEEDS_REVIEW, not PASS or other status.
+            board_status = board_statuses[row["step_id"]]
+            if board_status not in _REAL_FAIL and board_status != "NEEDS_REVIEW":
                 return refuse(f"summary failure {row['step_id']} is not a real failure on the board")
 
     # Older runs without board.json or summary.failures: fall back to stop_step.

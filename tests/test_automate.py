@@ -702,13 +702,14 @@ class KeepOrgTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_org_root(folder, stop=None)
             # summary.failures includes frozen NEEDS_REVIEW (W-135, W-137)
+            # Board has s3 WITHOUT freeze flag, so only summary check catches it
             summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
                        "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
                                     {"step_id": "s3", "status": "NEEDS_REVIEW"}]}
             (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
             steps = [{"step_id": "s1", "status": "PASS"},
                      {"step_id": "s2", "status": "UI_MISMATCH"},
-                     {"step_id": "s3", "status": "NEEDS_REVIEW", "freeze": True}]
+                     {"step_id": "s3", "status": "NEEDS_REVIEW"}]  # no freeze flag
             board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
             (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
             verdicts = {"run_id": run_dir.name, "verdicts": [
