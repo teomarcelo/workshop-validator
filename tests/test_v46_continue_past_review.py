@@ -352,10 +352,11 @@ class SummaryAndGateTests(unittest.TestCase):
             for item in TWO_TASKS
         )
         result = SimpleNamespace(signed_in=True, report_steps=steps)
-        summary = _summary(result, 0, 3, FAILED, "Sample review.", Path("r"))
+        summary = _summary(result, 1, 3, FAILED, "Sample review.", Path("r"))
         # Gate outcome is still FAILED based on the real failure
         self.assertEqual(gate_outcome_of(result), FAILED)
-        # Keep-org would need both failures verified FALSE_FAILURE
+        # W-167: Keep-org needs only the real failure (b1) verified FALSE_FAILURE.
+        # Frozen NEEDS_REVIEW (a2) with no REAL verdict is inconclusive and allowed.
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             run_id = "20990101T000000Z-org2"
@@ -369,14 +370,17 @@ class SummaryAndGateTests(unittest.TestCase):
                 json.dumps({"run_id": run_id, "verdicts": rows}), encoding="utf-8"
             )
             save_gate(root, {"org": 2, "frozen": True, "reason": "x", "last_run": run_id})
-            from workshop_validator.automate import main as automate_main
+            from workshop_validator.automate import main as automate_main, load_gate
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 code = automate_main(
                     ["--reset-gate", "--keep-org", str(run_dir), "--private-root", str(root)]
                 )
-            # Should refuse because a2 (frozen NEEDS_REVIEW) is not verified
-            self.assertEqual(code, 2)
-            self.assertIn("failure step a2 is not verified", out.getvalue())
+            # W-167: Should allow because only real failure b1 needs verification
+            self.assertEqual(code, 0)
+            self.assertIn("Org kept: 1 verified false failure(s) (b1)", out.getvalue())
+            gate = load_gate(root)
+            self.assertEqual(gate["org"], 1)  # Restored to org 1
+            self.assertEqual(gate["frozen"], False)
 
 
 class FreezePlumbingTests(unittest.TestCase):
