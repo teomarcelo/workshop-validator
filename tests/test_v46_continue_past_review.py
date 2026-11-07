@@ -435,6 +435,45 @@ class FreezePlumbingTests(unittest.TestCase):
             "step_id": "a2", "status": "NEEDS_REVIEW", "note": "Sample review."
         })
 
+    def test_report_steps_from_outcome_passes_freezes(self):
+        """_report_steps_from_outcome extracts freezes from outcome and passes to _inventory_report.
+
+        This is the sole caller path in run_uploaded_guide, so deleting getattr(outcome, "freezes", None)
+        from the helper will fail this test.
+        """
+        from workshop_validator.private_runner import _report_steps_from_outcome
+
+        steps = (
+            _step("a1", EX_A, "Task 1", "1"),
+            _step("a2", EX_A, "Task 1", "2"),
+            _step("a3", EX_A, "Task 1", "3"),
+        )
+        inventory = GuideInventory(1, steps, (), ())
+
+        # Create a fake outcome with freezes
+        outcome = SimpleNamespace(
+            statuses={"a1": "PASS", "a2": "NEEDS_REVIEW", "a3": "NOT_RUN"},
+            notes={"a2": "Sample review.", "a3": "blocked by a2"},
+            evidence={},
+            timestamps={},
+            suspects={},
+            freezes={"a2": True}
+        )
+
+        report_steps = _report_steps_from_outcome(inventory, outcome, "user@example.com", "pass123")
+
+        # Verify freeze flag made it through
+        self.assertEqual(len(report_steps), 3)
+        self.assertFalse(report_steps[0].freeze)  # a1
+        self.assertTrue(report_steps[1].freeze)   # a2
+        self.assertFalse(report_steps[2].freeze)  # a3
+
+        # Also verify it appears in failures
+        result = SimpleNamespace(signed_in=True, report_steps=report_steps)
+        summary = _summary(result, 0, 3, FAILED, "Sample review.", Path("r"))
+        self.assertEqual(len(summary["failures"]), 1)
+        self.assertEqual(summary["failures"][0]["step_id"], "a2")
+
 
 class NotFoundPathTests(unittest.TestCase):
     """Test the not-found paths at :2922 and :2965 with mandatory own-value fields."""

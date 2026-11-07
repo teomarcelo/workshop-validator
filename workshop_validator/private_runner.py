@@ -913,27 +913,7 @@ def run_uploaded_guide(
             snapshot_dir=snapshot_dir,
             snapshot_leaks=lambda text: _contains_secret(text, username, password),
         )
-        notes = {
-            step_id: _scrub(note, username, password)
-            for step_id, note in outcome.notes.items()
-        }
-        evidence = {}
-        for step_id, ids in outcome.evidence.items():
-            safe = tuple(
-                item for item in ids
-                if not _contains_secret(item, username, password)
-            )
-            if safe:
-                evidence[step_id] = safe
-        produced = _inventory_report(
-            inventory, outcome.statuses, notes, evidence, outcome.timestamps, outcome.suspects,
-            getattr(outcome, "snapshots", None),
-            {
-                step_id: _scrub(text, username, password)
-                for step_id, text in (getattr(outcome, "guide_notes", None) or {}).items()
-            },
-            getattr(outcome, "freezes", None),
-        )
+        produced = _report_steps_from_outcome(inventory, outcome, username, password)
         # Company Information is read in its own tab only after the walk, so
         # the guide order is never disturbed.
         if instance is None:
@@ -1090,6 +1070,39 @@ def _uploaded(
         if temporary is not None:
             temporary.cleanup()
     return result
+
+
+def _report_steps_from_outcome(
+    inventory: GuideInventory,
+    outcome,
+    username: str,
+    password: str,
+) -> tuple[ReportStep, ...]:
+    """Build report steps from a walk outcome, scrubbing secrets.
+
+    This is the sole path from outcome to report steps in run_uploaded_guide.
+    """
+    notes = {
+        step_id: _scrub(note, username, password)
+        for step_id, note in outcome.notes.items()
+    }
+    evidence = {}
+    for step_id, ids in outcome.evidence.items():
+        safe = tuple(
+            item for item in ids
+            if not _contains_secret(item, username, password)
+        )
+        if safe:
+            evidence[step_id] = safe
+    return _inventory_report(
+        inventory, outcome.statuses, notes, evidence, outcome.timestamps, outcome.suspects,
+        getattr(outcome, "snapshots", None),
+        {
+            step_id: _scrub(text, username, password)
+            for step_id, text in (getattr(outcome, "guide_notes", None) or {}).items()
+        },
+        getattr(outcome, "freezes", None),
+    )
 
 
 def _inventory_report(
