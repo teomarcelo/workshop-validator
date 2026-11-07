@@ -234,43 +234,27 @@ class FreezeResultBrowserErrorTests(unittest.TestCase):
 class ClickPathBrowserErrorTests(unittest.TestCase):
     """Click path guards: browser errors block URL-change PASS evidence."""
 
-    def test_network_error_blocks_url_evidence_first_guard(self):
-        """Guard test: First click-path guard blocks URL evidence when error signal present."""
-        # This tests the is_error logic around line 6688-6693
+    def test_network_error_blocks_url_evidence(self):
+        """Guard test: _is_error_page returns True for browser network errors."""
         page = Mock()
         page.url = "https://example.lightning.force.com/setup"
         page_text = "Setup Home ERR_NAME_NOT_RESOLVED"
 
-        # Test the is_error calculation that appears in the first click path
+        # Test the _is_error_page helper used by both click paths
         with patch.object(guide_walk, "_read_page_text", return_value=page_text):
-            page_text_lower = guide_walk.norm(page_text)
-            is_error = (
-                any(indicator in page_text_lower for indicator in (
-                    "error", "404", "insufficient privileges", "access denied",
-                    "permission denied", "unauthorized"
-                ))
-                or guide_walk._browser_error_signal(page) is not None
-            )
+            is_error = guide_walk._is_error_page(page)
             # With the browser error signal, is_error should be True
             self.assertTrue(is_error)
 
-    def test_network_error_blocks_url_evidence_second_guard(self):
-        """Guard test: Second click-path guard blocks URL evidence when error signal present."""
-        # This tests the is_error logic around line 6844-6849
+    def test_second_network_error_blocks_url_evidence(self):
+        """Guard test: _is_error_page returns True for different error code."""
         page = Mock()
         page.url = "https://example.lightning.force.com/setup"
         page_text = "Setup Home ERR_CONNECTION_REFUSED"
 
-        # Test the is_error calculation that appears in the second click path
+        # Test the _is_error_page helper with a different error code
         with patch.object(guide_walk, "_read_page_text", return_value=page_text):
-            page_text_lower = guide_walk.norm(page_text)
-            is_error = (
-                any(indicator in page_text_lower for indicator in (
-                    "error", "404", "insufficient privileges", "access denied",
-                    "permission denied", "unauthorized"
-                ))
-                or guide_walk._browser_error_signal(page) is not None
-            )
+            is_error = guide_walk._is_error_page(page)
             # With the browser error signal, is_error should be True
             self.assertTrue(is_error)
 
@@ -280,16 +264,9 @@ class ClickPathBrowserErrorTests(unittest.TestCase):
         page.url = "https://example.lightning.force.com/lightning/setup/SetupOneHome/home"
         page_text = "Setup Home Chat: The item could not be found"
 
-        # Test that normal page text doesn't trigger browser error signal
+        # Test that normal page text doesn't trigger _is_error_page
         with patch.object(guide_walk, "_read_page_text", return_value=page_text):
-            page_text_lower = guide_walk.norm(page_text)
-            is_error = (
-                any(indicator in page_text_lower for indicator in (
-                    "error", "404", "insufficient privileges", "access denied",
-                    "permission denied", "unauthorized"
-                ))
-                or guide_walk._browser_error_signal(page) is not None
-            )
+            is_error = guide_walk._is_error_page(page)
             # Without error indicators or browser error signal, is_error should be False
             self.assertFalse(is_error)
 

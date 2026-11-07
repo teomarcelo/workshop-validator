@@ -83,6 +83,18 @@ def _browser_error_signal(page) -> str | None:
     return None
 
 
+def _is_error_page(page) -> bool:
+    """Check if the page shows any error indicators (old-style or browser network errors)."""
+    page_text_lower = norm(_read_page_text(page))
+    return (
+        any(indicator in page_text_lower for indicator in (
+            "error", "404", "insufficient privileges", "access denied",
+            "permission denied", "unauthorized"
+        ))
+        or _browser_error_signal(page) is not None
+    )
+
+
 class StillLoading(Exception):
     """The expected control was still behind a loading signal at the time limit."""
 
@@ -6684,14 +6696,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
         # Must be same host
         if before_parsed.netloc == after_parsed.netloc:
             # Check for error page indicators
-            page_text_lower = norm(_read_page_text(state.page))
-            is_error = (
-                any(indicator in page_text_lower for indicator in (
-                    "error", "404", "insufficient privileges", "access denied",
-                    "permission denied", "unauthorized"
-                ))
-                or _browser_error_signal(state.page) is not None
-            )
+            is_error = _is_error_page(state.page)
 
             if not is_error:
                 # Check if target name appears in new URL or page heading/title using whole-token matching
@@ -6841,14 +6846,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 after_parsed = urlparse(after_url)
 
                 if before_parsed.netloc == after_parsed.netloc:
-                    page_text_lower = norm(_read_page_text(state.page))
-                    is_error = (
-                        any(indicator in page_text_lower for indicator in (
-                            "error", "404", "insufficient privileges", "access denied",
-                            "permission denied", "unauthorized"
-                        ))
-                        or _browser_error_signal(state.page) is not None
-                    )
+                    is_error = _is_error_page(state.page)
 
                     if not is_error:
                         # Only a real change counts: a new URL path (a query or fragment
