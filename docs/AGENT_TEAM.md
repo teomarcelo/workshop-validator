@@ -20,7 +20,7 @@ through review. No paid API is used.
 | `git-publisher` | Haiku | Branch `automation/*`, commit, push, `gh pr create`, watch CI |
 
 ## Loop
-1. Preflight: venv, green tests, org file exists (never read). `team_state start`.
+1. Preflight: `git pull --ff-only` on main only, then check producer claim time against `.claude/agents/` last-modified (if agents changed after claim, stop: start fresh session). Venv, green tests, org file exists (never read). `team_state start`.
 2. Run the current org (run-operator in background; orchestrator heartbeats while waiting).
 3. **Verify phase** (new): step-verifier judges step outcomes visually from `walk.webm` frames.
    - **Quick mode** (default): all non-PASS + PASS rows with `suspect` flags.
@@ -30,6 +30,7 @@ through review. No paid API is used.
 5. Fix (check-fixer) → test (test-runner) → review (rule-auditor), at most 2 rework rounds.
 6. `automate --reset-gate`, re-run. At most 3 runs (replaces: at most 3 fix iterations).
 7. Lessons, report, then safety-scanner (until P2 merges) → git-publisher when code changed. `team_state finish`.
+8. After every merge, the next step is a `/validate-guide` run in a fresh session (step 1 enforces this). Merges that change no walk code may skip the run only if no file under `workshop_validator/` changed.
 
 ## Self-healing
 Every failure leaves a lesson that changes what the team does next time.

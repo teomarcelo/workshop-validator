@@ -42,12 +42,12 @@ to this guide's latest report on every other instance.
 
 ## Budgets
 - At most 3 runs per invocation.
-- At most 6 guide runs per guide per day across sessions.
+- At most 6 guide runs per guide per day across sessions (producer rule: the producer checks this in preflight by counting today's runs in `~/.workshop-validator/reports/history.json`).
 - Stop when a run shows no change from the last one (same counts and the same failure set), on AUTH_BLOCKED, or when `automate` exits 2 (refused / all orgs used).
 - Never retry around HTTP 429 (Option A). Never use more than one new org per iteration.
 
 ## Loop
-1. **Preflight.** Refuse to start a run if this session started before the last merge to `.claude/agents/` (compare the session start with `git log -1 --format=%cI -- .claude/agents/`); then fast-forward main with `git pull --ff-only` on main only. `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`; test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules (`lessons --rules`).
+1. **Preflight.** Fast-forward main with `git pull --ff-only` on main only. Read the producer claim time (`claimed` in `~/.workshop-validator/team/producer-live`, written by `team_kit claim` at session start). If `git log -1 --format=%cI -- .claude/agents/` (on main, after the pull) is later than the claim time, stop: start a fresh session and claim again. `.venv` exists; `test -f ~/.workshop-validator/verification-orgs.json`; test-runner is GREEN. `team_state start --pdf <pdf> --mode <mode>`. Load the team rules (`lessons --rules`).
 2. **Run.** `team_state advance --phase run`. run-operator (background) with the PDF.
    **Never leave a run unattended:** while waiting, `team_state heartbeat` every
    2–3 minutes. Read its exit code and summary.
