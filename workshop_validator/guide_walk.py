@@ -2989,6 +2989,10 @@ def _intent_for(text: str) -> _Intent:
     words = _expected_words(text)
     if words:
         return _Intent("observe", words)
+    # Confirm that flow <name> is activated
+    flow_match = re.search(r'\bconfirm that flow\s+[""]([^""]+)[""].*\bis activated\b', text or "", re.I)
+    if flow_match:
+        return _Intent("confirm_flow_active", flow_match.group(1))
     urls = re.findall(r"https?://[^\s]+", text or "")
     low = norm(text)
     if urls and any(word in low for word in ("enter", "navigate", "open", "go to", "address")):
@@ -3124,6 +3128,127 @@ def _act_toggle(state: WalkState, step: GuideStep, name: str) -> CheckResult | N
     if found and mode == "on":
         return passed(step, "toggle-on", f"{name} is on.")
     return None
+
+
+def _act_confirm_flow_active(state: WalkState, step: GuideStep, flow_name: str) -> CheckResult | None:
+    """Check that the named flow is activated. Read-only, never clicks."""
+    # Read flow status from the page by looking for the flow's row and its Active indicator
+    status, evidence = _read_flow_status(state.page, flow_name)
+    if status == "active":
+        return passed(
+            step, f"already-set:flow:{flow_name}",
+            f"Flow {flow_name} was already active in the provisioned org, so it was not clicked.",
+        )
+    if status == "duplicate":
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"Multiple flows named {flow_name} found; cannot confirm which one should be active.",
+            (),
+            freeze=True,
+        )
+    if status == "not_found":
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"Flow {flow_name} was not found on the page.",
+            (),
+            freeze=True,
+        )
+    if status == "inactive":
+        return CheckResult(
+            "FUNCTIONAL_FAIL",
+            f"Flow {flow_name} is not activated. Current status: {evidence}.",
+            (),
+            freeze=True,
+        )
+    # Unknown status
+    return None
+
+
+def _read_flow_status(page, flow_name: str) -> tuple[str, str]:
+    """Read the active status of a named flow from the Flows list page.
+
+    Returns:
+        ("active", "") if the flow is active
+        ("inactive", status_text) if the flow exists but is not active
+        ("not_found", "") if the flow is not on the page
+        ("duplicate", "") if multiple flows with the same name exist
+        ("unknown", "") if the status cannot be determined
+    """
+    try:
+        html = _page_html(page)
+        if not html:
+            return ("unknown", "")
+
+        flow_name_lower = flow_name.lower()
+
+        # First try to extract only tbody content to avoid counting header rows
+        tbody_match = re.search(r'<tbody[^>]*>(.*?)</tbody>', html, re.DOTALL | re.I)
+        if tbody_match:
+            search_html = tbody_match.group(1)
+        else:
+            # Fall back to full HTML if no tbody
+            search_html = html
+
+        # Find rows that contain the flow name in a <td> (not <th>)
+        tr_pattern = r'<tr[^>]*>(.*?)</tr>'
+        rows = re.findall(tr_pattern, search_html, re.DOTALL | re.I)
+
+        flow_rows = []
+        for row in rows:
+            # Only consider rows with <td> tags (data rows, not headers)
+            if '<td' not in row.lower():
+                continue
+            # Skip rows that contain only <th> tags
+            if '<th' in row.lower() and '<td' not in row.lower():
+                continue
+            # Check if this row contains the flow name in a <td>
+            td_contents = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)
+            if any(flow_name in td for td in td_contents):
+                flow_rows.append(row)
+
+        if not flow_rows:
+            return ("not_found", "")
+
+        if len(flow_rows) > 1:
+            return ("duplicate", "")
+
+        # Check the one row for active status
+        row = flow_rows[0]
+        row_lower = row.lower()
+
+        # Extract cell contents using <td> tags
+        cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.I)
+        cells_text = [re.sub(r'<[^>]+>', '', cell).strip() for cell in cells]
+        cells_lower = [c.lower() for c in cells_text]
+
+        # Check if any cell (other than the one with the flow name) says "Active"
+        for cell_text, cell_lower in zip(cells_text, cells_lower):
+            # Skip the cell that has the flow name
+            if flow_name_lower in cell_lower:
+                continue
+            # Check for active status
+            if cell_lower == 'active' or re.fullmatch(r'\s*active\s*', cell_lower):
+                return ("active", "")
+            # Check for inactive/draft
+            if cell_lower in ('inactive', 'draft'):
+                return ("inactive", cell_text.title())
+
+        # If no <td> structure found clear status, try a positional check
+        if re.search(r'\bactive\b', row_lower):
+            flow_pos = row_lower.find(flow_name_lower)
+            active_pos = row_lower.find('active')
+            if active_pos > flow_pos:
+                return ("active", "")
+
+        if re.search(r'\b(inactive|draft)\b', row_lower):
+            match = re.search(r'\b(inactive|draft)\b', row_lower, re.I)
+            if match:
+                return ("inactive", match.group(1).title())
+
+        # If we found the flow but can't determine status
+        return ("unknown", "")
+    except Exception:
+        return ("unknown", "")
 
 
 def _in_setup(page) -> bool:
@@ -7276,6 +7401,8 @@ def _try_named(state: WalkState, step: GuideStep, intent: _Intent, name: str, op
         return _act_fill(state, step, intent.target, intent.value)
     if intent.kind == "own":
         return _act_own(state, step, name)
+    if intent.kind == "confirm_flow_active":
+        return _act_confirm_flow_active(state, step, name)
     return None
 
 
