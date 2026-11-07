@@ -226,6 +226,7 @@ class GateTests(unittest.TestCase):
     def test_required_reviewers(self):
         self.assertEqual(required_reviewers(["docs/a.md"]), ["code-reviewer", "safety-scanner"])
         self.assertIn("rule-auditor", required_reviewers(["workshop_validator/a.py"]))
+        self.assertIn("safety-scanner", required_reviewers(["docs/a.md"]))
 
     def test_review_verdicts_read_last_line(self):
         with tempfile.TemporaryDirectory() as tmp:

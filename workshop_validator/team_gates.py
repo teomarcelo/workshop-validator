@@ -3,6 +3,7 @@
     python -m workshop_validator.team_gates all [--base origin/main] [--private]
     python -m workshop_validator.team_gates em-dash|decision-rows|register|clock12
     python -m workshop_validator.team_gates prove-tests <pr>   # new tests fail on base, per code file
+    python -m workshop_validator.team_gates prove --base <ref> --tests <mod>... [--mutants <json>] [--timeout <s>]
     python -m workshop_validator.team_gates merge-when-green <pr> [--dry-run]
     python -m workshop_validator.team_gates worktree-cleanup [--dry-run]
 
@@ -338,6 +339,8 @@ SECURITY_FILES = {".claude/settings.json", ".claude/settings.local.json",
                   "workshop_validator/team_hooks.py", "workshop_validator/team_gates.py",
                   "workshop_validator/team_kit.py", "workshop_validator/watchdog.py",
                   "workshop_validator/public_safety.py", "workshop_validator/team_state.py"}
+PRIVACY_FILES = {"workshop_validator/private_runner.py", "workshop_validator/report.py",
+                 "workshop_validator/step_board.py", "workshop_validator/automate.py"}
 
 
 def required_reviewers(changed: list[str]) -> list[str]:
@@ -346,6 +349,8 @@ def required_reviewers(changed: list[str]) -> list[str]:
         roles.append("rule-auditor")
     if any(name.startswith(SECURITY_PREFIXES) or name in SECURITY_FILES for name in changed):
         roles.append("security-reviewer")
+    if any(name in PRIVACY_FILES for name in changed):
+        roles.append("privacy-reviewer")
     return roles
 
 
@@ -1148,6 +1153,289 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
             _git(repo, "worktree", "prune", check=False, runner=runner)
 
 
+# ---- prove -----------------------------------------------------------------
+
+PROVE_TIMEOUT = 600
+PROVE_MAX_NAMES = 10
+TEST_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*\Z")
+PROVE_RUNNER_SOURCE = '''"""prove runner: run the named tests in one tree, write JSON results. Exit 0 when written.
+
+argv: out_json tree name...  Writes {"tests": {id: status}, "collection": [name...]}.
+A name that cannot be loaded (import or other error at collection) goes in "collection".
+"""
+import json
+import os
+import sys
+import unittest
+
+out, tree, names = sys.argv[1], os.path.realpath(sys.argv[2]), sys.argv[3:]
+sys.path.insert(0, tree)
+
+
+class Result(unittest.TestResult):
+    def __init__(self):
+        super().__init__()
+        self.status = {}
+
+    def addSuccess(self, test):
+        super().addSuccess(test)
+        self.status.setdefault(test.id(), "ok")
+
+    def addFailure(self, test, err):
+        super().addFailure(test, err)
+        self.status[test.id()] = "fail"
+
+    def addError(self, test, err):
+        super().addError(test, err)
+        self.status[test.id()] = "error"
+
+    def addSkip(self, test, reason):
+        super().addSkip(test, reason)
+        self.status[test.id()] = "skip"
+
+    def addExpectedFailure(self, test, err):
+        super().addExpectedFailure(test, err)
+        self.status[test.id()] = "expectedFailure"
+
+    def addUnexpectedSuccess(self, test):
+        super().addUnexpectedSuccess(test)
+        self.status[test.id()] = "unexpectedSuccess"
+
+    def addSubTest(self, test, subtest, err):
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self.status[test.id()] = "fail" if issubclass(err[0], test.failureException) else "error"
+
+
+def flat(suite):
+    for item in suite:
+        if isinstance(item, unittest.TestSuite):
+            yield from flat(item)
+        else:
+            yield item
+
+
+tests, collection = {}, []
+for name in names:
+    loader = unittest.TestLoader()
+    try:
+        suite = loader.loadTestsFromName(name)
+    except Exception:
+        collection.append(name)
+        continue
+    items = list(flat(suite))
+    if loader.errors or any(type(t).__name__ == "_FailedTest" for t in items):
+        collection.append(name)
+        continue
+    parts, where = name.split("."), ""
+    for size in range(len(parts), 0, -1):
+        found = getattr(sys.modules.get(".".join(parts[:size])), "__file__", None)
+        if found:
+            where = os.path.realpath(found)
+            break
+    if not where.startswith(tree + os.sep):
+        collection.append(name)
+        continue
+    result = Result()
+    suite.run(result)
+    for test in items:
+        tests[test.id()] = result.status.get(test.id(), "error")
+    for test, _ in result.errors:
+        if type(test).__name__ == "_ErrorHolder":  # class or module fixture error
+            tests.setdefault(test.id(), "error")
+with open(out, "w", encoding="utf-8") as fh:
+    json.dump({"tests": tests, "collection": collection}, fh)
+'''
+
+
+class ProveError(Exception):
+    """A prove phase cannot go on; the message is the reason printed after PROVE: FAIL."""
+
+
+def _prove_fail(reason: str) -> bool:
+    print(f"PROVE: FAIL {reason}")
+    return False
+
+
+def _prove_git(repo: Path, *args: str, timeout: float) -> str:
+    """git with a hard limit; raises CalledProcessError or TimeoutExpired."""
+    result = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True,
+                            errors="replace", timeout=timeout)
+    if result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, ["git", *args],
+                                            result.stdout, result.stderr)
+    return result.stdout or ""
+
+
+def _load_mutants(repo: Path, mutants_file: str, timeout: float) -> list[dict]:
+    """Read and check every mutant path, before anything is written anywhere."""
+    try:
+        mutants = json.loads(Path(mutants_file).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise ProveError("cannot read mutants file") from None
+    if not isinstance(mutants, list) or not mutants:
+        raise ProveError("mutants file is not a non-empty list")
+    for mutant in mutants:
+        if not (isinstance(mutant, dict) and all(isinstance(mutant.get(k), str)
+                                                 for k in ("file", "find", "replace"))):
+            raise ProveError("mutant needs string file, find and replace")
+        name = mutant["file"]
+        parts = Path(name).parts
+        if not name or Path(name).is_absolute() or name.startswith(("/", "\\", "-")) \
+                or ".." in parts or "\\" in name:
+            raise ProveError("bad mutant path")
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch", "--", name], cwd=repo,
+                                 capture_output=True, text=True, errors="replace", timeout=timeout)
+        if tracked.returncode:
+            raise ProveError("bad mutant path")
+    return mutants
+
+
+def _prove_run(tree: Path, runner_file: Path, out_json: Path, tests: list[str],
+               timeout: float) -> tuple[dict, list]:
+    """({id: status}, [names that failed at collection]) for the named tests in tree."""
+    if out_json.exists():
+        out_json.unlink()
+    env = {**os.environ, "RUN_BROWSER_SMOKE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
+    result = subprocess.run([sys.executable, "-I", "-B", str(runner_file), str(out_json),
+                             str(tree), *tests], cwd=tree, capture_output=True, text=True,
+                            errors="replace", env=env, timeout=timeout)
+    if result.returncode:
+        raise ProveError(f"test runner exited {result.returncode}")
+    try:
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        statuses, collection = dict(data["tests"]), list(data["collection"])
+    except (OSError, ValueError, KeyError, TypeError):
+        raise ProveError("test runner wrote no results") from None
+    return {str(k): str(v) for k, v in statuses.items()}, [str(n) for n in collection]
+
+
+def _add_tree(repo: Path, tree: Path, oid: str, timeout: float) -> None:
+    _prove_git(repo, "worktree", "add", "--detach", str(tree), oid, timeout=timeout)
+
+
+def _drop_tree(repo: Path, tree: Path) -> None:
+    for args in (("worktree", "remove", "--force", str(tree)), ("worktree", "prune")):
+        try:
+            subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
+def _prove_phases(repo: Path, base_ref: str, tests: list[str], mutants_file: str | None,
+                  timeout: float) -> bool:
+    if base_ref.startswith("-") or not base_ref.strip():
+        return _prove_fail("bad --base")
+    if not tests or any(not TEST_NAME.match(name) for name in tests):
+        return _prove_fail("bad --tests name")
+    if _prove_git(repo, "status", "--porcelain", timeout=timeout).strip():
+        return _prove_fail("uncommitted changes")
+    head = _prove_git(repo, "rev-parse", "--verify", "HEAD^{commit}", timeout=timeout).strip()
+    base = _prove_git(repo, "rev-parse", "--verify", "--end-of-options", base_ref + "^{commit}",
+                      timeout=timeout).strip()
+    mutants = _load_mutants(repo, mutants_file, timeout) if mutants_file else []
+    print(f"prove: head {head}")
+    print(f"prove: base {base}")
+
+    with tempfile.TemporaryDirectory(prefix="prove-") as tmp_root:
+        os.chmod(tmp_root, 0o700)
+        tmp = Path(tmp_root)
+        runner_file, out_json = tmp / "runner.py", tmp / "results.json"
+        runner_file.write_text(PROVE_RUNNER_SOURCE, encoding="utf-8")
+
+        # (a) head: every named test passes, none skipped
+        tree = tmp / "head"
+        try:
+            _add_tree(repo, tree, head, timeout)
+            statuses, collection = _prove_run(tree, runner_file, out_json, tests, timeout)
+        finally:
+            _drop_tree(repo, tree)
+        if collection:
+            return _prove_fail(f"tests did not load on head: {', '.join(collection[:PROVE_MAX_NAMES])}")
+        if not statuses:
+            return _prove_fail("no tests ran on head")
+        skipped = sorted(t for t, s in statuses.items() if s == "skip")
+        if skipped:
+            return _prove_fail(f"{len(skipped)} test(s) skipped on head: "
+                               f"{', '.join(skipped[:PROVE_MAX_NAMES])}")
+        bad = sorted(t for t, s in statuses.items() if s != "ok")
+        if bad:
+            return _prove_fail(f"{len(bad)} test(s) failed on head: {', '.join(bad[:PROVE_MAX_NAMES])}")
+        print(f"prove: {len(statuses)} test(s) pass on head")
+
+        # (b) base code with the head's test modules: at least one test fails
+        tree = tmp / "base"
+        try:
+            _add_tree(repo, tree, base, timeout)
+            for name in tests:
+                module = name
+                while module:
+                    rel = module.replace(".", "/") + ".py"
+                    shown = subprocess.run(["git", "show", f"{head}:{rel}"], cwd=repo,
+                                           capture_output=True, timeout=timeout)
+                    if not shown.returncode:
+                        target = tree / rel
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(shown.stdout)
+                        break
+                    module = module.rpartition(".")[0]
+            statuses, collection = _prove_run(tree, runner_file, out_json, tests, timeout)
+        finally:
+            _drop_tree(repo, tree)
+        failing = sorted(t for t, s in statuses.items() if s in ("fail", "error")) + collection
+        if not failing:
+            return _prove_fail("tests pass on base")
+        print(f"prove: {len(failing)} test(s) fail on base: {', '.join(failing[:PROVE_MAX_NAMES])}")
+
+        # (c) mutants on the head commit: each must be killed by a real test failure
+        for number, mutant in enumerate(mutants, 1):
+            tree = tmp / f"mutant{number}"
+            try:
+                _add_tree(repo, tree, head, timeout)
+                target = tree / mutant["file"]
+                if not target.resolve().is_relative_to(tree.resolve()) or not target.is_file():
+                    return _prove_fail("bad mutant path")
+                text = target.read_text(encoding="utf-8")
+                if not mutant["find"] or mutant["find"] not in text:
+                    return _prove_fail(f"mutant did not apply: {number}")
+                target.write_text(text.replace(mutant["find"], mutant["replace"], 1), encoding="utf-8")
+                statuses, collection = _prove_run(tree, runner_file, out_json, tests, timeout)
+            finally:
+                _drop_tree(repo, tree)
+            killed = sorted(t for t, s in statuses.items() if s in ("fail", "error"))
+            if killed:
+                print(f"prove: mutant {number} killed by {', '.join(killed[:PROVE_MAX_NAMES])}")
+            elif collection:
+                return _prove_fail(f"mutant broke import: {number}")
+            else:
+                return _prove_fail(f"mutant survived: {number}")
+        if mutants:
+            print(f"prove: {len(mutants)} mutant(s) killed")
+    print("PROVE: PASS")
+    return True
+
+
+def prove_command(repo: Path, base_ref: str, tests: list[str], mutants_file: str | None = None,
+                  timeout: float = PROVE_TIMEOUT) -> bool:
+    """Prove the named tests: pass on HEAD, fail on base, and kill every mutant.
+
+    Every phase runs from the one HEAD commit, with the running interpreter.
+    The last line is always `PROVE: PASS` or `PROVE: FAIL <reason>`; it never raises.
+    """
+    try:
+        return _prove_phases(Path(repo), base_ref, list(tests), mutants_file, timeout)
+    except ProveError as error:
+        return _prove_fail(str(error))
+    except subprocess.TimeoutExpired:
+        return _prove_fail("timeout")
+    except subprocess.CalledProcessError as error:
+        verb = error.cmd[1] if isinstance(error.cmd, list) and len(error.cmd) > 1 else "git"
+        detail = _redact_stderr(error.stderr or "").splitlines()
+        return _prove_fail(f"git {verb} failed" + (f": {detail[0]}" if detail else ""))
+    except (OSError, UnicodeError):
+        return _prove_fail("os error")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Producer-team merge gates.")
     parser.add_argument("--repo", default=".")
@@ -1162,6 +1450,12 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("clock12")
     pt = sub.add_parser("prove-tests")
     pt.add_argument("pr", type=int)
+    prove_parser = sub.add_parser("prove")
+    prove_parser.add_argument("--base", required=True, help="Base ref to compare against")
+    prove_parser.add_argument("--tests", required=True, nargs="+", help="Test modules to run")
+    prove_parser.add_argument("--mutants", help="JSON file with mutants")
+    prove_parser.add_argument("--timeout", type=float, default=PROVE_TIMEOUT,
+                              help="Seconds allowed for each git or test run")
     mwg = sub.add_parser("merge-when-green")
     mwg.add_argument("pr", type=int)
     mwg.add_argument("--dry-run", action="store_true")
@@ -1187,6 +1481,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"prove-tests: UNPROVEN cannot read head and base of PR #{args.pr}")
             return 1
         return 0 if prove_tests(repo, f"origin/{base_name}", head_oid) else 1
+    if args.cmd == "prove":
+        return 0 if prove_command(repo, args.base, args.tests, args.mutants, args.timeout) else 1
     if args.cmd == "merge-when-green":
         return merge_when_green(repo, team, args.pr, args.dry_run)
     if args.cmd == "worktree-cleanup":
