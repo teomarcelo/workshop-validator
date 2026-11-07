@@ -75,6 +75,18 @@ class SafetyScanTests(unittest.TestCase):
         hits = team_gates.safety_scan_checks(diff)
         self.assertEqual(hits["email"], 0)
 
+    def test_safety_scan_blocks_test_com(self):
+        """safety-scan blocks test.com (real domain, not reserved)."""
+        # Construct email dynamically
+        test_email = "someone" + "@test" + ".com"
+        diff = f"""diff --git a/file.py b/file.py
++++ b/file.py
+@@ -1 +1,2 @@
++email = "{test_email}"
+"""
+        hits = team_gates.safety_scan_checks(diff)
+        self.assertEqual(hits["email"], 1)
+
     def test_safety_scan_blocks_user_home_path(self):
         """safety-scan blocks /Users/name/ and /home/name/ paths."""
         # Construct path dynamically to avoid public_safety scan

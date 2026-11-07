@@ -447,10 +447,9 @@ def merged_tree_gates(repo: Path, oid: str, runner=None) -> bool:
             if merge.returncode:
                 print("merged-tree: FAIL merge conflict with main")
                 return False
-            python = repo / ".venv" / "bin" / "python"
-            for cmd in ([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"],
-                        [str(python), "-m", "workshop_validator.public_safety"],
-                        [str(python), "-m", "compileall", "-q", "workshop_validator", "tests"]):
+            for cmd in ([sys.executable, "-m", "unittest", "discover", "-s", "tests", "-q"],
+                        [sys.executable, "-m", "workshop_validator.public_safety"],
+                        [sys.executable, "-m", "compileall", "-q", "workshop_validator", "tests"]):
                 result = run(cmd, tree)
                 if result.returncode:
                     print(f"merged-tree: FAIL {' '.join(cmd[1:4])}")
@@ -1027,7 +1026,7 @@ def parse_new_test_ids(diff: str) -> list[str]:
     return ids
 
 
-def _run_test_ids(run, python: Path, tree: Path, out_json: Path, ids: list[str]):
+def _run_test_ids(run, python: str | Path, tree: Path, out_json: Path, ids: list[str]):
     """({id: status}, None) from the runner module, or (None, reason)."""
     if out_json.exists():
         out_json.unlink()
@@ -1090,9 +1089,8 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
               "but no new or changed test found")
         return False
 
-    python = repo / ".venv" / "bin" / "python"
-    if run([str(python), "-c", CHROMIUM_CHECK], Path(repo)).returncode:
-        print("prove-tests: UNPROVEN headless Chromium did not launch from .venv")
+    if run([sys.executable, "-c", CHROMIUM_CHECK], Path(repo)).returncode:
+        print("prove-tests: UNPROVEN headless Chromium did not launch")
         return False
 
     with tempfile.TemporaryDirectory() as tmp:
@@ -1107,7 +1105,7 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
             tree.mkdir(parents=True, exist_ok=True)
             (tree / RUNNER_NAME).write_text(RUNNER_SOURCE, encoding="utf-8")
 
-            head, reason = _run_test_ids(run, python, tree, out_json, test_ids)
+            head, reason = _run_test_ids(run, sys.executable, tree, out_json, test_ids)
             if reason:
                 print(f"prove-tests: UNPROVEN on head: {reason}")
                 return False
@@ -1129,7 +1127,7 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
                         path.write_text(shown.stdout or "", encoding="utf-8")
                     elif path.exists():  # new in head
                         path.unlink()
-                    statuses, reason = _run_test_ids(run, python, tree, out_json, test_ids)
+                    statuses, reason = _run_test_ids(run, sys.executable, tree, out_json, test_ids)
                 finally:
                     if head_bytes is None:
                         if path.exists():
@@ -1160,7 +1158,7 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
 
 # Patterns for safety checks
 ORG_HOSTNAME = re.compile(r"\b(?!example\.)[a-z0-9-]+\.(my\.salesforce\.com|lightning\.force\.com)\b")
-EMAIL_RESERVED = ("example.com", "example.org", "test.com", "localhost", "users.noreply.github.com")
+EMAIL_RESERVED = ("example.com", "example.org", "example.net", "localhost", "users.noreply.github.com")
 USER_HOME = re.compile(r"/(?:Users|home)/[^/\s]+/")
 RUN_OUTPUT_PATH = re.compile(r"/runs/[^/]+/[0-9TZ-]+/")
 MEDIA_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".mp4", ".webm", ".mov", ".pdf")
@@ -1192,8 +1190,13 @@ def safety_scan_checks(diff: str) -> dict[str, int]:
         for match in EMAIL_PATTERN.finditer(line):
             email = match.group(0)
             domain = email.split("@")[-1].lower().strip('"\'')
-            if domain not in EMAIL_RESERVED:
-                hits["email"] += 1
+            # Check exact domain or TLD
+            if domain in EMAIL_RESERVED:
+                continue
+            # Check reserved TLDs
+            if any(domain.endswith(tld) for tld in (".example", ".test", ".invalid", ".localhost")):
+                continue
+            hits["email"] += 1
         # user home paths
         if USER_HOME.search(line):
             hits["user-home"] += 1
@@ -1221,10 +1224,9 @@ def safety_scan_checks(diff: str) -> dict[str, int]:
 def safety_scan(repo: Path, base_ref: str, head_sha: str, runner=None) -> bool:
     """Run public_safety and scan diff for safety violations. Return True if clear."""
     run = runner or _default_runner
-    python = repo / ".venv" / "bin" / "python"
 
     # Run public_safety first
-    result = run([str(python), "-m", "workshop_validator.public_safety"], repo)
+    result = run([sys.executable, "-m", "workshop_validator.public_safety"], repo)
     if result.returncode:
         print("SAFETY: BLOCK public_safety failed")
         return False
@@ -1251,13 +1253,12 @@ def safety_scan(repo: Path, base_ref: str, head_sha: str, runner=None) -> bool:
 def prove_command(repo: Path, base_ref: str, test_modules: list[str], mutants_file: str | None, runner=None) -> bool:
     """Run prove: tests pass on head, fail on base, and mutants are killed."""
     run = runner or _default_runner
-    python = repo / ".venv" / "bin" / "python"
 
     # (a) Run tests on working tree
     print("prove: running tests on working tree")
     env_vars = {"RUN_BROWSER_SMOKE": "1", "PYTHONDONTWRITEBYTECODE": "1"}
     env = {**os.environ, **env_vars}
-    result = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+    result = subprocess.run([sys.executable, "-m", "unittest"] + test_modules,
                            cwd=repo, capture_output=True, text=True, env=env, timeout=300)
 
     if result.returncode:
@@ -1297,7 +1298,7 @@ def prove_command(repo: Path, base_ref: str, test_modules: list[str], mutants_fi
                     dst.write_bytes(src.read_bytes())
 
             # Run tests on base
-            result_base = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+            result_base = subprocess.run([sys.executable, "-m", "unittest"] + test_modules,
                                         cwd=base_tree, capture_output=True, text=True, env=env, timeout=300)
 
             # Tests should fail on base
@@ -1367,7 +1368,7 @@ def prove_command(repo: Path, base_ref: str, test_modules: list[str], mutants_fi
                     target_file.write_text(mutated)
 
                     # Run tests on mutant
-                    result_mutant = subprocess.run([str(python), "-m", "unittest"] + test_modules,
+                    result_mutant = subprocess.run([sys.executable, "-m", "unittest"] + test_modules,
                                                   cwd=mutant_tree, capture_output=True, text=True,
                                                   env=env, timeout=300)
 
