@@ -359,7 +359,7 @@ class KeepOrgTests(unittest.TestCase):
             root, run_dir = _keep_org_root(folder, stop=None, verdicts=verifier_form, run_id=run_id)
             steps = [{"step_id": sid, "status": status} for sid, status in
                      (("s1", "PASS"), ("s2", "UI_MISMATCH"), ("s3", "NOT_RUN"))]
-            board = {"sections": [{"tasks": [{"steps": steps[:2]}, {"steps": steps[2:]}]}]}
+            board = {"sections": [{"tasks": [{"steps": steps[:2]}, {"steps": steps[2:]}]}], "unmatched": 0}
             (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
             self.assertEqual(self._keep(root, run_dir), 0)
             self.assertEqual(load_gate(root)["org"], 1)
@@ -380,7 +380,7 @@ class KeepOrgTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             self.assertRefusedUnchanged(*_keep_org_root(folder, step="s3"))
 
-    def test_refuses_when_the_board_stop_is_another_step(self):
+    def test_allows_when_all_real_failures_verified_regardless_of_stop_step(self):
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_org_root(folder, stop=None)
             # s2 failed first (with FALSE_FAILURE), walk stopped at s3 (NEEDS_REVIEW).
@@ -389,7 +389,7 @@ class KeepOrgTests(unittest.TestCase):
             steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "UI_MISMATCH"},
                      {"step_id": "s3", "status": "NEEDS_REVIEW"}, {"step_id": "s4", "status": "NOT_RUN"}]
             (run_dir / "board.json").write_text(
-                json.dumps({"sections": [{"tasks": [{"steps": steps}]}]}), encoding="utf-8")
+                json.dumps({"sections": [{"tasks": [{"steps": steps}], "unmatched": 0}]}), encoding="utf-8")
             self.assertEqual(self._keep(root, run_dir), 0)
             self.assertEqual(load_gate(root)["kept_org_reason"]["verified_false_failures"], ["s2"])
 
@@ -581,6 +581,150 @@ class KeepOrgTests(unittest.TestCase):
             gate = load_gate(root)
             self.assertEqual((gate["org"], gate["frozen"]), (2, False))
             self.assertNotIn("kept_org_reason", gate)
+
+    def test_refuses_when_board_has_unmatched_steps(self):
+        """W-167: refuse when board.unmatched > 0."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "UI_MISMATCH"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 3}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_when_summary_failure_missing_from_board(self):
+        """W-167: refuse when a summary failure is not on the board."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            # s2 and s3 are failures in summary, but board only shows s2
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
+                                    {"step_id": "s3", "status": "FUNCTIONAL_FAIL"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "UI_MISMATCH"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s3", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_when_summary_failure_shown_pass_on_board(self):
+        """W-167: refuse when summary lists a failure but board shows PASS."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "PASS"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_when_summary_and_board_disagree_on_status(self):
+        """W-167: refuse when summary and board list different statuses for the same step."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "FUNCTIONAL_FAIL"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_when_summary_failures_malformed_with_board_present(self):
+        """W-167: refuse malformed summary.failures even when board.json exists."""
+        for bad_failures in ([{"step_id": "s2"}], [{"status": "UI_MISMATCH"}], ["not a dict"],
+                             [{"step_id": "", "status": "UI_MISMATCH"}],
+                             [{"step_id": "s2", "status": "PASS"}]):
+            with self.subTest(failures=bad_failures), tempfile.TemporaryDirectory() as folder:
+                root, run_dir = _keep_org_root(folder, stop=None)
+                summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                           "failures": bad_failures}
+                (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+                steps = [{"step_id": "s2", "status": "UI_MISMATCH"}]
+                board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+                (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+                self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_when_summary_stop_step_malformed_with_board_present(self):
+        """W-167: refuse malformed summary.stop_step even when board.json exists."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "stop_step": ["not a string"]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s2", "status": "UI_MISMATCH"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_false_pass_for_step_not_on_board(self):
+        """W-167: refuse FALSE_PASS for any step in verdicts, even if not on board."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            steps = [{"step_id": "s1", "status": "PASS"}, {"step_id": "s2", "status": "UI_MISMATCH"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s99", "verdict": "FALSE_PASS", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_frozen_needs_review_judged_real(self):
+        """W-167: frozen NEEDS_REVIEW judged REAL must refuse (W-135, W-137)."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"},
+                     {"step_id": "s3", "status": "NEEDS_REVIEW", "freeze": True}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s3", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_allows_w167_mixed_case(self):
+        """W-167 mixed case: NEEDS_REVIEW (UNCLEAR) + multiple FALSE_FAILURE is allowed."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
+                                    {"step_id": "s3", "status": "FUNCTIONAL_FAIL"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s1a", "status": "NEEDS_REVIEW"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"},
+                     {"step_id": "s3", "status": "FUNCTIONAL_FAIL"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s1a", "verdict": "UNCLEAR", "frames": "f.png"},
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s3", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertEqual(self._keep(root, run_dir), 0)
+            self.assertEqual(load_gate(root)["kept_org_reason"]["verified_false_failures"], ["s2", "s3"])
+
+    def test_old_simple_case_still_allowed(self):
+        """Original simple case (first non-PASS verified FALSE_FAILURE) still works."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder)
+            self.assertEqual(self._keep(root, run_dir), 0)
+            self.assertEqual(load_gate(root)["org"], 1)
 
     def test_summary_records_the_stop_step(self):
         result = _run("PASS", "UI_MISMATCH", "NOT_RUN")

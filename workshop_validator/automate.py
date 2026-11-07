@@ -592,12 +592,16 @@ def _board_stop_step(run_dir: Path) -> str | None:
     return None if stop is None else stop.step_id
 
 
-def _board_steps(run_dir: Path) -> list[tuple[str, str]]:
-    """All steps from board.json as (step_id, status) in printed order."""
+def _board_steps(run_dir: Path) -> tuple[list[tuple[str, str]], int]:
+    """All steps from board.json as ((step_id, status) list, unmatched count)."""
     board = _read_json(run_dir / "board.json")
     try:
-        return [(str(st["step_id"]), str(st["status"]))
+        steps = [(str(st["step_id"]), str(st["status"]))
                 for section in board["sections"] for task in section["tasks"] for st in task["steps"]]
+        unmatched = board.get("unmatched", 0)
+        if not isinstance(unmatched, int) or unmatched < 0:
+            raise ValueError("malformed board.json")
+        return steps, unmatched
     except (KeyError, TypeError):
         raise ValueError("malformed board.json") from None
 
@@ -646,6 +650,15 @@ def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
     return verdicts
 
 
+_KNOWN_STATUSES = {"PASS", "UI_MISMATCH", "FUNCTIONAL_FAIL", "ENV_BLOCKED",
+                   "AUTH_BLOCKED", "NEEDS_REVIEW", "NOT_RUN"}
+
+
+def _safe_status_name(status: str) -> str:
+    """Return the status if known, otherwise 'unknown'."""
+    return status if status in _KNOWN_STATUSES else "unknown"
+
+
 def reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     """Unfreeze and undo this run's org move, only for a verified FALSE_FAILURE stop.
 
@@ -673,20 +686,32 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         if not isinstance(summary, dict) or isinstance(summary.get("org"), bool) \
                 or not isinstance(summary.get("org"), int) or summary["org"] < 1:
             raise ValueError("malformed summary.json")
-        # Try board.json first (W-167: check all steps for mixed results).
-        # For older runs without board.json, fall back to the summary's failures list.
-        board_json_path = run_dir / "board.json"
-        if board_json_path.is_file() and not board_json_path.is_symlink():
-            steps = _board_steps(run_dir)
-        else:
-            # Older runs: use the summary's failures list and stop step (original logic).
-            stop = summary["stop_step"] if "stop_step" in summary else _board_stop_step(run_dir)
-            if stop is not None and not isinstance(stop, str):
+
+        # W-167: validate summary.json failures ALWAYS (required for union check).
+        stop = summary.get("stop_step")
+        if stop is not None and not isinstance(stop, str):
+            raise ValueError("malformed summary.json")
+        failures = summary.get("failures")
+        if failures is not None:
+            if not isinstance(failures, list):
                 raise ValueError("malformed summary.json")
-            judged = _judged_steps(summary, stop)
-            # Rebuild steps list from judged for uniform processing.
-            # Old format treats all judged steps as needing FALSE_FAILURE.
-            steps = [(step_id, "UI_MISMATCH") for _, step_id in judged]
+            for row in failures:
+                if not isinstance(row, dict) or not isinstance(row.get("step_id"), str) or not row["step_id"]:
+                    raise ValueError("malformed summary.json")
+                # W-100, W-135, W-137: failures must have status (real failure or NEEDS_REVIEW).
+                status = row.get("status")
+                if status is None or (status not in _REAL_FAIL and status != "NEEDS_REVIEW"):
+                    raise ValueError("malformed summary.json")
+
+        # Try board.json first (W-167: check all steps for mixed results).
+        board_json_path = run_dir / "board.json"
+        board_steps = None
+        if board_json_path.is_file() and not board_json_path.is_symlink():
+            board_steps, unmatched = _board_steps(run_dir)
+            # Refuse when build_board dropped results (unmatched > 0).
+            if unmatched > 0:
+                return refuse(f"board.json has {unmatched} unmatched step(s)")
+
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
     except ValueError as error:
@@ -699,33 +724,88 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     if isinstance(kept, dict) and kept.get("run_id") == run_id:
         return refuse("this run already kept its org")
 
-    # Separate real failures from other non-PASS steps
-    real_failures = [(step_id, status) for step_id, status in steps if status in _REAL_FAIL]
-    other_non_pass = [(step_id, status) for step_id, status in steps
-                      if status != "PASS" and status not in _REAL_FAIL]
-
-    # Check that no step has FALSE_PASS verdict
-    for step_id, _ in steps:
-        step_verdicts = verdicts.get(step_id, set())
+    # Check FALSE_PASS for ANY step in verdicts (not just board steps).
+    for step_id, step_verdicts in verdicts.items():
         if "FALSE_PASS" in step_verdicts:
             return refuse(f"step {step_id} has FALSE_PASS verdict")
 
-    # Check that every real failure has exactly {"FALSE_FAILURE"} verdict
+    # Build the UNION of summary real failures and board real failures.
+    # W-135, W-137: summary.failures also includes frozen NEEDS_REVIEW; they are not real failures.
+    real_failures: dict[str, str] = {}  # step_id -> status
+    frozen_needs_review_steps: set[str] = set()
+    if failures:
+        for row in failures:
+            # Old summaries may not have status; default to UI_MISMATCH for backwards compatibility.
+            status = row.get("status", "UI_MISMATCH")
+            if status == "NEEDS_REVIEW":
+                # W-135, W-137: frozen NEEDS_REVIEW in failures list.
+                frozen_needs_review_steps.add(row["step_id"])
+            elif status in _REAL_FAIL:
+                real_failures[row["step_id"]] = status
+    if board_steps:
+        for step_id, status in board_steps:
+            if status in _REAL_FAIL:
+                # Check for status disagreement between summary and board.
+                if step_id in real_failures and real_failures[step_id] != status:
+                    return refuse(f"step {step_id} status disagreement: summary "
+                                  f"{_safe_status_name(real_failures[step_id])} vs board "
+                                  f"{_safe_status_name(status)}")
+                real_failures[step_id] = status
+
+    # If board exists, check that every summary failure appears on it with a real failure status.
+    if board_steps and failures:
+        board_statuses = {step_id: status for step_id, status in board_steps}
+        for row in failures:
+            if row["step_id"] not in board_statuses:
+                return refuse(f"summary failure {row['step_id']} is missing from the board")
+            # Check that board shows this as a real failure, not PASS or other status.
+            if board_statuses[row["step_id"]] not in _REAL_FAIL:
+                return refuse(f"summary failure {row['step_id']} is not a real failure on the board")
+
+    # Older runs without board.json or summary.failures: fall back to stop_step.
+    if not real_failures:
+        if stop is None and board_json_path.is_file() and not board_json_path.is_symlink():
+            stop = _board_stop_step(run_dir)
+        if stop:
+            real_failures[stop] = "UI_MISMATCH"
+
+    # Check that every other non-PASS step on the board has an inconclusive status.
+    inconclusive_statuses = _INCONCLUSIVE | {"NOT_RUN"}
+    if board_steps:
+        for step_id, status in board_steps:
+            if status != "PASS" and status not in _REAL_FAIL and status not in inconclusive_statuses:
+                return refuse(f"non-failure step {step_id} has status {_safe_status_name(status)}, "
+                              "not inconclusive")
+
+    # Check that every real failure has exactly {"FALSE_FAILURE"} verdict.
     verified_false_failures = []
-    for step_id, status in real_failures:
+    for step_id, status in real_failures.items():
         step_verdicts = verdicts.get(step_id, set())
         if step_verdicts != {"FALSE_FAILURE"}:
             return refuse(f"failure step {step_id} is {'/'.join(sorted(step_verdicts or ())) or 'not verified'}, "
                           "not FALSE_FAILURE")
         verified_false_failures.append(step_id)
 
-    # Check that every other non-PASS step has an inconclusive status
-    inconclusive_statuses = _INCONCLUSIVE | {"NOT_RUN"}
-    for step_id, status in other_non_pass:
-        if status not in inconclusive_statuses:
-            return refuse(f"non-failure step {step_id} has status {status}, not inconclusive")
+    # W-135, W-137: frozen NEEDS_REVIEW with REAL verdict must refuse.
+    # Check both frozen_needs_review_steps from summary and board frozen steps.
+    for step_id in frozen_needs_review_steps:
+        step_verdicts = verdicts.get(step_id, set())
+        if "REAL" in step_verdicts:
+            return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
+    if board_steps:
+        for step_id, status in board_steps:
+            if status == "NEEDS_REVIEW":
+                # Check if this step is frozen (by reading board.json freeze attribute).
+                board_data = _read_json(run_dir / "board.json")
+                for section in board_data.get("sections", []):
+                    for task in section.get("tasks", []):
+                        for step in task.get("steps", []):
+                            if str(step.get("step_id")) == step_id and step.get("freeze"):
+                                step_verdicts = verdicts.get(step_id, set())
+                                if "REAL" in step_verdicts:
+                                    return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
 
-    # Require at least one verified false failure for the org to have moved
+    # Require at least one verified false failure for the org to have moved.
     if not verified_false_failures:
         return refuse("no real failures to verify")
 
