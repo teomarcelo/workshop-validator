@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2840,6 +2841,203 @@ class VerdictHistoryRound3Tests(_NoSubprocessMixin, unittest.TestCase):
             self.save(73, "VETO")
         self.assertEqual(_history_ts(self.team, 73), TS1)
         self.assertEqual(_gate(self.team, 73, self.HEAD), [_veto_problem(73, self.HEAD, TS1)])
+
+
+# Main's legacy rule, ported as a fixed reference (origin/main team_gates, before F18).
+_MAIN_VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
+_MAIN_PASSING = {"APPROVE", "CLEAR"}
+
+
+def _main_is_stale(content, head_oid):
+    first = next((line.strip() for line in content.splitlines() if line.strip()), "")
+    if not first.startswith("HEAD:") or not head_oid:
+        return True
+    review_oid = first.split(":", 1)[1].strip()
+    if review_oid == head_oid:
+        return False
+    return not (len(review_oid) >= 7 and head_oid.startswith(review_oid))
+
+
+def _main_review_verdicts(reviews, pr, head_oid=None):
+    verdicts = {}
+    for path in sorted(reviews.glob(f"pr-{pr}-*.md")):
+        role = path.stem[len(f"pr-{pr}-"):]
+        content = path.read_text(encoding="utf-8")
+        found = _MAIN_VERDICT.findall(content)
+        verdict = found[-1] if found else "MISSING"
+        if verdict in _MAIN_PASSING and (not head_oid or not head_oid.strip() or _main_is_stale(content, head_oid)):
+            verdict = "STALE"
+        verdicts[role] = verdict
+    return verdicts
+
+
+def _main_merge_blockers(checks, verdicts, required):
+    problems = []
+    if not checks:
+        problems.append("no CI checks reported")
+    for check in checks:
+        if check.get("bucket") != "pass" and check.get("bucket") != "skipping":
+            problems.append(f"CI {check.get('name')}: {check.get('bucket') or check.get('state')}")
+    for role in required:
+        if verdicts.get(role) not in _MAIN_PASSING:
+            problems.append(f"review {role}: {verdicts.get(role, 'MISSING')}")
+    for role, verdict in verdicts.items():
+        if verdict not in _MAIN_PASSING and role not in required:
+            problems.append(f"review {role}: {verdict}")
+    return problems
+
+
+# 2026-01-01T00:30:00.250000 UTC, exact in a float, so the seed ts is known.
+LEGACY_MTIME = 1767227400.25
+LEGACY_TS = "2026-01-01T00:30:00.250000+00:00"
+
+
+class VerdictHistoryRound4Tests(_NoSubprocessMixin, unittest.TestCase):
+    """F18-r4: legacy reviews keep their verdicts across the switch to history."""
+
+    HEAD = "4d" * 20
+
+    def setUp(self):
+        super().setUp()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.team = Path(tmp.name) / "team"
+        self.reviews = self.team / "reviews"
+        self.reviews.mkdir(mode=0o700, parents=True)
+
+    def save(self, pr, verdict, head=None, role="code-reviewer", **kwargs):
+        return team_kit.save_review(self.team, pr, role, head or self.HEAD, f"notes\nVERDICT: {verdict}", **kwargs)
+
+    def legacy(self, pr, role, text):
+        """Write a legacy latest copy (HEAD line first, no FORMAT line) with a known mtime."""
+        path = self.reviews / f"pr-{pr}-{role}.md"
+        path.write_text(text)
+        os.utime(path, (LEGACY_MTIME, LEGACY_MTIME))
+        return path
+
+    # -- fixes 2 and 3: legacy parity with main ----------------------------------
+
+    def test_legacy_layout_gives_main_result_case_by_case(self):
+        head, old = self.HEAD, OTHER_HEAD
+        layout = {
+            "code-reviewer": f"HEAD: {head}\nPRODUCER NOTE: synthetic note\nLooks fine.\nVERDICT: APPROVE\n",
+            "security-reviewer": f"HEAD: {head}\nFinding one.\nVERDICT: VETO\nQuoted from an older round:\nVerdict: APPROVE\n",
+            "privacy-reviewer": f"HEAD: {head}\nNo issues.\nverdict: approve\n",
+            "rule-auditor": f"HEAD: {head[:7]}\nShort head.\nVERDICT: APPROVE\n",
+            "safety-scanner": f"HEAD: {head}\nHEAD: {head}\nScan done.\nVERDICT: CLEAR\n",
+            "evidence-auditor": f"HEAD: {old}\nOld round.\nVERDICT: APPROVE\n",
+            "ui-designer": f"HEAD: {old}\nPRODUCER NOTE: synthetic note\nVERDICT: VETO\n",
+            "test-runner": f"HEAD: {head}\nVERDICT: APPROVE\nLater:\nVERDICT: VETO\n",
+            "writer": f"HEAD: {head}\nVERDICT: VETO\nLater:\nVERDICT: APPROVE\n",
+        }
+        for role, text in layout.items():
+            self.legacy(80, role, text)
+        checks = [{"name": "unit", "bucket": "pass"}]
+        for head_oid in (head, None):
+            main_verdicts = _main_review_verdicts(self.reviews, 80, head_oid)
+            got = review_verdicts(self.reviews, 80, head_oid)
+            self.assertEqual(sorted(got), sorted(main_verdicts))
+            for role in layout:
+                with self.subTest(head=head_oid, role=role):
+                    self.assertEqual(got[role], main_verdicts[role])
+            for required in (["code-reviewer", "safety-scanner"], list(layout), []):
+                with self.subTest(head=head_oid, required=required):
+                    self.assertEqual(merge_blockers(checks, got, required, pr=80, head_oid=head_oid),
+                                     _main_merge_blockers(checks, main_verdicts, required))
+        # The reference itself, pinned on the cases that differ under a looser rule.
+        pinned = _main_review_verdicts(self.reviews, 80, head)
+        self.assertEqual((pinned["security-reviewer"], pinned["privacy-reviewer"], pinned["test-runner"],
+                          pinned["rule-auditor"], pinned["evidence-auditor"]),
+                         ("VETO", "MISSING", "VETO", "APPROVE", "STALE"))
+
+    # -- fixes 1 and 4: the legacy seed --------------------------------------------
+
+    def test_legacy_veto_at_current_head_survives_first_save(self):
+        text = f"HEAD: {self.HEAD}\nPRODUCER NOTE: synthetic note\nFinding.\nVERDICT: VETO\n"
+        self.legacy(81, "code-reviewer", text)
+        self.save(81, "APPROVE")
+        self.assertEqual(_gate(self.team, 81, self.HEAD), [_veto_problem(81, self.HEAD, LEGACY_TS)])
+        seed, new = _history_lines(self.team, 81)
+        self.assertEqual((seed["head"], seed["ts"], seed["verdict"], seed["body"], seed["supersedes"]),
+                         (self.HEAD, LEGACY_TS, "VETO", text, None))
+        self.assertEqual(new["verdict"], "APPROVE")
+
+    def test_legacy_veto_cleared_by_real_supersede(self):
+        self.legacy(82, "code-reviewer", f"HEAD: {self.HEAD}\nVERDICT: VETO\n")
+        self.save(82, "APPROVE")
+        self.save(82, "APPROVE", supersedes_ts=LEGACY_TS, supersedes_reason="fixed in the next round")
+        self.assertEqual(_gate(self.team, 82, self.HEAD), [])
+        self.assertEqual(len(_history_lines(self.team, 82)), 3)
+
+    def test_legacy_approve_at_current_head_then_approve_passes(self):
+        self.legacy(83, "code-reviewer", f"HEAD: {self.HEAD}\nVERDICT: APPROVE\n")
+        self.save(83, "APPROVE")
+        self.assertEqual(_gate(self.team, 83, self.HEAD), [])
+        self.assertEqual([r["verdict"] for r in _history_lines(self.team, 83)], ["APPROVE", "APPROVE"])
+
+    def test_legacy_veto_for_old_head_then_approve_at_current_head_passes(self):
+        self.legacy(84, "code-reviewer", f"HEAD: {OTHER_HEAD}\nVERDICT: VETO\n")
+        self.save(84, "APPROVE")
+        self.assertEqual(_gate(self.team, 84, self.HEAD), [])
+        self.assertEqual(_history_lines(self.team, 84)[0]["head"], OTHER_HEAD)
+
+    def test_legacy_seed_uses_main_rule_not_new_save_rule(self):
+        # Main reads VETO here (case-sensitive, last match); a looser rule would read APPROVE.
+        self.legacy(85, "code-reviewer", f"HEAD: {self.HEAD}\nVERDICT: VETO\nVerdict: APPROVE\n")
+        self.save(85, "APPROVE")
+        self.assertEqual(_gate(self.team, 85, self.HEAD), [_veto_problem(85, self.HEAD, LEGACY_TS)])
+
+    def test_legacy_short_head_seed_blocks_nothing_for_current_head(self):
+        text = f"HEAD: {self.HEAD[:7]}\nVERDICT: VETO\n"
+        self.legacy(86, "code-reviewer", text)
+        self.save(86, "APPROVE")
+        self.assertEqual(_gate(self.team, 86, self.HEAD), [])
+        seed = _history_lines(self.team, 86)[0]
+        self.assertEqual((seed["head"], seed["legacy_head"], seed["verdict"], seed["body"]),
+                         (None, self.HEAD[:7], "VETO", text))
+
+    def test_no_seed_after_format_2_copy(self):
+        self.save(87, "VETO")
+        self.save(87, "APPROVE")
+        self.assertEqual([r["verdict"] for r in _history_lines(self.team, 87)], ["VETO", "APPROVE"])
+
+    # -- fix 5: the ts order rule ---------------------------------------------------
+
+    def test_supersede_with_equal_or_earlier_ts_blocks(self):
+        _write_latest(self.team, 88, self.HEAD, "APPROVE")
+        for name, sup_ts in (("equal", TS2), ("earlier", TS1)):
+            with self.subTest(case=name):
+                _write_history(self.team, 88, [_record(self.HEAD, TS2, "VETO"),
+                                               _record(self.HEAD, sup_ts, "APPROVE", supersedes=TS2, reason="fixed")])
+                self.assertEqual(_gate(self.team, 88, self.HEAD), [_veto_problem(88, self.HEAD, TS2)])
+        # Control: a strictly later supersede clears it.
+        _write_history(self.team, 88, [_record(self.HEAD, TS2, "VETO"),
+                                       _record(self.HEAD, TS3, "APPROVE", supersedes=TS2, reason="fixed")])
+        self.assertEqual(_gate(self.team, 88, self.HEAD), [])
+
+    # -- fix 6: a torn tail -----------------------------------------------------------
+
+    def test_torn_history_tail_refused_without_writing(self):
+        self.save(89, "VETO")
+        history = _history_path(self.team, 89)
+        latest = self.reviews / "pr-89-code-reviewer.md"
+        with history.open("a") as handle:
+            handle.write('{"head": "partial')
+        before = (history.read_bytes(), latest.read_bytes())
+        with self.assertRaises(ValueError) as cm:
+            self.save(89, "APPROVE")
+        self.assertIn("pr-89-code-reviewer.history.md does not end with a newline", str(cm.exception))
+        self.assertEqual((history.read_bytes(), latest.read_bytes()), before)
+
+    # -- fix 7: role names ---------------------------------------------------------------
+
+    def test_role_with_trailing_newline_refused(self):
+        for role in ("security-reviewer\n", "security-reviewer\n\n"):
+            with self.subTest(role=role):
+                with self.assertRaises(ValueError) as cm:
+                    self.save(90, "APPROVE", role=role)
+                self.assertIn("role must be", str(cm.exception))
+        self.assertEqual(list(self.reviews.iterdir()), [])
 
 
 if __name__ == "__main__":
