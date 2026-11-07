@@ -94,7 +94,7 @@ class FilesContentAreaAdversarialTests(unittest.TestCase):
                 # URL changed, title might say "Files | Salesforce", but no content heading
 
         page.on_goto = opened
-        page._title = "Files | Salesforce"
+        page.title = "Files | Salesforce"
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
         self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
         self.assertEqual(outcome.evidence.get("f1", ()), ())
