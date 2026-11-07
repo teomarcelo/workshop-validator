@@ -143,12 +143,12 @@ class StopBehaviorKeptTests(unittest.TestCase):
         self.assertWalkStopped({"a2": _frozen("AUTH_BLOCKED")})
 
     def test_mandatory_own_value_needs_review_stops(self):
-        from workshop_validator.guide_walk import MANDATORY_OWN_VALUE_PREFIX
+        """Mandatory own-value NEEDS_REVIEW with stop_walk=True stops the walk."""
         self.assertWalkStopped({
             "a2": lambda state, step: CheckResult(
                 "NEEDS_REVIEW",
-                MANDATORY_OWN_VALUE_PREFIX + "Sample Field is empty. The guide asks for the learner's own value.",
-                (), freeze=True
+                "Sample Field is empty. The guide asks for the learner's own value.",
+                (), freeze=True, stop_walk=True
             )
         })
 

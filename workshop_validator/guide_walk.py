@@ -64,6 +64,8 @@ class CheckResult:
     # W-105: the outcome was read from the page, reached differently than the guide says.
     # Shown on PASS rows only, as "Guide differs: <guide_note>".
     guide_note: str = ""
+    # W-137: structured stop_walk flag for mandatory own-value fields, so pop-up notes cannot hide it.
+    stop_walk: bool = False
 
 
 @dataclass(frozen=True)
@@ -152,6 +154,8 @@ class WalkOutcome:
     snapshots: dict[str, str] = field(default_factory=dict)
     # PASS steps whose outcome was reached differently than the guide says (W-105).
     guide_notes: dict[str, str] = field(default_factory=dict)
+    # W-137: which steps were frozen (for filtering summary failures).
+    freezes: dict[str, bool] = field(default_factory=dict)
 
 
 def norm(value: str | None) -> str:
@@ -2900,7 +2904,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
         # Find the first visible AND editable match
@@ -2915,7 +2919,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
         nth = getattr(field, "nth", None)
@@ -2958,7 +2962,7 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
                    f"{'so the walk stopped' if mandatory else 'so it was left unchanged'}. "
                    f"The field was not read ({reason}).")
             if mandatory:
-                return CheckResult("UI_MISMATCH", note, (), freeze=True)
+                return CheckResult("UI_MISMATCH", note, (), freeze=True, stop_walk=True)
             return CheckResult("NOT_RUN", note, ())
 
     if _input(target).strip():
@@ -2966,8 +2970,8 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
     # Empty field: check if mandatory
     step_text = step.text or ""
     if _is_field_mandatory(step_text, label):
-        note = MANDATORY_OWN_VALUE_PREFIX + OWN_VALUE_EMPTY.format(label=label)
-        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+        note = OWN_VALUE_EMPTY.format(label=label)
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True, stop_walk=True)
     return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
@@ -7560,15 +7564,14 @@ def _session_blocked(state: WalkState, step: GuideStep) -> bool:
 
 
 def _should_stop_walk(result: CheckResult) -> bool:
-    """Check if a frozen NEEDS_REVIEW should stop the whole walk (W-135 exceptions).
+    """Check if a result should stop the whole walk (W-135/W-137 exceptions).
 
-    Returns True if the walk should stop completely (mandatory own-value, ENV_BLOCKED,
-    AUTH_BLOCKED). Returns False if only the task should be blocked (W-117 path).
+    Returns True if the walk should stop completely (mandatory own-value field via stop_walk flag,
+    ENV_BLOCKED, AUTH_BLOCKED). Returns False if only the task should be blocked (W-117 path).
     """
-    if result.status == "NEEDS_REVIEW" and result.note:
-        # Mandatory own-value NEEDS_REVIEW stops the walk
-        if result.note.startswith(MANDATORY_OWN_VALUE_PREFIX):
-            return True
+    # Mandatory own-value field stops the walk (W-137 structured flag)
+    if result.stop_walk:
+        return True
     # ENV_BLOCKED and AUTH_BLOCKED always stop
     if result.status in ("ENV_BLOCKED", "AUTH_BLOCKED"):
         return True
@@ -7717,6 +7720,7 @@ def walk_guide(
     timestamps: dict[str, tuple[float, float]] = {}
     snapshots: dict[str, str] = {}
     guide_notes: dict[str, str] = {}
+    freezes: dict[str, bool] = {}
     executed: list[str] = []
     total = len(steps)
     if progress is not None:
@@ -7822,8 +7826,15 @@ def walk_guide(
                 and AFTER_FAILURE_FLAG not in result.suspect:
             # W-117: a later task of an exercise that already failed may depend on it.
             result = replace(result, suspect=(*result.suspect, AFTER_FAILURE_FLAG))
+        # W-137: only frozen NEEDS_REVIEW feeds the suspect flag; other TASK_BLOCKING as before.
         if result.status in _TASK_BLOCKING:
-            failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
+            if result.status == "NEEDS_REVIEW":
+                # Only frozen NEEDS_REVIEW feeds failed_in
+                if result.freeze:
+                    failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
+            else:
+                # UI_MISMATCH and FUNCTIONAL_FAIL feed failed_in as before
+                failed_in.setdefault(getattr(step, "exercise", None), set()).add(_task_key(step, task_positions))
         if skipped is None:
             _forget_closed_dialogs(state)
         t_end = _clock()
@@ -7850,6 +7861,8 @@ def walk_guide(
             suspects[step.step_id] = result.suspect
         if result.status == "PASS" and result.guide_note:
             guide_notes[step.step_id] = result.guide_note
+        if result.freeze:
+            freezes[step.step_id] = True
         if video_origin is not None:
             timestamps[step.step_id] = (t_start - video_origin, t_end - video_origin)
         executed.append(step.step_id)
@@ -7866,5 +7879,5 @@ def walk_guide(
             else:
                 blocked = "The org session was blocked, so the following steps were not run."
     return WalkOutcome(
-        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes,
+        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes,
     )

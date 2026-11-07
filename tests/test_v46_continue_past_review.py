@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 from workshop_validator.automate import FAILED, _summary, gate_outcome_of, load_gate, save_gate
 from workshop_validator.guide_inventory import GuideInventory, GuideStep
-from workshop_validator.guide_walk import CheckResult, GuideCheck, MANDATORY_OWN_VALUE_PREFIX, walk_guide
+from workshop_validator.guide_walk import CheckResult, GuideCheck, walk_guide
 from workshop_validator.report import ReportStep
 
 from tests.test_guide_walk import Clock, Page
@@ -89,13 +89,13 @@ class FrozenNeedsReviewTests(unittest.TestCase):
         self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("a1", ()))
 
     def test_mandatory_own_value_needs_review_stops_everything(self):
-        """Mandatory own-value NEEDS_REVIEW still stops the walk."""
+        """Mandatory own-value NEEDS_REVIEW with stop_walk=True still stops the walk."""
         outcome, calls = _walk(Page(HOME), TWO_TASKS, {
             "a2": lambda state, step: CheckResult(
                 "NEEDS_REVIEW",
-                MANDATORY_OWN_VALUE_PREFIX + "Sample Field is empty. The guide asks for the learner's own value, "
+                "Sample Field is empty. The guide asks for the learner's own value, "
                 "and the validator does not invent one.",
-                (), freeze=True
+                (), freeze=True, stop_walk=True
             )
         })
         self.assertEqual(outcome.statuses["a2"], "NEEDS_REVIEW")
@@ -134,6 +134,26 @@ class FrozenNeedsReviewTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["a3"], "PASS")
         self.assertNotIn("blocked by", outcome.notes.get("a3", ""))
 
+    def test_unfrozen_needs_review_not_in_failures_and_no_suspect(self):
+        """Unfrozen NEEDS_REVIEW is not listed in failures and doesn't add suspect flag."""
+        outcome, calls = _walk(Page(HOME), TWO_TASKS, {
+            "a2": lambda state, step: CheckResult("NEEDS_REVIEW", "Sample pick not shown.", ())
+        })
+        steps = tuple(
+            ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
+            for item in TWO_TASKS
+        )
+        result = SimpleNamespace(signed_in=True, report_steps=steps)
+        summary = _summary(result, 0, 3, FAILED, "", Path("r"))
+        # Unfrozen NEEDS_REVIEW should NOT be in failures
+        self.assertEqual(summary["failures"], [])
+        # Later passes should NOT have the suspect flag
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("a3", ()))
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b1", ()))
+        self.assertNotIn(AFTER_FAILURE_FLAG, outcome.suspects.get("b2", ()))
+
     def test_frozen_needs_review_then_real_failure_lists_both(self):
         """Both failures are listed; the gate judges the real failure."""
         outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
@@ -142,7 +162,8 @@ class FrozenNeedsReviewTests(unittest.TestCase):
         })
         steps = tuple(
             ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
-                       note=outcome.notes.get(item.step_id, ""))
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
             for item in TWO_TASKS
         )
         result = SimpleNamespace(signed_in=True, report_steps=steps)
@@ -171,13 +192,14 @@ class FrozenNeedsReviewTests(unittest.TestCase):
 
 class SummaryAndGateTests(unittest.TestCase):
     def test_summary_lists_needs_review_failure_and_counts_blocked_steps(self):
-        """summary.json lists NEEDS_REVIEW as a failure and counts blocked steps."""
+        """summary.json lists frozen NEEDS_REVIEW as a failure and counts blocked steps."""
         outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
             "a2": _frozen("NEEDS_REVIEW", "Sample review note.")
         })
         steps = tuple(
             ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
-                       note=outcome.notes.get(item.step_id, ""))
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
             for item in TWO_TASKS
         )
         result = SimpleNamespace(signed_in=True, report_steps=steps)
@@ -189,7 +211,7 @@ class SummaryAndGateTests(unittest.TestCase):
         self.assertEqual(summary["blocked_steps"], 1)  # a3 is blocked
 
     def test_needs_review_before_real_failure_gate_judges_real_failure(self):
-        """When NEEDS_REVIEW comes before a real failure, the gate judges the real failure."""
+        """When frozen NEEDS_REVIEW comes before a real failure, the gate judges the real failure."""
         # This is the W-121 rule: the gate judges the first real failure
         outcome, _calls = _walk(Page(HOME), TWO_TASKS, {
             "a2": _frozen("NEEDS_REVIEW", "Sample review."),
@@ -197,7 +219,8 @@ class SummaryAndGateTests(unittest.TestCase):
         })
         steps = tuple(
             ReportStep(item.step_id, 1, item.text, outcome.statuses[item.step_id],
-                       note=outcome.notes.get(item.step_id, ""))
+                       note=outcome.notes.get(item.step_id, ""),
+                       freeze=outcome.freezes.get(item.step_id, False))
             for item in TWO_TASKS
         )
         result = SimpleNamespace(signed_in=True, report_steps=steps)
@@ -223,7 +246,7 @@ class SummaryAndGateTests(unittest.TestCase):
                 code = automate_main(
                     ["--reset-gate", "--keep-org", str(run_dir), "--private-root", str(root)]
                 )
-            # Should refuse because a2 (NEEDS_REVIEW) is not verified
+            # Should refuse because a2 (frozen NEEDS_REVIEW) is not verified
             self.assertEqual(code, 2)
             self.assertIn("failure step a2 is not verified", out.getvalue())
 
