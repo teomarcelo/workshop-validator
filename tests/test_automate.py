@@ -632,6 +632,9 @@ class RunLockTests(unittest.TestCase):
 
     def test_lock_released_after_exception(self):
         """The lock is released after an exception inside run_next."""
+        import fcntl
+        import subprocess
+        import sys
         from workshop_validator.automate import run_lock
 
         with tempfile.TemporaryDirectory() as folder:
@@ -643,9 +646,25 @@ class RunLockTests(unittest.TestCase):
             except ValueError:
                 pass
 
-            # Lock should be released; we can take it again
-            with run_lock(root):
-                pass  # success
+            # Lock should be released; another process can take it
+            lock_path = root / "automate.lock"
+            code = f"""
+import fcntl
+import os
+from pathlib import Path
+
+lock_path = Path({repr(str(lock_path))})
+fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+try:
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    print("success")
+finally:
+    fcntl.flock(fd, fcntl.LOCK_UN)
+    os.close(fd)
+"""
+            result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=5)
+            self.assertEqual(result.returncode, 0)
+            self.assertIn("success", result.stdout)
 
     def test_stale_lock_file_does_not_block(self):
         """A stale lock file with a dead pid does not block if flock is not held."""
