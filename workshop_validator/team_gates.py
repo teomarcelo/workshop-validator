@@ -29,7 +29,10 @@ EM_DASH = "\u2014"
 TEXT_SUFFIXES = (".md", ".mdc")
 ROW_PATTERN = re.compile(r"^\|\s*(" + team_kit.DECISION_ID_RE + r")\s*\|")
 CLOCK24 = re.compile(r"\b([01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?\b(?!\s*(?:AM|PM|am|pm))")
+# New saves and format 2 latest copies: any case, and exactly one verdict-like line.
 VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE | re.IGNORECASE)
+# Legacy copies (no FORMAT line, no history): main's rule, case-sensitive, last match wins.
+LEGACY_VERDICT = re.compile(r"^VERDICT:\s*(APPROVE|CLEAR|VETO|BLOCK|REQUEST_CHANGES)\b", re.MULTILINE)
 PASSING = {"APPROVE", "CLEAR"}
 ALWAYS_REVIEWERS = ("code-reviewer", "safety-scanner")
 RULE_PATHS = ("workshop_validator/", ".claude/", ".cursor/", "CLAUDE.md")
@@ -152,13 +155,26 @@ VERDICT_LIKE_LINE = re.compile(r"^\W*VERDICT\s*:", re.MULTILINE | re.IGNORECASE)
 SUPERSEDE_HINT = re.compile(r"([A-Z_]{1,40}) at (\S+)")
 
 
+def is_format_2(content: str) -> bool:
+    """True when one of the first five lines of a latest copy is exactly FORMAT: 2."""
+    return "FORMAT: 2" in [line.strip() for line in content.splitlines()[:5]]
+
+
+def legacy_verdict(content: str) -> str:
+    """Main's legacy rule: the last case-sensitive VERDICT line, else MISSING."""
+    found = LEGACY_VERDICT.findall(content)
+    return found[-1] if found else "MISSING"
+
+
 def _read_review_history(history_path: Path) -> list[dict]:
     """Read every JSON Lines history record, in file (append) order, for all heads.
 
     Fails closed: raises ValueError (or OSError) for a symlink, a non-regular file,
     invalid UTF-8, no records at all, a line that is not a JSON object, or a record
     without a 40-hex `head`, a microsecond UTC `ts` and a `verdict` word, or with a
-    `supersedes` or `reason` that is neither null nor a string.
+    `supersedes` or `reason` that is neither null nor a string. A legacy seed whose old
+    copy had no 40-hex head has a null `head` and a string `legacy_head`; it never
+    matches a current head.
     """
     fd = os.open(history_path, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
     with os.fdopen(fd, "rb") as handle:
@@ -181,7 +197,8 @@ def _read_review_history(history_path: Path) -> list[dict]:
             raise ValueError(f"history line {line_no} is not a JSON object")
         head, ts, verdict = record.get("head"), record.get("ts"), record.get("verdict")
         supersedes, reason = record.get("supersedes"), record.get("reason")
-        if not (isinstance(head, str) and OID_PATTERN.fullmatch(head)):
+        legacy_seed = head is None and isinstance(record.get("legacy_head"), str)
+        if not (legacy_seed or (isinstance(head, str) and OID_PATTERN.fullmatch(head))):
             raise ValueError(f"history line {line_no} has no valid head")
         if not (isinstance(ts, str) and HISTORY_TS.fullmatch(ts)):
             raise ValueError(f"history line {line_no} has no valid ts")
@@ -207,9 +224,6 @@ def _check_blocking_verdicts(records: list[dict]) -> str | None:
     exact ts and whose reason is non-empty. One supersede clears one record;
     two records with the same ts need two supersedes.
     """
-    # Build a list of (position, timestamp) for each record for supersede matching
-    record_positions = [(i, rec["ts"]) for i, rec in enumerate(records)]
-
     # Track which specific record positions have been superseded (one supersede clears one record)
     superseded_positions = set()
     for i, record in enumerate(records):
@@ -217,8 +231,8 @@ def _check_blocking_verdicts(records: list[dict]) -> str | None:
         sup_reason = record.get("reason")
         if sup_ts and sup_reason and sup_reason.strip():
             # Find the earliest not-yet-superseded record with matching timestamp and earlier position
-            for j, rec_ts in record_positions:
-                if j < i and rec_ts == sup_ts and j not in superseded_positions:
+            for j, earlier in enumerate(records[:i]):
+                if earlier["ts"] == sup_ts and j not in superseded_positions:
                     # Check strictly later timestamp
                     if record["ts"] > sup_ts:
                         superseded_positions.add(j)
@@ -234,12 +248,14 @@ def _check_blocking_verdicts(records: list[dict]) -> str | None:
     return None
 
 
-def _history_verdict(content: str, history_path: Path, head_oid: str) -> str:
+def _history_verdict(content: str | None, history_path: Path, head_oid: str) -> str | None:
     """Verdict for a role with a format 2 latest copy or any history file.
 
     The verdict comes only from history records for the current head, never from
     the latest copy's body. The latest copy must still be for this exact head and
     hold exactly one VERDICT line equal to the newest current-head record's verdict.
+    With content None (latest copy missing) only a read error or a block is returned,
+    else None.
     """
     if not os.path.lexists(history_path):
         return "BLOCKED: FORMAT: 2 requires history file"
@@ -249,7 +265,7 @@ def _history_verdict(content: str, history_path: Path, head_oid: str) -> str:
         return f"BLOCKED: {e}"
     current = [record for record in records if record["head"] == head_oid]
     blocking = _check_blocking_verdicts(current)
-    if blocking:
+    if blocking or content is None:
         return blocking
     if not current:
         return "BLOCKED: history has no record for the current head"
@@ -291,12 +307,10 @@ def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict
         except OSError as e:
             verdicts[role] = f"BLOCKED: cannot read latest copy: {e.strerror or type(e).__name__}"
             continue
-        is_format_2 = "FORMAT: 2" in [line.strip() for line in content.splitlines()[:5]]
-        if has_head and (is_format_2 or os.path.lexists(history_path)):
+        if has_head and (is_format_2(content) or os.path.lexists(history_path)):
             verdicts[role] = _history_verdict(content, history_path, head_oid)
             continue
-        found = VERDICT.findall(content)
-        verdict = found[-1] if found else "MISSING"
+        verdict = legacy_verdict(content)
         # Fail closed: empty/missing head_oid or stale review marks PASSING verdicts as STALE
         if verdict in PASSING and (not has_head or is_review_stale(content, head_oid)):
             verdict = "STALE"
@@ -309,12 +323,7 @@ def review_verdicts(reviews: Path, pr: int, head_oid: str | None = None) -> dict
             if role in seen_roles:
                 continue
             seen_roles.add(role)
-            try:
-                records = _read_review_history(history_path)
-            except (ValueError, OSError) as e:
-                verdicts[role] = f"BLOCKED: {e}"
-                continue
-            blocking = _check_blocking_verdicts([r for r in records if r["head"] == head_oid])
+            blocking = _history_verdict(None, history_path, head_oid)
             if blocking:
                 verdicts[role] = blocking
 

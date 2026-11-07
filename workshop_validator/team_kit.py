@@ -433,8 +433,6 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
 
 ROLE_NAME = re.compile(r"^[a-z][a-z0-9-]{0,40}$")
 HEAD_OID = re.compile(r"[0-9a-f]{40}")  # Full 40-hex only; always used with fullmatch
-# Any line that looks like a verdict, even quoted or decorated ("> VERDICT:", "**verdict:").
-VERDICT_LIKE_LINE = re.compile(r"^\W*VERDICT\s*:", re.MULTILINE | re.IGNORECASE)
 
 
 def reviews_dir(team: Path) -> Path:
@@ -469,6 +467,40 @@ def _open_checked(path: Path, flags: int, what: str) -> int:
     return fd
 
 
+def _read_all(fd: int) -> bytes:
+    chunks = []
+    while chunk := os.read(fd, 65536):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        view = view[os.write(fd, view):]
+
+
+def _legacy_seed(text: str, role: str, mtime: float) -> dict:
+    """History record for a legacy latest copy: its head, main's verdict rule, mtime ts, text.
+
+    Only a 40-hex head becomes `head`; any other head is kept as `legacy_head` with a null
+    `head`, so it never matches (or blocks) a current head.
+    """
+    from . import team_gates
+    first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+    old_head = first.split(":", 1)[1].strip() if first.startswith("HEAD:") else ""
+    return {
+        "head": old_head.lower() if HEAD_OID.fullmatch(old_head.lower()) else None,
+        "legacy_head": old_head,
+        "ts": datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="microseconds"),
+        "role": role,
+        "verdict": team_gates.legacy_verdict(text),
+        "supersedes": None,
+        "reason": None,
+        "body": text,
+    }
+
+
 def save_review(team: Path, pr: int, role: str, head: str, reply: str,
                 supersedes_ts: str | None = None, supersedes_reason: str | None = None) -> Path:
     """Write reviews/pr-<pr>-<role>.md with FORMAT: 2 and HEAD: <head> (0600).
@@ -483,7 +515,7 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
     """
     if pr <= 0:
         raise ValueError("pr must be a positive number")
-    if not ROLE_NAME.match(role or ""):
+    if not ROLE_NAME.fullmatch(role or ""):
         raise ValueError("role must be lower-case letters, digits and dashes")
     full_head = _full_head(head)
     body = (reply or "").strip()
@@ -496,7 +528,7 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
         raise ValueError("reviewer reply must contain a VERDICT line (APPROVE|VETO|CLEAR|BLOCK|REQUEST_CHANGES)")
     # One verdict rule: a reply with more than one verdict-like line is refused, so a quoted
     # "VERDICT: APPROVE" inside a VETO can never be read as the verdict by anyone.
-    if len(VERDICT_LIKE_LINE.findall(body)) != 1:
+    if len(team_gates.VERDICT_LIKE_LINE.findall(body)) != 1:
         raise ValueError("reviewer reply must contain exactly one VERDICT line; "
                          "remove quoted or repeated VERDICT lines")
     verdict = verdict_match.group(1).upper()
@@ -527,21 +559,36 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
 
     # Check both files before writing either. The latest copy is opened without O_TRUNC,
     # so a hard-linked or odd file is refused before a single byte of it changes.
-    history_fd = _open_checked(history_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, "history path")
+    history_fd = _open_checked(history_path, os.O_RDWR | os.O_CREAT | os.O_APPEND, "history path")
     try:
-        fd = _open_checked(path, os.O_WRONLY | os.O_CREAT, "latest copy path")
+        fd = _open_checked(path, os.O_RDWR | os.O_CREAT, "latest copy path")
     except BaseException:
         os.close(history_fd)
         raise
     try:
-        with os.fdopen(history_fd, "a", encoding="utf-8") as handle:
-            handle.write(json_line)
-    except BaseException:
+        history_size = os.fstat(history_fd).st_size
+        # Never append onto a partial line: a torn tail would swallow the new record.
+        if history_size and os.pread(history_fd, 1, history_size - 1) != b"\n":
+            raise ValueError(f"{history_path.name} does not end with a newline (torn tail); "
+                             "refusing to append onto a partial line")
+        old = _read_all(fd)
+        try:
+            old_text = old.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(f"{path.name} is not valid UTF-8; refusing to overwrite it")
+        lines = ""
+        if not history_size and old_text.strip() and not team_gates.is_format_2(old_text):
+            # A legacy copy and no history yet: keep its verdict as the first record, so a
+            # legacy VETO still needs a real --supersedes after the switch.
+            lines = json.dumps(_legacy_seed(old_text, role, os.fstat(fd).st_mtime),
+                               ensure_ascii=False) + "\n"
+        _write_all(history_fd, (lines + json_line).encode("utf-8"))
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        _write_all(fd, latest_content.encode("utf-8"))
+    finally:
         os.close(fd)
-        raise
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        os.ftruncate(handle.fileno(), 0)
-        handle.write(latest_content)
+        os.close(history_fd)
     return path
 
 
@@ -687,13 +734,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ledger row added: {row['role']} / {row['task']}")
         return 0
     if args.cmd == "review":
-        # Validate --supersedes and --reason together
-        if (args.supersedes is None) != (args.reason is None):
-            print("review: REFUSED --supersedes and --reason must both be provided or both omitted", file=sys.stderr)
-            return 2
-        if args.supersedes and not (args.reason or "").strip():
-            print("review: REFUSED --reason must not be empty when --supersedes is given", file=sys.stderr)
-            return 2
         try:
             path = save_review(team, args.pr, args.role, args.head, sys.stdin.read(),
                              supersedes_ts=args.supersedes, supersedes_reason=args.reason)
