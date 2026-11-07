@@ -1156,8 +1156,8 @@ def prove_tests(repo: Path, base_ref: str, head_oid: str, runner=None) -> bool:
 
 # ---- safety-scan -----------------------------------------------------------
 
-# Patterns for safety checks
-ORG_HOSTNAME = re.compile(r"\b(?!example\.)[a-z0-9-]+\.(my\.salesforce\.com|lightning\.force\.com)\b")
+# Patterns for safety checks  # public-safety: pattern
+ORG_HOSTNAME = re.compile(r"\b(?!example\.)[a-z0-9-]+\.(my\.salesforce\.com|lightning\.force\.com)\b")  # public-safety: pattern
 EMAIL_RESERVED = ("example.com", "example.org", "example.net", "localhost", "users.noreply.github.com")
 USER_HOME = re.compile(r"/(?:Users|home)/[^/\s]+/")
 RUN_OUTPUT_PATH = re.compile(r"/runs/[^/]+/[0-9TZ-]+/")
