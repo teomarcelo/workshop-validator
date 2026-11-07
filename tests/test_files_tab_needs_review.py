@@ -3,6 +3,8 @@ import unittest
 
 from tests.test_click_polling import PollClock, clicks, walk
 from tests.test_guide_walk import Page, step
+from workshop_validator.guide_inventory import GuideInventory
+from workshop_validator.guide_walk import walk_guide
 
 SETUP = "https://example.lightning.force.com/lightning/setup/SomePage/home"
 FILES_HOME = "https://example.lightning.force.com/lightning/o/ContentDocument/home"
@@ -90,6 +92,44 @@ class FilesTabNeedsReviewTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
         self.assertIn("Opened the Files home", outcome.notes["f1"])
         self.assertEqual(outcome.evidence.get("f1", ()), ())
+
+    def test_frozen_files_blocks_task_but_walk_continues(self):
+        """Files tab freeze=True blocks its task but the walk continues to other tasks (W-135)."""
+        page = setup_page_with_files()
+        page.roles.add(("button", "Save"))
+
+        def opened(url):
+            if url == FILES_HOME:
+                page.url = FILES_HOME
+                page.page_title = "Files | Salesforce"
+
+        def on_click(kind, name):
+            if name == "Save":
+                page.body = "Your settings have been successfully saved."
+
+        page.on_goto = opened
+        page.on_click = on_click
+
+        steps = (
+            step("f1", "Exercise 5: Files", "Task 1: Open files.", "1", "Click the Files tab."),
+            step("f2", "Exercise 5: Files", "Task 1: Open files.", "2", "Click Save."),
+            step("t2s1", "Exercise 6: Other", "Task 2: Do something.", "1", "Click Save."),
+        )
+
+        from tests.test_guide_walk import Clock
+        clock = Clock()
+        outcome = walk_guide(
+            page, GuideInventory(1, steps, (), ()),
+            checks=(), timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=10,
+        )
+
+        self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
+        self.assertIn("Opened the Files home", outcome.notes["f1"])
+        self.assertEqual(outcome.statuses["f2"], "NOT_RUN")
+        self.assertIn("blocked by f1", outcome.notes["f2"])
+        self.assertEqual(outcome.statuses["t2s1"], "PASS")
+        self.assertEqual(outcome.freezes.get("f1"), True)
 
     def test_other_nav_click_still_passes(self):
         """A non-Files nav item turning current still passes."""

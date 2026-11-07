@@ -115,7 +115,7 @@ class NavItemCurrentTests(unittest.TestCase):
 
 
 class FilesHomeNavTests(unittest.TestCase):
-    def test_current_nav_item_files_after_opening_the_files_home_passes(self):
+    def test_current_nav_item_files_after_opening_the_files_home_needs_review(self):
         page = files_page("Files")
         outcome = walk(page, files_step(), PollClock(), page_wait_s=10)
         self.assertEqual(outcome.statuses["f1"], "NEEDS_REVIEW")
