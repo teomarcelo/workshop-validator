@@ -34,6 +34,7 @@ The step rules are shared with Cursor; read them, they are binding:
   steps are never PASS. A still-loading page is not a failure (poll ~2 s, up to ~90 s).
 - Behavioral checks: before-state, literal action, after-state, downstream.
   A step is called redundant only with that proof; cosmetics stay separate.
+- If proving a PASS for a step needs more than one review round, stop. The step stays NEEDS_REVIEW, step-verifier judges it, and the walk moves on. Never weaken PASS evidence to make progress.
 
 ## Team only
 - Guide runs, triage and validator fixes happen only through `/validate-guide`
@@ -69,6 +70,7 @@ The step rules are shared with Cursor; read them, they are binding:
 - Models: producer Opus; executors Sonnet, effort high; reviewers Sonnet, or
   Opus for security, privacy, compliance and shared code. Fresh agent per
   task; none resumed past about 300k tokens.
+- Tooling freeze: no new team or process tooling PRs unless the tooling blocks a guide run. Escapes are logged with `lessons --record team` and a register row, and wait on a list.
 
 ### Ownership map (one owner per folder; shared ones change only by reviewed PR)
 | Path | Owner |

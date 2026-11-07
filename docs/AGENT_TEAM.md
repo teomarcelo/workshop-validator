@@ -111,10 +111,8 @@ Gates: `docs/MERGE-GATES.md`.
 2. Start a fresh executor (Sonnet, effort high) in its own worktree, or the
    `feature` workflow (`.claude/workflows/feature.js`: build, test, review, fix, re-review).
 3. Push, open a PR with the executor's report in the body.
-4. Fresh reviewers reply with a `VERDICT:` line. The producer saves each reply with
-   `team_kit review --pr <N> --role <role> --head <headRefOid>`, which writes
-   `reviews/pr-<N>-<role>.md` with `HEAD: <sha>` first. Only saved reviews count.
-5. Findings go to a new agent. Two failed rounds escalate to Opus.
+4. Fresh reviewers reply with a `VERDICT:` line. Reviewers tag every finding Critical, High, Medium or Low. VETO only for Critical or High: a false PASS, a broken rule, a leak, a security hole, or a regression that is reproduced. Medium and Low findings never veto; the producer copies them into one follow-up list in the register. At most 2 review rounds per PR. After round 2, the producer either merges with a follow-up row for what is left, or parks the PR. Reviewer sets: walk or check code gets code-reviewer and rule-auditor; gate, hook, CI, watchdog and agent-file code add security-reviewer; private_runner, report and output paths add privacy-reviewer. The safety check is the P2 script, run by the gate, not an agent. The producer saves each reply with `team_kit review --pr <N> --role <role> --head <headRefOid>`, which writes `reviews/pr-<N>-<role>.md` with `HEAD: <sha>` first. Only saved reviews count.
+5. Critical and High findings go to a new agent. At most 2 review rounds per PR.
 6. `team_gates merge-when-green <N>`: CI, verdicts, merged-tree gates,
    squash merge, main CI, same-turn revert PR when red.
 7. Register row, ledger row, standup, plan step done, dashboard, worktree cleanup.

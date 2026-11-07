@@ -15,10 +15,13 @@ Hard rules (CLAUDE.md):
 - Never type a parenthesised description as a value; never change password or security answer.
 - Never weaken, delete or skip an existing assertion to make tests pass. If an existing test encodes unsafe behavior, say so explicitly in your reply.
 - Never put real guide text, org hostnames or emails in code or tests.
+- If proving a PASS for a step needs more than one review round, stop. The step stays NEEDS_REVIEW, step-verifier judges it, and the walk moves on. Never weaken PASS evidence to make progress.
 
 Run `.venv/bin/python -m unittest discover -s tests` and `.venv/bin/python -m compileall -q workshop_validator tests`. The unit test must fail without your change (regression test), so the same bug cannot return unnoticed.
 
-Reply with: files changed, the behavior change in one sentence, test results. Under 150 words.
+Your report must paste the output of `.venv/bin/python -m workshop_validator.team_gates prove --base origin/main --tests <files> --mutants <file>` (P2 builds it). Claims without that output are not accepted.
+
+Reply with: files changed, the behavior change in one sentence, test results, and the prove command output. Under 150 words.
 
 ## Team rules (shared by every role)
 - Read order: CLAUDE.md, your brief (the only instructions you get), then the files it names. Never read the register whole; grep it by W- id.

@@ -41,9 +41,8 @@ final report when the run ends. Each report names the org instance and links
 to this guide's latest report on every other instance.
 
 ## Budgets
-- At most 3 fix iterations per invocation.
-- Stop on the same first failure twice in a row, on AUTH_BLOCKED, or when
-  `automate` exits 2 (refused / all orgs used).
+- At most 3 runs per invocation.
+- Stop when a run shows no change from the last one (same counts and the same failure set), on AUTH_BLOCKED, or when `automate` exits 2 (refused / all orgs used).
 - Never retry around HTTP 429 (Option A). Never use more than one new org per iteration.
 
 ## Loop
@@ -64,9 +63,7 @@ to this guide's latest report on every other instance.
    - `REAL` → Triage as normal.
    - `UNCLEAR` → mark as NEEDS_REVIEW, never PASS.
    - `CONFIRMED_PASS` → no action.
-4. **Triage.** `team_state advance --phase triage`. failure-triager on the run dir (or
-   the step-verifier verdict). If it suspects a rename, ask salesforce-doc-validator
-   (Sonnet unless ambiguous) to confirm with current docs.
+4. **Triage.** `team_state advance --phase triage`. After a run, step-verifier judges every non-PASS and suspect row first. Then failure-triager writes one brief per distinct root cause, not only for the first failure. If a rename is suspected, ask salesforce-doc-validator (Sonnet unless ambiguous) to confirm with current docs. The producer starts one executor per brief in parallel worktrees, up to 4 at a time, and merges them all before the next run.
 5. **Decide by cause.**
    - `environment`: no code change; `team_state finish --outcome <outcome>`; record and finish as INCOMPLETE.
    - `guide-mismatch` confirmed by docs: propose an alias entry (guide, screen,
@@ -93,6 +90,7 @@ to this guide's latest report on every other instance.
    must be CLEAR, then git-publisher with the changed paths, the test result, the
    auditor verdict and the outcome counts. `team_state log --agent git-publisher --action pr-created --link <url>`, re-render.
 11. `team_state finish --outcome <outcome>`.
+12. After a walk-fix merge, the next step is a `/validate-guide` run in a fresh session, with `git pull --ff-only` first and a check that the session started after the last change to `.claude/agents/`.
 
 ## Final reply to the user
 Outcome (VERIFIED / FAILED / INCOMPLETE), mode (quick/full), verified step count,
