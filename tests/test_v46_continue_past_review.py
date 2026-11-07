@@ -190,6 +190,61 @@ class FrozenNeedsReviewTests(unittest.TestCase):
         self.assertEqual(outcome.statuses["b2"], "PASS")
 
 
+class SourceTests(unittest.TestCase):
+    """Test that _act_own sets stop_walk flag for mandatory fields."""
+
+    def test_act_own_empty_mandatory_field_returns_stop_walk_true(self):
+        """Direct call to _act_own with empty mandatory field returns stop_walk=True."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+        from unittest.mock import Mock, patch
+
+        # Create mocks
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N001", 1, "Exercise 1", "Task 1", "1",
+                        "First Name: (your first name) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return a field
+        mock_field = Mock()
+        mock_field.nth = lambda i: Mock()
+
+        with patch('workshop_validator.guide_walk.labeled', return_value=mock_field), \
+             patch('workshop_validator.guide_walk._count', return_value=1), \
+             patch('workshop_validator.guide_walk._is_editable_field', return_value=True), \
+             patch('workshop_validator.guide_walk._input', return_value=""), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "First Name")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "NEEDS_REVIEW")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for empty mandatory field")
+            self.assertTrue(result.freeze)
+
+    def test_act_own_mandatory_field_not_found_returns_stop_walk_true(self):
+        """Direct call to _act_own with mandatory field not found returns stop_walk=True."""
+        from workshop_validator.guide_walk import _act_own, WalkState
+        from unittest.mock import Mock, patch
+
+        page = Mock()
+        state = WalkState(page=page)
+        step = GuideStep("P001N002", 1, "Exercise 1", "Task 1", "2",
+                        "Email: (your email) *mandatory",
+                        (0, 0, 0, 0), None, ())
+
+        # Mock labeled to return None (field not found)
+        with patch('workshop_validator.guide_walk.labeled', return_value=None), \
+             patch('workshop_validator.guide_walk._is_field_mandatory', return_value=True):
+
+            result = _act_own(state, step, "Email")
+
+            self.assertIsNotNone(result)
+            self.assertEqual(result.status, "UI_MISMATCH")
+            self.assertTrue(result.stop_walk, "stop_walk must be True for mandatory field not found")
+            self.assertTrue(result.freeze)
+
+
 class PopUpNotesTests(unittest.TestCase):
     """Test that stop_walk flag prevents pop-up notes from hiding the mandatory stop."""
 
