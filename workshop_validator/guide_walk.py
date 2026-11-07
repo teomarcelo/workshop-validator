@@ -6397,6 +6397,27 @@ _APP_NAV_CURRENT = (
 )
 
 
+def _files_content_area_visible(page) -> bool:
+    """Visible Files content area heading, scoped outside the nav bar."""
+    for root in _roots(page):
+        try:
+            # Look for a heading with "Files" text outside the nav bar
+            loc = root.locator("[role='heading']:not(one-app-nav-bar *)")
+        except Exception:
+            continue
+        for index in range(min(_count(loc), 8)):
+            try:
+                item = loc.nth(index)
+                if not item.is_visible():
+                    continue
+                text = norm(item.inner_text(timeout=1000) or "")
+                if "files" in text:
+                    return True
+            except Exception:
+                continue
+    return False
+
+
 def _current_nav_item(page, targets) -> str:
     """The target name the app nav's current item shows as its whole visible text, else ""."""
     for root in _roots(page):
@@ -6636,7 +6657,9 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     if not evidence_desc and opened_files_home and not before_nav:
         current = _current_nav_item(state.page, frozenset(target_names))
         if current:
-            evidence_desc = f"after-state: {current} nav item current"
+            # Require visible Files content area, not just the nav chip (P005N004)
+            if _files_content_area_visible(state.page):
+                evidence_desc = f"after-state: {current} nav item current"
 
     # Check if URL changed (must be same host, not an error page, with target in URL/heading)
     if not evidence_desc and before_url != after_url:
@@ -6793,7 +6816,9 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             if not evidence_desc and opened_files_home and not before_nav:
                 current = _current_nav_item(state.page, frozenset(target_names))
                 if current:
-                    evidence_desc = f"after-state: {current} nav item current"
+                    # Require visible Files content area, not just the nav chip (P005N004)
+                    if _files_content_area_visible(state.page):
+                        evidence_desc = f"after-state: {current} nav item current"
 
             if not evidence_desc and before_url != after_url:
                 from urllib.parse import urlparse
