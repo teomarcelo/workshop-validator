@@ -480,17 +480,28 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view):]
 
 
-def _legacy_seed(text: str, role: str, mtime: float) -> dict:
+SHORT_HEAD = re.compile(r"[0-9a-f]{7,39}")
+
+
+def _legacy_seed(text: str, role: str, mtime: float, full_head: str) -> dict:
     """History record for a legacy latest copy: its head, main's verdict rule, mtime ts, text.
 
-    Only a 40-hex head becomes `head`; any other head is kept as `legacy_head` with a null
-    `head`, so it never matches (or blocks) a current head.
+    A 40-hex head becomes `head`. A 7 to 39 hex head that the saved full head starts with
+    becomes that full head, as main's is_review_stale counts it current. Any other head is
+    kept as `legacy_head` with a null `head`, so it never matches (or blocks) a current head.
     """
     from . import team_gates
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     old_head = first.split(":", 1)[1].strip() if first.startswith("HEAD:") else ""
+    lowered = old_head.lower()
+    if HEAD_OID.fullmatch(lowered):
+        seed_head = lowered
+    elif SHORT_HEAD.fullmatch(lowered) and full_head.startswith(lowered):
+        seed_head = full_head
+    else:
+        seed_head = None
     return {
-        "head": old_head.lower() if HEAD_OID.fullmatch(old_head.lower()) else None,
+        "head": seed_head,
         "legacy_head": old_head,
         "ts": datetime.fromtimestamp(mtime, timezone.utc).isoformat(timespec="microseconds"),
         "role": role,
@@ -580,7 +591,7 @@ def save_review(team: Path, pr: int, role: str, head: str, reply: str,
         if not history_size and old_text.strip() and not team_gates.is_format_2(old_text):
             # A legacy copy and no history yet: keep its verdict as the first record, so a
             # legacy VETO still needs a real --supersedes after the switch.
-            lines = json.dumps(_legacy_seed(old_text, role, os.fstat(fd).st_mtime),
+            lines = json.dumps(_legacy_seed(old_text, role, os.fstat(fd).st_mtime, full_head),
                                ensure_ascii=False) + "\n"
         _write_all(history_fd, (lines + json_line).encode("utf-8"))
         os.ftruncate(fd, 0)

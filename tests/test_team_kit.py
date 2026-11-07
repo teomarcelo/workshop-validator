@@ -2987,14 +2987,32 @@ class VerdictHistoryRound4Tests(_NoSubprocessMixin, unittest.TestCase):
         self.save(85, "APPROVE")
         self.assertEqual(_gate(self.team, 85, self.HEAD), [_veto_problem(85, self.HEAD, LEGACY_TS)])
 
-    def test_legacy_short_head_seed_blocks_nothing_for_current_head(self):
-        text = f"HEAD: {self.HEAD[:7]}\nVERDICT: VETO\n"
+    def test_legacy_short_head_for_other_head_blocks_nothing(self):
+        text = f"HEAD: {OTHER_HEAD[:7]}\nVERDICT: VETO\n"
         self.legacy(86, "code-reviewer", text)
         self.save(86, "APPROVE")
         self.assertEqual(_gate(self.team, 86, self.HEAD), [])
         seed = _history_lines(self.team, 86)[0]
         self.assertEqual((seed["head"], seed["legacy_head"], seed["verdict"], seed["body"]),
-                         (None, self.HEAD[:7], "VETO", text))
+                         (None, OTHER_HEAD[:7], "VETO", text))
+
+    def test_legacy_short_head_prefix_veto_survives_first_save(self):
+        # Main's is_review_stale counts a 7+ hex prefix of the PR head as current.
+        for pr, short in ((91, self.HEAD[:7]), (92, self.HEAD[:39]), (93, self.HEAD[:7].upper())):
+            with self.subTest(short=short):
+                text = f"HEAD: {short}\nVERDICT: VETO\n"
+                self.legacy(pr, "code-reviewer", text)
+                self.save(pr, "APPROVE")
+                self.assertEqual(_gate(self.team, pr, self.HEAD), [_veto_problem(pr, self.HEAD, LEGACY_TS)])
+                seed = _history_lines(self.team, pr)[0]
+                self.assertEqual((seed["head"], seed["legacy_head"], seed["verdict"], seed["body"]),
+                                 (self.HEAD, short, "VETO", text))
+
+    def test_legacy_short_head_prefix_veto_cleared_by_real_supersede(self):
+        self.legacy(94, "code-reviewer", f"HEAD: {self.HEAD[:7]}\nVERDICT: VETO\n")
+        self.save(94, "APPROVE")
+        self.save(94, "APPROVE", supersedes_ts=LEGACY_TS, supersedes_reason="fixed in the next round")
+        self.assertEqual(_gate(self.team, 94, self.HEAD), [])
 
     def test_no_seed_after_format_2_copy(self):
         self.save(87, "VETO")
