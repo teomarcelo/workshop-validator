@@ -60,7 +60,14 @@ class TakeoverLaunchTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_exact_command_on_takeover(self):
-        """The takeover launch command is: claude -p "<wake prompt>" --permission-mode acceptEdits, cwd=repo, start_new_session=True."""
+        """The takeover launch command is: claude -p "<wake prompt>" --permission-mode acceptEdits, cwd=repo, start_new_session=True.
+
+        The prompt MUST include both safety lines:
+        - "If team_kit status shows a live producer, stop without doing anything."
+        - "Never do owner-only work (CLAUDE.md, Autonomy boundary)."
+
+        Deleting either line must fail this test.
+        """
         team_kit.save_plan(self.team, {"steps": [{"id": "S1", "state": "next"}]}, NOW)
 
         fake_claude = self.repo / "fake-claude"
@@ -78,6 +85,16 @@ class TakeoverLaunchTests(unittest.TestCase):
             "-p", watchdog.PRODUCER_WAKE_PROMPT,
             "--permission-mode", "acceptEdits"
         ])
+
+        # Verify the FULL prompt text including both safety lines
+        prompt_text = cmd[2]
+        self.assertIn("If team_kit status shows a live producer, stop without doing anything",
+                     prompt_text,
+                     "Prompt must include the 'stop if live producer' safety line")
+        self.assertIn("Never do owner-only work (CLAUDE.md, Autonomy boundary)",
+                     prompt_text,
+                     "Prompt must include the 'never do owner-only work' safety line")
+
         kwargs = popen_mock.call_args[1]
         self.assertEqual(kwargs["cwd"], str(self.repo))
         self.assertTrue(kwargs["start_new_session"])

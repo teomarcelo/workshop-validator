@@ -208,7 +208,7 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_lau
     action = decide(state, now=now, producer_fresh=fresh)
     if action in {"idle", "alive"}:
         # Check for takeover when no open job or job is done
-        if action == "idle" and not fresh and producer_launcher is not None:
+        if action == "idle" and producer_launcher is not None:
             from .team_kit import takeover_launch
             try:
                 status_code, message = takeover_launch(repo_root, private_root / "team", now, producer_launcher)

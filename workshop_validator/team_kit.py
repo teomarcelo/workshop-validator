@@ -422,6 +422,10 @@ def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[st
             (team / "watchdog-waiting-owner").unlink(missing_ok=True)
             return ("NONE", f"{state}: {reason}")
 
+        # Check fresh BEFORE any cap checks: a live producer never writes WAITING
+        if fresh:
+            return ("NONE", f"producer is fresh: {reason}")
+
         # Check rolling cap (6 launches in 24 hours)
         launches_file = team / "takeover-launches"
         launches = []
@@ -463,15 +467,6 @@ def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[st
 
         if action != "TAKEOVER":
             return ("NONE", f"{action} {state}: {reason}")
-
-        if fresh:
-            return ("NONE", f"producer is fresh: {reason}")
-
-        if takeover_count >= MAX_TAKEOVERS_PER_IDLE:
-            session = (live or {}).get("session_id", "none")
-            waiting_msg = f"{takeover_count} takeovers did not restart (session {session})"
-            _write_waiting_owner(team, waiting_msg, now)
-            return ("WAITING", waiting_msg)
 
         # Write markers BEFORE launch
         (team / "nudged-at").unlink(missing_ok=True)
@@ -533,9 +528,6 @@ def watchdog_check(repo: Path, team: Path, now=None, *, launcher=None) -> str:
     When launcher is a callable, calls takeover_launch to perform the launch.
     """
     now = _utc(now)
-
-    # Compute decision first
-    fresh = producer_is_fresh(repo, team, now)
 
     # Check main checkout is on main branch (branch and detached state only, not dirty files)
     from . import public_safety
