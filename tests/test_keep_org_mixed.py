@@ -53,17 +53,17 @@ class KeepOrgMixedTests(unittest.TestCase):
         """The motivating case: NEEDS_REVIEW first, then multiple verified false failures."""
         with tempfile.TemporaryDirectory() as folder:
             steps = [
-                ("P001N001", "PASS"),
-                ("P005N005", "NEEDS_REVIEW"),  # First non-PASS, inconclusive
-                ("P032N003", "UI_MISMATCH"),    # Real failure
-                ("P041N002", "FUNCTIONAL_FAIL"), # Real failure
-                ("P042N001", "NOT_RUN"),
+                ("s1", "PASS"),
+                ("s2", "NEEDS_REVIEW"),  # First non-PASS, inconclusive
+                ("s3", "UI_MISMATCH"),    # Real failure
+                ("s4", "FUNCTIONAL_FAIL"), # Real failure
+                ("s5", "NOT_RUN"),
             ]
             verdicts = {
-                "P001N001": ["CONFIRMED_PASS"],
-                # P005N005 has no verdict (or could have UNCLEAR)
-                "P032N003": ["FALSE_FAILURE"],
-                "P041N002": ["FALSE_FAILURE"],
+                "s1": ["CONFIRMED_PASS"],
+                # s2 has no verdict (or could have UNCLEAR)
+                "s3": ["FALSE_FAILURE"],
+                "s4": ["FALSE_FAILURE"],
             }
             root, run_dir = _make_run(folder, steps=steps, verdicts=verdicts)
 
@@ -72,7 +72,7 @@ class KeepOrgMixedTests(unittest.TestCase):
             self.assertEqual((gate["org"], gate["frozen"], gate["reason"]), (1, False, ""))
             self.assertEqual(gate["kept_org_reason"]["run_id"], run_dir.name)
             self.assertEqual(set(gate["kept_org_reason"]["verified_false_failures"]),
-                             {"P032N003", "P041N002"})
+                             {"s3", "s4"})
 
     def test_needs_review_with_unclear_verdict_allowed(self):
         """NEEDS_REVIEW with UNCLEAR verdict is allowed (inconclusive)."""
