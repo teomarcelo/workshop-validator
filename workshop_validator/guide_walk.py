@@ -1922,9 +1922,9 @@ def builtin_checks() -> tuple[GuideCheck, ...]:
         ),
         _check("Turn Agentforce on", lambda step: "toggle agentforce" in _text(step), run_toggle),
         _check(
-            "Create a new Screen Flow",
-            lambda step: _text(step).startswith("create a new screen flow"),
-            run_screen_flow,
+            "Create a Flow",
+            lambda step: _match_create_flow(_text(step)) is not None,
+            run_create_flow,
         ),
         _check(
             "Create a record variable",
@@ -3244,6 +3244,111 @@ def _click_screen_flow(page) -> bool:
     return _click_choice(page, "Screen Flow")
 
 
+def _match_create_flow(text: str) -> str | None:
+    """Extract flow type from step text. Returns the normalized type name or None."""
+    pattern = r'\bcreate\s+(?:an?\s+)?(?:new\s+)?(screen\s+flow|autolaunched\s+flow\s*(?:\(no\s+trigger\))?|record-triggered\s+flow)\b'
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None
+    flow_type = match.group(1).strip().lower()
+    # Remove parentheses and normalize
+    flow_type_clean = flow_type.replace('(', '').replace(')', '').strip()
+    # Normalize to exact type names
+    if flow_type_clean.startswith("screen"):
+        return "Screen Flow"
+    elif flow_type_clean.startswith("autolaunched"):
+        return "Autolaunched Flow (No Trigger)"
+    elif flow_type_clean.startswith("record-triggered") or flow_type_clean.startswith("record triggered"):
+        return "Record-Triggered Flow"
+    return None
+
+
+def _pages_with_builder(page) -> set[str]:
+    """Return URLs of pages that currently have a Flow Builder open."""
+    builder_pages = set()
+    for candidate in _browser_pages(page):
+        if _flow_builder_open(candidate):
+            url = str(getattr(candidate, "url", "") or "")
+            builder_pages.add(url)
+    return builder_pages
+
+
+def _flow_type_tile_locator(page, flow_type: str):
+    """Find flow type tile by first visible line matching the type name exactly.
+
+    Searches only inside the New Flow dialog on the given page. Returns (locator, count)
+    where count is the number of matching tiles found, or (None, -1) if the dialog
+    constraint is not met (no dialog or multiple dialogs).
+    """
+    # Find exactly one "New Flow" dialog on this page
+    try:
+        dialogs = page.locator("[role='dialog']")
+        dialog_count = dialogs.count()
+    except Exception as e:
+        # Locator lookup failed; note this with count 0
+        return (None, 0)
+
+    new_flow_dialogs = []
+    for index in range(min(dialog_count, 20)):
+        try:
+            dialog = dialogs.nth(index)
+            name = dialog.get_attribute("aria-label") or dialog.get_attribute("aria-labelledby")
+            if name:
+                # For aria-labelledby, read the element text
+                if not name.startswith("New Flow"):
+                    try:
+                        label_elem = page.locator(f"#{name}")
+                        if label_elem.count() > 0:
+                            name = label_elem.inner_text(timeout=500)
+                    except Exception:
+                        pass
+                if name and name.strip() == "New Flow":
+                    new_flow_dialogs.append(dialog)
+            # Also check heading inside the dialog
+            if not new_flow_dialogs or dialog not in new_flow_dialogs:
+                try:
+                    heading = dialog.locator("[role='heading']").first
+                    heading_text = heading.inner_text(timeout=500).strip()
+                    if heading_text == "New Flow":
+                        if dialog not in new_flow_dialogs:
+                            new_flow_dialogs.append(dialog)
+                except Exception:
+                    pass
+        except Exception:
+            continue
+
+    # Require exactly one New Flow dialog
+    if len(new_flow_dialogs) != 1:
+        return (None, -1)
+
+    dialog = new_flow_dialogs[0]
+
+    # Search for option tiles inside this dialog
+    try:
+        options_loc = dialog.locator("[role='option']")
+        count_val = options_loc.count()
+    except Exception:
+        return (None, 0)
+
+    # Find tiles whose first visible line equals the type exactly
+    matches = []
+    for index in range(min(int(count_val), 50)):
+        try:
+            option = options_loc.nth(index)
+            lines = _option_lines(option)
+            if lines and lines[0] == flow_type:
+                matches.append(option)
+        except Exception:
+            continue
+
+    if len(matches) == 1:
+        return (matches[0], 1)
+    elif len(matches) > 1:
+        return (None, len(matches))
+    return (None, 0)
+
+
+
 # Custom elements that only the Flow Builder app renders for its canvas.
 # UNVERIFIED: these tag names have not been checked against a live Flow Builder page.
 _BUILDER_CANVAS_SELECTOR = (
@@ -4102,6 +4207,104 @@ def _builder_gate(state: WalkState, step: GuideStep) -> CheckResult | None:
     if _focus_builder(state) or _flow_builder_open(state.page):
         return None
     return _resumed_miss(state, notes, _not_open_result(state, "Flow Builder is not open."))
+
+
+def run_create_flow(state: WalkState, step: GuideStep) -> CheckResult:
+    """Create a Flow of the specified type. Returns NEEDS_REVIEW for manual verification."""
+    flow_type = _match_create_flow(_text(step))
+    if not flow_type:
+        return CheckResult("NEEDS_REVIEW", "Could not extract flow type from step text.", (), freeze=True)
+
+    origin = _origin(state.page)
+    if not origin:
+        return CheckResult("UI_MISMATCH", "The org was not open.", ())
+
+    try:
+        state.page.goto(
+            origin + "/lightning/setup/Flows/home",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+    except Exception:
+        return CheckResult("UI_MISMATCH", "Flows did not open.", (), freeze=True)
+
+    notes = len(state.popup_notes)
+
+    missed = _wait_past_promo(
+        state, step, lambda: _named_choice(state.page, "New Flow"), "New Flow was not on the Flows page."
+    )
+    if missed:
+        return _stop_here(missed)
+
+    if not (_click_last(state.page, "button", "New Flow") or _click_choice(state.page, "New Flow")):
+        return _resumed_miss(state, notes, CheckResult("UI_MISMATCH", "New Flow did not open.", (), freeze=True))
+
+    # Wait for the flow type tile to appear
+    def type_tile_offered():
+        locator, count = _flow_type_tile_locator(state.page, flow_type)
+        if count == -1:
+            return True  # Dialog constraint failure, will report NEEDS_REVIEW frozen
+        if count > 1:
+            return True  # Multiple matches found, will report NEEDS_REVIEW frozen
+        return locator is not None
+
+    missed = require(
+        state,
+        type_tile_offered,
+        f"{flow_type} was not offered.",
+        limit=state.page_wait_s,
+    )
+    if missed:
+        return _stop_here(missed)
+
+    # Check for dialog constraint and duplicate tiles
+    locator, count = _flow_type_tile_locator(state.page, flow_type)
+    if count == -1:
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"New Flow dialog constraint not met (expected exactly one dialog named 'New Flow').",
+            (),
+            freeze=True,
+        )
+    if count > 1:
+        return CheckResult(
+            "NEEDS_REVIEW",
+            f"Multiple tiles matched {flow_type} (found {count}); cannot determine which to click.",
+            (),
+            freeze=True,
+        )
+    if not locator:
+        return CheckResult("UI_MISMATCH", f"{flow_type} tile was not found.", (), freeze=True)
+
+    # Click the flow type tile
+    # Note: _option_lines already filters invisible text, so the tile is visible if returned
+    try:
+        locator.click(timeout=8000)
+    except Exception as e:
+        # Note: click failed after the tile was found
+        return CheckResult("NEEDS_REVIEW", f"{flow_type} tile click failed.", (), freeze=True)
+
+    # Click Create button
+    if present(state.page, "button", "Create") or present(state.page, "link", "Create"):
+        if not (click_role(state.page, "button", "Create") or click_role(state.page, "link", "Create")):
+            return CheckResult("UI_MISMATCH", f"Create was not available for {flow_type}.", (), freeze=True)
+
+    # Wait for builder to open
+    missed = _wait_past_promo(state, step, lambda: _focus_builder(state), "Flow Builder did not open.")
+    if missed and missed.status == "UI_MISMATCH" and not _promo_over(state, step):
+        return _not_open_result(state, missed.note)
+    if missed:
+        return _stop_here(missed)
+
+    # Builder opened - return NEEDS_REVIEW for manual verification
+    if not _flow_builder_open(state.page):
+        return _not_open_result(state, "Flow Builder did not open after Create was clicked.")
+
+    return CheckResult(
+        "NEEDS_REVIEW",
+        f"Clicked New Flow, {flow_type} tile, then Create; Flow Builder opened; manual verification required.",
+        (),
+    )
 
 
 def run_screen_flow(state: WalkState, step: GuideStep) -> CheckResult:

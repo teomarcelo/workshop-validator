@@ -186,7 +186,7 @@ class Loc:
             if self.page.state_reads < self.page.reveal_state_after:
                 return None
             return self.page.checked.get((self.kind, self.name))
-        elif name in ("aria-selected", "aria-pressed", "aria-expanded", "aria-current", "role", "class"):
+        elif name in ("aria-selected", "aria-pressed", "aria-expanded", "aria-current", "role", "class", "aria-label", "aria-labelledby"):
             return self.page.aria_states.get((self.kind, self.name, name))
         return None
 
@@ -1503,6 +1503,12 @@ class WalkTests(unittest.TestCase):
         def reveal(kind, name):
             if name == "New Flow":
                 page.body = "New Automation Screen Flow"
+                # Set up proper dialog structure for the new code
+                page.roles.add(("dialog", "New Flow"))
+                page.roles.add(("heading", "New Flow"))
+                page.roles.add(("option", "Screen Flow"))
+                page.children[("dialog", "New Flow")] = [("heading", "New Flow"), ("option", "Screen Flow")]
+                page.aria_states[("dialog", "New Flow", "aria-label")] = "New Flow"
             if name == "Screen Flow":
                 page.roles.add(("button", "Create"))
             if name == "Create":
@@ -1517,8 +1523,8 @@ class WalkTests(unittest.TestCase):
             "Create a new Screen Flow.",
         )
         outcome = self.walk(page, (item,))
-        self.assertEqual(outcome.statuses["flow"], "PASS")
-        self.assertIn("Flow Builder", outcome.notes["flow"])
+        self.assertEqual(outcome.statuses["flow"], "NEEDS_REVIEW")
+        self.assertIn("manual verification", outcome.notes["flow"])
         self.assertIn("flowBuilder", page.url)
 
     def test_screen_flow_choices_follow_the_builder_tab(self):
@@ -1526,8 +1532,9 @@ class WalkTests(unittest.TestCase):
         flows.roles.add(("button", "New Flow"))
         builder = Page(
             "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app",
-            body="New Automation Screen Flow",
+            body="Free-Form",
         )
+        as_builder(builder)
 
         class Ctx:
             def __init__(self):
@@ -1538,7 +1545,19 @@ class WalkTests(unittest.TestCase):
         builder.context = ctx
 
         def reveal(kind, name):
+            if name == "New Flow":
+                flows.body = "New Automation Screen Flow"
+                # Set up proper dialog structure
+                flows.roles.add(("dialog", "New Flow"))
+                flows.roles.add(("heading", "New Flow"))
+                flows.roles.add(("option", "Screen Flow"))
+                flows.children[("dialog", "New Flow")] = [("heading", "New Flow"), ("option", "Screen Flow")]
+                flows.aria_states[("dialog", "New Flow", "aria-label")] = "New Flow"
             if name == "Screen Flow":
+                flows.roles.add(("button", "Create"))
+            if name == "Create":
+                # Clear the dialog from flows page
+                flows.body = "Flows"
                 builder.body = "Free-Form"
                 as_builder(builder)
 
@@ -1549,9 +1568,11 @@ class WalkTests(unittest.TestCase):
             "Create a new Screen Flow.",
         )
         outcome = self.walk(flows, (item,))
-        self.assertEqual(outcome.statuses["flowtab"], "PASS")
+        self.assertEqual(outcome.statuses["flowtab"], "NEEDS_REVIEW")
+        # The builder tab should be focused after create
         self.assertIn("flowBuilder", builder.url)
-        self.assertNotIn("New Automation", builder.body)
+        # The dialog should be gone from flows page
+        self.assertNotIn("New Automation", flows.body)
 
     def test_record_variable_opens_new_resource(self):
         page = Page("https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app")
@@ -4208,6 +4229,196 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         self.assertEqual(self.clicks(page), [("click", "link", "Accounts")])
         self.assertEqual(outcome.statuses["open-accounts"], "NOT_RUN")
         self.assertIn("exceeded its time limit", outcome.notes["open-accounts"])
+
+
+class CreateFlowTypeTests(unittest.TestCase):
+    """Create Flow type extraction unit tests."""
+
+    def test_match_create_flow_screen_flow(self):
+        self.assertEqual(guide_walk._match_create_flow("create a screen flow"), "Screen Flow")
+        self.assertEqual(guide_walk._match_create_flow("create a new screen flow"), "Screen Flow")
+        self.assertEqual(guide_walk._match_create_flow("Create a Screen Flow."), "Screen Flow")
+
+    def test_match_create_flow_autolaunched(self):
+        self.assertEqual(
+            guide_walk._match_create_flow("create an autolaunched flow (no trigger)"),
+            "Autolaunched Flow (No Trigger)"
+        )
+        self.assertEqual(
+            guide_walk._match_create_flow("Create a new Autolaunched Flow (No Trigger)."),
+            "Autolaunched Flow (No Trigger)"
+        )
+
+    def test_match_create_flow_record_triggered(self):
+        self.assertEqual(
+            guide_walk._match_create_flow("create a record-triggered flow"),
+            "Record-Triggered Flow"
+        )
+        self.assertEqual(
+            guide_walk._match_create_flow("Create a new Record-Triggered Flow."),
+            "Record-Triggered Flow"
+        )
+
+    def test_match_create_flow_no_match(self):
+        self.assertIsNone(guide_walk._match_create_flow("create a flow variable"))
+        self.assertIsNone(guide_walk._match_create_flow("open the flow builder"))
+        # Test that leading anchor prevents mid-word matches
+        self.assertIsNone(guide_walk._match_create_flow("recreate a screen flow"))
+        self.assertIsNone(guide_walk._match_create_flow("please recreate an autolaunched flow"))
+        # Test that trailing anchor prevents partial word matches
+        self.assertIsNone(guide_walk._match_create_flow("create a screen flowchart"))
+        self.assertIsNone(guide_walk._match_create_flow("create an autolaunched flowstate"))
+
+    def test_duplicate_tiles_returns_needs_review_frozen(self):
+        """Duplicate tiles with same first line returns NEEDS_REVIEW frozen."""
+        # Test through run_create_flow with a mock that has duplicate tiles
+        # Since Page uses a set for roles, we can't have true duplicates
+        # Instead, test that the guard logic works by mocking the locator
+        original_locator = guide_walk._flow_type_tile_locator
+
+        def mock_locator(page, flow_type):
+            # Simulate finding 2 matching tiles
+            return (None, 2)
+
+        guide_walk._flow_type_tile_locator = mock_locator
+        try:
+            from tests.test_guide_walk import Page, Clock
+            page = Page("https://example.lightning.force.com/lightning/setup/Flows/home")
+            page.roles.add(("button", "New Flow"))
+
+            def reveal(kind, name):
+                if name == "New Flow":
+                    page.body = "New Automation"
+                    # The mock locator will return count=2
+
+            page.on_goto = lambda url: None
+            page.on_click = reveal
+
+            clock = Clock()
+            state = guide_walk.WalkState(
+                page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+                page_wait_s=5, page_poll_s=1,
+            )
+            step_obj = step("s1", "Ex", "Task", "1", "Create a Screen Flow.")
+            result = guide_walk.run_create_flow(state, step_obj)
+
+            # Should return NEEDS_REVIEW with Multiple tiles message
+            self.assertEqual(result.status, "NEEDS_REVIEW")
+            self.assertIn("Multiple tiles", result.note)
+            self.assertTrue(result.freeze)
+        finally:
+            guide_walk._flow_type_tile_locator = original_locator
+
+    def test_successful_flow_creation_returns_needs_review_not_pass(self):
+        """Successful flow creation returns NEEDS_REVIEW for manual verification, never PASS."""
+        from tests.test_guide_walk import Page, Clock
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Screen Flow"
+                # Set up proper dialog structure with the New Flow dialog
+                page.roles.add(("dialog", "New Flow"))
+                page.roles.add(("heading", "New Flow"))
+                page.roles.add(("option", "Screen Flow"))
+                # The dialog contains the heading and option
+                page.children[("dialog", "New Flow")] = [("heading", "New Flow"), ("option", "Screen Flow")]
+                # Set aria-label for the dialog
+                page.aria_states[("dialog", "New Flow", "aria-label")] = "New Flow"
+            if name == "Screen Flow":
+                page.roles.add(("button", "Create"))
+            if name == "Create":
+                page.url = "https://example.lightning.force.com/builder_platform_interaction/flowBuilder.app"
+                page.body = "Free-Form"
+                as_builder(page)
+
+        page.on_goto = opened
+        page.on_click = reveal
+
+        clock = Clock()
+        state = guide_walk.WalkState(
+            page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=5, page_poll_s=1,
+        )
+        step_obj = step("s1", "Ex", "Task", "1", "Create a Screen Flow.")
+        result = guide_walk.run_create_flow(state, step_obj)
+
+        # Should return NEEDS_REVIEW, never PASS (Path B: NEEDS_REVIEW-only)
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("manual verification", result.note)
+        self.assertFalse(result.freeze)
+
+    def test_create_flow_parser_failure_is_needs_review_frozen(self):
+        """Parser failure (invalid step text) returns NEEDS_REVIEW frozen, not UI_MISMATCH."""
+        from tests.test_guide_walk import Page, Clock
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+        clock = Clock()
+        state = guide_walk.WalkState(
+            page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=5, page_poll_s=1,
+        )
+        step_obj = step("s1", "Ex", "Task", "1", "Create a flow variable.")  # Invalid - doesn't match pattern
+        result = guide_walk.run_create_flow(state, step_obj)
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("Could not extract flow type", result.note)
+        self.assertTrue(result.freeze)
+
+    def test_create_flow_org_not_open_is_ui_mismatch_not_frozen(self):
+        """Org not open returns UI_MISMATCH without freeze, matching other actions."""
+        from tests.test_guide_walk import Page, Clock
+        page = Page("")  # No URL - org not open
+        clock = Clock()
+        state = guide_walk.WalkState(
+            page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=5, page_poll_s=1,
+        )
+        step_obj = step("s1", "Ex", "Task", "1", "Create a Screen Flow.")
+        result = guide_walk.run_create_flow(state, step_obj)
+
+        self.assertEqual(result.status, "UI_MISMATCH")
+        self.assertIn("org was not open", result.note)
+        self.assertFalse(result.freeze)
+
+    def test_create_flow_tile_click_failure_is_needs_review_frozen(self):
+        """Tile click failure returns NEEDS_REVIEW frozen, not UI_MISMATCH."""
+        from tests.test_guide_walk import Page, Clock
+        page = Page("https://example.lightning.force.com/lightning/page/home")
+
+        def opened(url):
+            if url.endswith("/lightning/setup/Flows/home"):
+                page.roles.add(("button", "New Flow"))
+
+        def reveal(kind, name):
+            if name == "New Flow":
+                page.body = "New Automation Screen Flow"
+                page.roles.add(("dialog", "New Flow"))
+                page.roles.add(("heading", "New Flow"))
+                page.roles.add(("option", "Screen Flow"))
+                page.children[("dialog", "New Flow")] = [("heading", "New Flow"), ("option", "Screen Flow")]
+                page.aria_states[("dialog", "New Flow", "aria-label")] = "New Flow"
+            if name == "Screen Flow":
+                # Simulate click failure
+                raise RuntimeError("Simulated click error")
+
+        page.on_goto = opened
+        page.on_click = reveal
+
+        clock = Clock()
+        state = guide_walk.WalkState(
+            page=page, timeout_s=0, interval_s=1, clock=clock, sleeper=clock.sleep,
+            page_wait_s=5, page_poll_s=1,
+        )
+        step_obj = step("s1", "Ex", "Task", "1", "Create a Screen Flow.")
+        result = guide_walk.run_create_flow(state, step_obj)
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("tile click failed", result.note)
+        self.assertTrue(result.freeze)
 
 
 if __name__ == "__main__":
