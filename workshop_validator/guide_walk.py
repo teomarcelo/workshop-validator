@@ -7322,6 +7322,8 @@ def _freeze_result(state: WalkState, step: GuideStep, target: str, suggestion: s
 
 def _clean_name(label: str) -> bool:
     """True when the target reads like one control name, not a clause."""
+    if "|" in label:
+        return False
     words = label.split()
     if not words or len(words) > 5:
         return False
