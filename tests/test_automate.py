@@ -721,15 +721,18 @@ class KeepOrgTests(unittest.TestCase):
             self.assertRefusedUnchanged(root, run_dir)
 
     def test_refuses_failures_not_a_list(self):
-        """W-167b: refuse when summary.failures is not a list."""
+        """W-167b: refuse when summary.failures is not a list (empty dict would succeed if not caught)."""
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_org_root(folder, stop=None)
             summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
-                       "failures": "not a list"}
+                       "failures": {}}
             (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
             steps = [{"step_id": "s2", "status": "UI_MISMATCH"}]
             board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
             (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
             gate_before = Path(root, "gate.json").read_bytes()
             with contextlib.redirect_stdout(io.StringIO()) as out:
                 result = self._keep(root, run_dir)
