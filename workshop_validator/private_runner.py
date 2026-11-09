@@ -859,6 +859,44 @@ def run_uploaded_guide(
         import time
         video_origin = time.monotonic()
 
+        # Track page creation times for video timeline
+        page_creation_times = {}
+        main_page_created = time.monotonic()
+        try:
+            video = getattr(opened, "video", None)
+            if callable(video):
+                video = video()
+            if video is not None:
+                path_of = getattr(video, "path", None)
+                if callable(path_of):
+                    video_path = path_of()
+                    if video_path:
+                        page_creation_times[video_path] = main_page_created
+        except Exception:
+            pass
+
+        # Track new tabs/pages as they're created
+        try:
+            context = getattr(opened, "context", None)
+            if context is not None:
+                def on_page(new_page):
+                    try:
+                        creation_time = time.monotonic()
+                        video = getattr(new_page, "video", None)
+                        if callable(video):
+                            video = video()
+                        if video is not None:
+                            path_of = getattr(video, "path", None)
+                            if callable(path_of):
+                                video_path = path_of()
+                                if video_path:
+                                    page_creation_times[video_path] = creation_time
+                    except Exception:
+                        pass
+                context.on("page", on_page)
+        except Exception:
+            pass
+
         def heartbeat_callback(run_id_str: str, index: int, total: int, step_id: str, status: str, timestamp: float) -> None:
             if output_dir is None:
                 return
@@ -912,8 +950,17 @@ def run_uploaded_guide(
             heartbeat=heartbeat_callback,
             snapshot_dir=snapshot_dir,
             snapshot_leaks=lambda text: _contains_secret(text, username, password),
+            page_creation_times=page_creation_times,
         )
         produced = _report_steps_from_outcome(inventory, outcome, username, password)
+        # Write timeline.json before finishing
+        if output_dir is not None:
+            work, temporary = _work_dir(output_dir, repo_root)
+            try:
+                _write_timeline(work, report_id, outcome.timeline, password)
+            finally:
+                if temporary is not None:
+                    temporary.cleanup()
         # Company Information is read in its own tab only after the walk, so
         # the guide order is never disturbed.
         if instance is None:
@@ -1143,6 +1190,9 @@ def _inventory_report(
         ts = timestamps.get(step.step_id)
         t_start = ts[0] if ts else None
         t_end = ts[1] if ts else None
+        # Keep snapshots for PASS rows with suspect chips
+        suspect_list = suspects.get(step.step_id, ())
+        keep_snapshot = status != "PASS" or bool(suspect_list)
         items.append(ReportStep(
             step.step_id, step.page, step.text, status, found, note,
             behavioral_classification=(
@@ -1151,8 +1201,8 @@ def _inventory_report(
             behavioral_evidence_ids=already if status == "PASS" else (),
             t_start=t_start,
             t_end=t_end,
-            suspect=suspects.get(step.step_id, ()),
-            snapshot=snapshots.get(step.step_id, "") if status != "PASS" else "",
+            suspect=suspect_list,
+            snapshot=snapshots.get(step.step_id, "") if keep_snapshot else "",
             guide_note=guide_notes.get(step.step_id, "") if status == "PASS" else "",
             freeze=freezes.get(step.step_id, False),
         ))
@@ -1237,6 +1287,42 @@ def _write_counts(work: Path, result: UploadedRun, password: str) -> None:
 
 def _leaks_secret(text: str, password: str) -> bool:
     return bool(password) and len(password) >= 8 and password in text
+
+
+def _write_timeline(
+    work: Path,
+    run_id: str,
+    timeline: dict[str, tuple[str | None, float | None, float | None, str]],
+    password: str,
+) -> None:
+    """Write timeline.json mapping steps to their video file, offsets, and snapshot."""
+    steps = []
+    for step_id, (video, t_start, t_end, snapshot) in timeline.items():
+        steps.append({
+            "step_id": step_id,
+            "video": video,
+            "t_start": t_start,
+            "t_end": t_end,
+            "snapshot": snapshot,
+        })
+    payload = {
+        "run_id": run_id,
+        "steps": steps,
+    }
+    text = json.dumps(payload, indent=2)
+    if _leaks_secret(text, password):
+        return
+    path = work / "timeline.json"
+    import os
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+    except FileExistsError:
+        pass
 
 
 def _checkpoint_evidence(db_path: Path, run_id: str) -> dict[str, tuple[str, ...]]:
