@@ -358,7 +358,7 @@ class FakeRunner:
     def __init__(self, rules=()):
         self.calls, self.rules = [], list(rules)
 
-    def __call__(self, cmd, cwd):
+    def __call__(self, cmd, cwd, env=None):
         self.calls.append((list(cmd), Path(cwd)))
         for match, code, out in self.rules:
             if match(cmd):
