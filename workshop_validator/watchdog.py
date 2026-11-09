@@ -24,6 +24,14 @@ WAITING_LOG_EVERY = timedelta(hours=1)
 # producer is fixing, testing, reviewing or publishing; a headless restart
 # would only fight it, so the watchdog waits. Run and verify stay restartable.
 PRODUCER_PHASES = ("fix", "test", "audit", "publish", "lessons", "report")
+# Prompt for a fresh producer session when the chain is idle or stalled with no live producer.
+PRODUCER_WAKE_PROMPT = (
+    "You are the producer (read .claude/agents/producer.md). "
+    "If team_kit status shows a live producer, stop without doing anything. "
+    "Never do owner-only work (CLAUDE.md, Autonomy boundary). "
+    "Run team_kit status, claim if no producer is live, read the newest standup restart block and "
+    "progress/now.json, and start the next ready step."
+)
 
 
 def _now_utc() -> datetime:
@@ -113,10 +121,15 @@ def _note_waiting(root: Path, state: dict, now: datetime) -> None:
 
 
 def claude_path() -> str | None:
-    """The Claude Code CLI. launchd has a short PATH, so common places are tried too."""
+    """The Claude Code CLI. launchd has a short PATH, so common places are tried too.
+
+    When WORKSHOP_VALIDATOR_CLAUDE is set, use only it (no PATH fallback); if not
+    executable, return None.
+    """
     override = os.environ.get("WORKSHOP_VALIDATOR_CLAUDE")
-    candidates = [override] if override else []
-    candidates += [shutil.which("claude"), str(Path.home() / ".local" / "bin" / "claude"),
+    if override:
+        return override if os.access(override, os.X_OK) else None
+    candidates = [shutil.which("claude"), str(Path.home() / ".local" / "bin" / "claude"),
                    "/opt/homebrew/bin/claude", "/usr/local/bin/claude"]
     for item in candidates:
         if item and os.access(item, os.X_OK):
@@ -146,6 +159,28 @@ def launch_resume(repo_root: Path, log_path: Path, venv_python: Path) -> None:
         )
 
 
+def launch_producer_wake(repo_root: Path, log_path: Path) -> None:
+    """Launch a detached fresh producer session (injectable for tests)."""
+    claude = claude_path()
+    if claude is None:
+        raise FileNotFoundError("The claude CLI was not found; set WORKSHOP_VALIDATOR_CLAUDE.")
+    cmd = [
+        claude,
+        "-p", PRODUCER_WAKE_PROMPT,
+        "--permission-mode", "acceptEdits",
+    ]
+    log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(fd, "a") as f:
+        subprocess.Popen(
+            cmd,
+            cwd=str(repo_root),
+            stdout=f,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+
 def _team_lesson(private_root: Path, cause: str, state: dict, now: datetime) -> None:
     """Record a restart or stall as a team lesson, keyed by the phase it died in."""
     from .lessons import TEAM, record_cause
@@ -160,10 +195,11 @@ def _team_lesson(private_root: Path, cause: str, state: dict, now: datetime) -> 
         pass
 
 
-def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) -> int:
-    """Check and act on the current job state."""
-    if launcher is None:
-        launcher = launch_resume
+def run_once(repo_root: Path, private_root: Path, *, launcher=None, producer_launcher=None, now=None) -> int:
+    """Check and act on the current job state.
+
+    When launcher or producer_launcher is None (default), no launch happens; used by tests.
+    """
     if now is None:
         now = _now_utc()
     state = load(private_root)
@@ -171,6 +207,26 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) ->
     fresh = producer_is_fresh(repo_root, private_root / "team", now)
     action = decide(state, now=now, producer_fresh=fresh)
     if action in {"idle", "alive"}:
+        # Check for takeover when no open job or job is done
+        if action == "idle" and producer_launcher is not None:
+            from .team_kit import takeover_launch
+            try:
+                status_code, message = takeover_launch(repo_root, private_root / "team", now, producer_launcher)
+                if status_code == "LAUNCHED":
+                    print(f"Takeover launch: fresh producer session started")
+                    return 0
+                elif status_code == "WAITING":
+                    waiting_marker = private_root / "team" / "watchdog-waiting-owner"
+                    if waiting_marker.is_file():
+                        try:
+                            data = json.loads(waiting_marker.read_text(encoding="utf-8"))
+                            print(f"WAITING owner: {data.get('reason', message)}", file=sys.stderr)
+                        except (OSError, ValueError, json.JSONDecodeError):
+                            print(f"WAITING owner: {message}", file=sys.stderr)
+                    return 0
+            except Exception as exc:
+                print(f"Takeover check failed: {exc}", file=sys.stderr)
+                _team_lesson(private_root, f"Takeover check raised: {exc}", {}, now)
         return 0
     if action == "waiting":
         _note_waiting(private_root, state, now)
@@ -182,6 +238,8 @@ def run_once(repo_root: Path, private_root: Path, *, launcher=None, now=None) ->
                          state, now)
             print(f"Job stalled after {RESTART_CAP_PER_HOUR} restarts. Marker written.")
         return 0
+    if launcher is None:
+        return 0  # No launcher provided, tests only
     record_restart(private_root, now=now)
     _team_lesson(private_root, "Heartbeat went stale and the job was restarted", state, now)
     from .team_state import log
@@ -255,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.once:
-        code = run_once(repo_root, private_root)
+        code = run_once(repo_root, private_root, launcher=launch_resume, producer_launcher=launch_producer_wake)
         cleanup_worktrees(repo_root)
         return code
 

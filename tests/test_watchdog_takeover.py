@@ -60,29 +60,29 @@ class WatchdogTakeoverTests(unittest.TestCase):
     def test_stale_job_and_stale_producer_is_takeover(self):
         self._job(STALE)
         team_kit.claim_producer(self.team, now=NOW - timedelta(days=1))
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
-        self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
+        self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
         self.assertNotIn("\n", line)
 
     def test_stale_job_and_dead_bound_producer_is_takeover(self):
         self._job(STALE)
         self._bound_producer(STALE)
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
-        self.assertTrue(line.startswith("TAKEOVER"), line)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
+        self.assertTrue(line.startswith("LAUNCHED"), line)
 
     def test_stale_job_and_no_claim_is_takeover(self):
         self._job(STALE)
-        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW).startswith("TAKEOVER"))
+        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None).startswith("LAUNCHED"))
 
     def test_quiet_but_reachable_producer_is_nudged(self):
         self._job(STALE)
         self._bound_producer(NOW - timedelta(minutes=team_kit.STALL_MINUTES + 20))
-        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW).startswith("NUDGE"))
+        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None).startswith("NUDGE"))
 
     def test_stale_job_and_fresh_producer_is_left_alone(self):
         self._job(STALE)
         self._bound_producer(NOW - timedelta(minutes=5))
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
         self.assertTrue(line.startswith("NONE WORKING"), line)
 
     def test_fresh_last_seen_keeps_a_pending_producer_alive(self):
@@ -91,12 +91,12 @@ class WatchdogTakeoverTests(unittest.TestCase):
         live = team_kit.load_producer(self.team)
         live["last_seen"] = (NOW - timedelta(minutes=5)).isoformat()
         team_state._write_private(team_kit.producer_live_path(self.team), json.dumps(live))
-        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW).startswith("NONE"))
+        self.assertTrue(team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None).startswith("NONE"))
 
     def test_fresh_job_is_none(self):
         self._job(NOW - timedelta(minutes=3))
         team_kit.claim_producer(self.team, now=NOW - timedelta(days=1))
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
         self.assertTrue(line.startswith("NONE WORKING"), line)
 
 

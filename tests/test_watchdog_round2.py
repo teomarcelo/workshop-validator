@@ -76,7 +76,7 @@ class _Base(unittest.TestCase):
             (self.team / name).unlink(missing_ok=True)
 
     def _check(self) -> str:
-        line = team_kit.watchdog_check(self.repo, self.team, NOW)
+        line = team_kit.watchdog_check(self.repo, self.team, NOW, launcher=lambda r, l: None)
         self.assertNotIn("\n", line)
         return line
 
@@ -113,7 +113,7 @@ class SessionIdPathTests(_Base):
         team_kit.claim_producer(self.team, session_id=sid, now=DAY_AGO)
         self.assertEqual(self._active(), DAY_AGO)
         line = self._check()
-        self.assertTrue(line.startswith(("TAKEOVER", "NUDGE")), line)
+        self.assertTrue(line.startswith(("LAUNCHED", "NUDGE")), line)
 
     def test_parent_escape_is_not_activity(self):
         self._assert_not_activity("../other")
@@ -131,7 +131,7 @@ class NoOpenJobTests(_Base):
     def test_no_job_quiet_producer_is_takeover_and_branch_commit_keeps_none(self):
         self._bound_producer(STALE)
         line = self._check()
-        self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+        self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
         # A fresh commit on the running step's branch is real work: left alone.
         self._clear_markers()
         self._plan([{"id": "S1", "state": "running", "branch": "automation/x"}])
@@ -142,7 +142,7 @@ class NoOpenJobTests(_Base):
 
     def test_no_job_producer_fresh_subagent_keeps_none(self):
         self._bound_producer(STALE)
-        self.assertTrue(self._check().startswith("TAKEOVER"))
+        self.assertTrue(self._check().startswith("LAUNCHED"))
         self._clear_markers()
         self._subagent("prod/subagents/agent-1.jsonl", NOW - timedelta(minutes=1))
         self.assertTrue(self._check().startswith("NONE WORKING"))
@@ -164,14 +164,14 @@ class TimeSafetyTests(_Base):
         state["heartbeat"] = STALE.replace(tzinfo=None).isoformat()
         team_state._write_private(self.root / "team" / team_state.STATE_NAME, json.dumps(state))
         line = self._check()
-        self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+        self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
 
     def test_future_last_seen_cannot_hide_a_stall(self):
         self._job(STALE)
         self._write_live({"session_id": "pending", "claimed": DAY_AGO.isoformat(),
                           "last_seen": (NOW + timedelta(days=1)).isoformat()})
         line = self._check()
-        self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+        self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
 
 
 class MalformedProducerLiveTests(_Base):
@@ -186,7 +186,7 @@ class MalformedProducerLiveTests(_Base):
                 self._job(STALE)
                 self._write_live(payload)
                 line = self._check()
-                self.assertTrue(line.startswith("TAKEOVER STALLED"), line)
+                self.assertTrue(line.startswith("LAUNCHED STALLED"), line)
         self._write_live([1, 2])
         self.assertIsNone(team_kit.load_producer(self.team))
         self.assertFalse(team_kit.producer_is_fresh(self.repo, self.team, NOW))

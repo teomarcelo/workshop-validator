@@ -312,16 +312,16 @@ class WatchdogTakeoverLimitTests(unittest.TestCase):
             team_kit.save_plan(team, plan({"id": "a", "state": "next"}), NOW)
 
             # First takeover
-            result = team_kit.watchdog_check(repo, team, NOW)
-            self.assertIn("TAKEOVER", result)
+            result = team_kit.watchdog_check(repo, team, NOW, launcher=lambda r, l: None)
+            self.assertIn("LAUNCHED", result)
 
             # Within 60 minutes: should return NONE
-            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=30))
+            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=30), launcher=lambda r, l: None)
             self.assertIn("NONE", result)
 
             # After 60 minutes: should allow another takeover
-            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61))
-            self.assertIn("TAKEOVER", result)
+            result = team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61), launcher=lambda r, l: None)
+            self.assertIn("LAUNCHED", result)
 
 
 class WriteGuardSettingsProtectionTests(unittest.TestCase):
@@ -358,7 +358,7 @@ class FakeRunner:
     def __init__(self, rules=()):
         self.calls, self.rules = [], list(rules)
 
-    def __call__(self, cmd, cwd):
+    def __call__(self, cmd, cwd, env=None):
         self.calls.append((list(cmd), Path(cwd)))
         for match, code, out in self.rules:
             if match(cmd):
@@ -602,9 +602,9 @@ class WatchdogWaitingOwnerTests(unittest.TestCase):
             team, repo = Path(tmp) / "team", Path(tmp) / "repo"
             repo.mkdir()
             team_kit.save_plan(team, plan({"id": "a", "state": "next"}), NOW)
-            results = [team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61 * i))
+            results = [team_kit.watchdog_check(repo, team, NOW + timedelta(minutes=61 * i), launcher=lambda r, l: None)
                        for i in range(4)]
-            self.assertEqual([r.split()[0] for r in results[:3]], ["TAKEOVER"] * 3)
+            self.assertEqual([r.split()[0] for r in results[:3]], ["LAUNCHED"] * 3)
             self.assertIn("WAITING owner", results[3])
             self.assertIn("3 takeovers", results[3])
 

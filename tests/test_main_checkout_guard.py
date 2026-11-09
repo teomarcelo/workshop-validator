@@ -126,10 +126,10 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             (team / "progress" / "now.json").chmod(0o600)
 
             from workshop_validator.team_kit import watchdog_check
-            result = watchdog_check(main_repo, team)
+            result = watchdog_check(main_repo, team, launcher=lambda r, l: None)
 
             # Should report TAKEOVER (not NONE) because no live producer
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
             self.assertIn("review", result)
             self.assertNotIn("NONE STALLED", result)
@@ -160,10 +160,10 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
             (team / "progress" / "now.json").chmod(0o600)
 
             from workshop_validator.team_kit import watchdog_check
-            result = watchdog_check(main_repo, team)
+            result = watchdog_check(main_repo, team, launcher=lambda r, l: None)
 
             # Should report TAKEOVER (not NONE) because no live producer
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
             self.assertIn("detached", result.lower())
             self.assertNotIn("NONE STALLED", result)
@@ -212,10 +212,10 @@ class TeamKitWatchdogMainCheckoutTests(unittest.TestCase):
 
             from workshop_validator.team_kit import watchdog_check
             now = datetime(2026, 10, 27, 10, 35, 0, tzinfo=timezone.utc)
-            result = watchdog_check(main_repo, team, now=now)
+            result = watchdog_check(main_repo, team, now=now, launcher=lambda r, l: None)
 
             # Should report TAKEOVER for real STALLED status (stale heartbeat), not blocked by untracked file
-            self.assertIn("TAKEOVER", result)
+            self.assertIn("LAUNCHED", result)
             self.assertIn("STALLED", result)
 
 

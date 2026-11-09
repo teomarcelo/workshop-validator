@@ -33,6 +33,7 @@ NUDGE_GRACE_MINUTES = 30
 PRODUCER_ALIVE_MINUTES = 120
 TAKEOVER_COOLDOWN_MINUTES = 60
 MAX_TAKEOVERS_PER_IDLE = 3
+MAX_TAKEOVERS_PER_DAY = 6
 
 
 def team_root(private_root: Path | None = None) -> Path:
@@ -371,9 +372,163 @@ def _read_time(path: Path) -> datetime | None:
         return None
 
 
-def watchdog_check(repo: Path, team: Path, now=None) -> str:
-    """Record idle-since / nudged-at / takeover markers and print the action for the watchdog task."""
+def takeover_launch(repo: Path, team: Path, now: datetime, launcher) -> tuple[str, str | None]:
+    """Launch a fresh producer under a file lock.
+
+    Returns (status, message):
+    - ("LAUNCHED", None) when a fresh producer was started
+    - ("NONE", reason) when no launch was needed or allowed
+    - ("WAITING", reason) when the owner must intervene
+
+    The launcher is called with (repo_root, log_path) and may raise OSError.
+    """
+    lock_file = team / ".takeover.lock"
+    with producer_live_lock(lock_file):
+        # Compute decision READ-ONLY first
+        fresh = producer_is_fresh(repo, team, now)
+
+        # Check main checkout is on main branch (branch and detached state only, not dirty files)
+        from . import public_safety
+        try:
+            clean_ok, clean_msg = public_safety.check_main_clean(repo, check_dirty=False)
+        except Exception as exc:
+            # Catch any Exception from check_main_clean and report as STALLED (no crash)
+            clean_ok, clean_msg = False, f"Exception checking main checkout: {exc}"
+
+        if not clean_ok:
+            # Treat as STALLED and proceed with takeover logic
+            state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
+        else:
+            state, reason = status(repo, team, now)
+
+        # Check for masked stall before deciding action
+        live = load_producer(team)
+        active = producer_active_at(repo, live, now)
+        if state == "WORKING":
+            job = load_job(team.parent)
+            has_job = bool(job and is_open(job) and job.get("heartbeat"))
+            moved = None if has_job else step_moved_at(repo, team, load_plan(team), now)
+            if masked_stall(job, active, now, moved):
+                what = "job heartbeat" if has_job else "no open job, step"
+                state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
+                                            f" ({reason})")
+
+        if state not in {"IDLE", "STALLED"}:
+            # Clear markers when WORKING
+            (team / "idle-since").unlink(missing_ok=True)
+            (team / "nudged-at").unlink(missing_ok=True)
+            (team / "takeover-at").unlink(missing_ok=True)
+            (team / "takeover-count").unlink(missing_ok=True)
+            (team / "watchdog-waiting-owner").unlink(missing_ok=True)
+            return ("NONE", f"{state}: {reason}")
+
+        # Check fresh BEFORE any cap checks: a live producer never writes WAITING
+        if fresh:
+            return ("NONE", f"producer is fresh: {reason}")
+
+        # Check rolling cap (6 launches in 24 hours)
+        launches_file = team / "takeover-launches"
+        launches = []
+        if launches_file.is_file():
+            try:
+                launches = json.loads(launches_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                launches = []
+        cutoff = now - timedelta(hours=24)
+        recent = [_aware(datetime.fromisoformat(t)) for t in launches if isinstance(t, str)]
+        recent = [t for t in recent if t > cutoff]
+        if len(recent) >= MAX_TAKEOVERS_PER_DAY:
+            waiting_msg = f"{len(recent)} launches in 24h (cap {MAX_TAKEOVERS_PER_DAY})"
+            _write_waiting_owner(team, waiting_msg, now)
+            return ("WAITING", waiting_msg)
+
+        # Act only when action is TAKEOVER AND no fresh producer
+        idle_file = team / "idle-since"
+        takeover_file = team / "takeover-at"
+        takeover_count_file = team / "takeover-count"
+
+        if not idle_file.is_file():
+            _write_private(idle_file, now.isoformat())
+            takeover_count_file.unlink(missing_ok=True)
+
+        idle_since = _read_time(idle_file)
+        nudged_at = _read_time(team / "nudged-at")
+        takeover_at = _read_time(takeover_file)
+        takeover_count = 0
+        if takeover_count_file.is_file():
+            try:
+                takeover_count = int(takeover_count_file.read_text(encoding="utf-8").strip())
+            except (ValueError, OSError):
+                takeover_count = 0
+
+        action = watchdog_action(state, live, now=now, idle_since=idle_since,
+                                nudged_at=nudged_at, session_active_at=active,
+                                takeover_at=takeover_at, takeover_count=takeover_count)
+
+        if action != "TAKEOVER":
+            return ("NONE", f"{action} {state}: {reason}")
+
+        # Write markers BEFORE launch
+        (team / "nudged-at").unlink(missing_ok=True)
+        _write_private(takeover_file, now.isoformat())
+        _write_private(takeover_count_file, str(takeover_count + 1))
+        recent.append(now)
+        _write_private(launches_file, json.dumps([t.isoformat() for t in recent], indent=2) + "\n")
+
+        log_path = team / "watchdog.log"
+        try:
+            log_fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+            os.close(log_fd)
+            launcher(repo, log_path)
+        except OSError as exc:
+            from .lessons import TEAM, record_cause
+            try:
+                record_cause(
+                    team.parent, kind=TEAM, title="watchdog: takeover-launch",
+                    cause=f"Launch failed: {exc}",
+                    never="Test the claude CLI path and permissions before deploying.",
+                    today=now.date().isoformat(),
+                )
+            except (OSError, ValueError):
+                pass
+            waiting_msg = f"Launch failed: {exc}"
+            _write_waiting_owner(team, waiting_msg, now)
+            return ("WAITING", waiting_msg)
+
+        # Log AFTER successful launch
+        from .team_state import log
+        log(team.parent, agent="watchdog", action="takeover-launch",
+            detail=f"Chain {state}, no fresh producer", now=now.isoformat())
+
+        # Clear WAITING marker on success
+        (team / "watchdog-waiting-owner").unlink(missing_ok=True)
+
+        return ("LAUNCHED", None)
+
+
+def _write_waiting_owner(team: Path, reason: str, now: datetime) -> None:
+    """Write or update the WAITING owner marker; shown by status and dashboard."""
+    marker = team / "watchdog-waiting-owner"
+    existing_reason = None
+    if marker.is_file():
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+            existing_reason = data.get("reason")
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+    if existing_reason != reason:
+        payload = {"reason": reason, "time": now.isoformat()}
+        _write_private(marker, json.dumps(payload, indent=2) + "\n")
+
+
+def watchdog_check(repo: Path, team: Path, now=None, *, launcher=None) -> str:
+    """Desktop watchdog task: NUDGE the live producer or call takeover_launch on TAKEOVER.
+
+    When launcher is None (default), returns TAKEOVER without launching; the caller must launch.
+    When launcher is a callable, calls takeover_launch to perform the launch.
+    """
     now = _utc(now)
+
     # Check main checkout is on main branch (branch and detached state only, not dirty files)
     from . import public_safety
     try:
@@ -381,11 +536,14 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
     except Exception as exc:
         # Catch any Exception from check_main_clean and report as STALLED (no crash)
         clean_ok, clean_msg = False, f"Exception checking main checkout: {exc}"
+
     if not clean_ok:
-        # Treat as STALLED and run through watchdog_action
+        # Treat as STALLED and proceed with takeover logic
         state, reason = "STALLED", f"{clean_msg}. Review in a temp worktree or with git show/diff."
     else:
         state, reason = status(repo, team, now)
+
+    # Check for masked stall before deciding action
     live = load_producer(team)
     active = producer_active_at(repo, live, now)
     if state == "WORKING":
@@ -396,36 +554,57 @@ def watchdog_check(repo: Path, team: Path, now=None) -> str:
             what = "job heartbeat" if has_job else "no open job, step"
             state, reason = "STALLED", (f"{what} and producer both quiet for {STALL_MINUTES}+ min"
                                         f" ({reason})")
+
+    if state not in {"IDLE", "STALLED"}:
+        # Clear markers when WORKING
+        (team / "idle-since").unlink(missing_ok=True)
+        (team / "nudged-at").unlink(missing_ok=True)
+        (team / "takeover-at").unlink(missing_ok=True)
+        (team / "takeover-count").unlink(missing_ok=True)
+        (team / "watchdog-waiting-owner").unlink(missing_ok=True)
+        return f"NONE {state}: {reason}"
     idle_file, nudge_file = team / "idle-since", team / "nudged-at"
     takeover_file, takeover_count_file = team / "takeover-at", team / "takeover-count"
-    if state not in {"IDLE", "STALLED"}:
-        idle_file.unlink(missing_ok=True)
-        nudge_file.unlink(missing_ok=True)
-        takeover_file.unlink(missing_ok=True)
-        takeover_count_file.unlink(missing_ok=True)
-        return f"NONE {state}: {reason}"
+
     if not idle_file.is_file():
         _write_private(idle_file, now.isoformat())
         takeover_count_file.unlink(missing_ok=True)
+
     takeover_count = 0
     if takeover_count_file.is_file():
         try:
             takeover_count = int(takeover_count_file.read_text(encoding="utf-8").strip())
         except (ValueError, OSError):
             takeover_count = 0
-    action = watchdog_action(state, live, now=now, idle_since=_read_time(idle_file),
-                             nudged_at=_read_time(nudge_file), session_active_at=active,
-                             takeover_at=_read_time(takeover_file), takeover_count=takeover_count)
+
+    idle_since = _read_time(idle_file)
+    nudged_at = _read_time(nudge_file)
+    takeover_at = _read_time(takeover_file)
+
+    action = watchdog_action(state, live, now=now, idle_since=idle_since,
+                            nudged_at=nudged_at, session_active_at=active,
+                            takeover_at=takeover_at, takeover_count=takeover_count)
+
+    session = (live or {}).get("session_id", "none")
+
     if action == "NUDGE":
         _write_private(nudge_file, now.isoformat())
+        return f"NUDGE {state}: {reason} (producer session {session})"
+
     if action == "TAKEOVER":
-        nudge_file.unlink(missing_ok=True)
-        _write_private(takeover_file, now.isoformat())
-        _write_private(takeover_count_file, str(takeover_count + 1))
+        if launcher is None:
+            return f"TAKEOVER {state}: {reason} (producer session {session})"
+        status_code, message = takeover_launch(repo, team, now, launcher)
+        if status_code == "LAUNCHED":
+            return f"LAUNCHED {state}: {reason} (was session {session})"
+        elif status_code == "WAITING":
+            return f"WAITING owner: {message}"
+        else:
+            return f"NONE {state}: {message}"
+
     if action == "NONE" and takeover_count >= MAX_TAKEOVERS_PER_IDLE:
-        session = (live or {}).get("session_id", "none")
         return f"NONE {state}: WAITING owner: {takeover_count} takeovers did not restart the chain (producer session {session})"
-    session = (live or {}).get("session_id", "none")
+
     return f"{action} {state}: {reason} (producer session {session})"
 
 
@@ -721,7 +900,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{state}: {reason}")
         return 0
     if args.cmd == "watchdog":
-        print(watchdog_check(repo, team))
+        from . import watchdog as watchdog_module
+        print(watchdog_check(repo, team, launcher=watchdog_module.launch_producer_wake))
         return 0
     if args.cmd == "prereqs":
         bad = owner_asks_not_doable(load_plan(team), repo)

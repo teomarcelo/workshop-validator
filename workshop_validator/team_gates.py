@@ -43,8 +43,8 @@ EMAIL_PATTERN = re.compile(r"[^\s@]+@[^\s@]+")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{40,}")
 
 
-def _default_runner(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
-    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace")
+def _default_runner(cmd: list[str], cwd: Path, env: dict | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, errors="replace", env=env)
 
 
 def _redact_stderr(stderr: str) -> str:
@@ -449,10 +449,12 @@ def merged_tree_gates(repo: Path, oid: str, runner=None) -> bool:
                 print("merged-tree: FAIL merge conflict with main")
                 return False
             python = repo / ".venv" / "bin" / "python"
+            # Build env with WORKSHOP_VALIDATOR_CLAUDE for the test subprocess
+            env = dict(os.environ, WORKSHOP_VALIDATOR_CLAUDE="/nonexistent/claude")
             for cmd in ([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"],
                         [str(python), "-m", "workshop_validator.public_safety"],
                         [str(python), "-m", "compileall", "-q", "workshop_validator", "tests"]):
-                result = run(cmd, tree)
+                result = run(cmd, tree, env)
                 if result.returncode:
                     print(f"merged-tree: FAIL {' '.join(cmd[1:4])}")
                     return False

@@ -188,7 +188,7 @@ class ProveCommandTests(unittest.TestCase):
     def test_merged_tree_gates_keep_the_venv_python(self):
         calls = []
 
-        def runner(cmd, cwd):
+        def runner(cmd, cwd, env=None):
             calls.append(list(cmd))
             return subprocess.CompletedProcess(cmd, 0, "", "")
 
