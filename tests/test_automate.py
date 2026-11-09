@@ -807,20 +807,15 @@ class KeepOrgTests(unittest.TestCase):
             self.assertRefusedUnchanged(root, run_dir)
 
     def test_refuses_frozen_needs_review_from_summary_judged_real(self):
-        """W-167: frozen NEEDS_REVIEW in summary.failures judged REAL must refuse."""
+        """W-167b: NEEDS_REVIEW in summary.failures judged REAL must refuse (no board)."""
         with tempfile.TemporaryDirectory() as folder:
             root, run_dir = _keep_org_root(folder, stop=None)
-            # summary.failures includes frozen NEEDS_REVIEW (W-135, W-137)
-            # Board has s3 WITHOUT freeze flag, so only summary check catches it
+            # summary.failures includes frozen NEEDS_REVIEW (W-135, W-137).
+            # No board.json, so universal REAL check refuses.
             summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
                        "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
                                     {"step_id": "s3", "status": "NEEDS_REVIEW"}]}
             (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
-            steps = [{"step_id": "s1", "status": "PASS"},
-                     {"step_id": "s2", "status": "UI_MISMATCH"},
-                     {"step_id": "s3", "status": "NEEDS_REVIEW"}]  # no freeze flag
-            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
-            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
             verdicts = {"run_id": run_dir.name, "verdicts": [
                 {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
                 {"step_id": "s3", "verdict": "REAL", "frames": "f.png"}]}
@@ -854,6 +849,84 @@ class KeepOrgTests(unittest.TestCase):
             verdicts = {"run_id": run_dir.name, "verdicts": [
                 {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
                 {"step_id": "s3", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_real_verdict_no_board(self):
+        """W-167b: ANY REAL verdict refuses, even on a step not in summary failures (no board)."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            # summary.failures has only s2; s9 has REAL verdict but is not in failures.
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s9", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_real_verdict_not_on_board(self):
+        """W-167b: ANY REAL verdict refuses, even on a step not on the board."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            # Board has s2, but s9 (not on board) has REAL verdict.
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"}]
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"},
+                {"step_id": "s9", "verdict": "REAL", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_board_with_no_steps_when_summary_has_failures(self):
+        """W-167b: board with no steps but non-empty summary.failures refuses."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            # Board exists but has no steps in any section.
+            board = {"sections": [{"tasks": [{"steps": []}]}], "unmatched": 0}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_duplicate_step_in_summary_failures(self):
+        """W-167b: duplicate step_id in summary.failures refuses as malformed."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            # s2 appears twice in failures list.
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"},
+                                    {"step_id": "s2", "status": "FUNCTIONAL_FAIL"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
+    def test_refuses_unmatched_as_string(self):
+        """W-167b: board.json with unmatched as string "2" refuses as malformed."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"}]
+            # unmatched is string "2" instead of int.
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": "2"}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
             (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
             self.assertRefusedUnchanged(root, run_dir)
 

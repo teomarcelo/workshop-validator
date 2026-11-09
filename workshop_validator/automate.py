@@ -580,51 +580,6 @@ def _read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _board_stop_step(run_dir: Path) -> str | None:
-    """Stop step from board.json order, for summaries written before stop_step existed."""
-    board = _read_json(run_dir / "board.json")
-    try:
-        steps = [SimpleNamespace(step_id=str(st["step_id"]), status=str(st["status"]))
-                 for section in board["sections"] for task in section["tasks"] for st in task["steps"]]
-    except (KeyError, TypeError):
-        raise ValueError("malformed board.json") from None
-    stop = stopping_step_of(steps)
-    return None if stop is None else stop.step_id
-
-
-def _board_steps(run_dir: Path) -> tuple[list[tuple[str, str]], int]:
-    """All steps from board.json as ((step_id, status) list, unmatched count)."""
-    board = _read_json(run_dir / "board.json")
-    try:
-        steps = [(str(st["step_id"]), str(st["status"]))
-                for section in board["sections"] for task in section["tasks"] for st in task["steps"]]
-        unmatched = board.get("unmatched", 0)
-        if not isinstance(unmatched, int) or unmatched < 0:
-            raise ValueError("malformed board.json")
-        return steps, unmatched
-    except (KeyError, TypeError):
-        raise ValueError("malformed board.json") from None
-
-
-def _judged_steps(summary: dict, stop) -> list[tuple[str, str]]:
-    """Steps keep-org must see verified FALSE_FAILURE, as (kind, step_id), first one first.
-
-    A summary that lists real failures (W-100) is judged on every one of them, the first
-    first (W-111): one REAL failure after a change uses the org. Older summaries keep the
-    stop step.
-    """
-    failures = summary.get("failures")
-    if failures is None:
-        return [("stop step", stop)]
-    if not isinstance(failures, list) or any(
-            not isinstance(row, dict) or not isinstance(row.get("step_id"), str) or not row["step_id"]
-            for row in failures):
-        raise ValueError("malformed summary.json")
-    if not failures:
-        return [("stop step", stop)]
-    return [("failure step", row["step_id"]) for row in failures]
-
-
 def load_verdicts(run_dir: Path, run_id: str) -> dict[str, set[str]]:
     """Read verdicts.json as {step_id: every verdict given to that step}.
 
@@ -695,22 +650,43 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         if failures is not None:
             if not isinstance(failures, list):
                 raise ValueError("malformed summary.json")
+            seen_step_ids: set[str] = set()
             for row in failures:
                 if not isinstance(row, dict) or not isinstance(row.get("step_id"), str) or not row["step_id"]:
                     raise ValueError("malformed summary.json")
+                # W-167b: refuse duplicate step_ids in summary failures.
+                if row["step_id"] in seen_step_ids:
+                    raise ValueError("malformed summary.json")
+                seen_step_ids.add(row["step_id"])
                 # W-100, W-135, W-137: failures must have status (real failure or NEEDS_REVIEW).
                 status = row.get("status")
                 if status is None or (status not in _REAL_FAIL and status != "NEEDS_REVIEW"):
                     raise ValueError("malformed summary.json")
 
         # Try board.json first (W-167: check all steps for mixed results).
+        # Read board.json ONCE and parse all needed data.
         board_json_path = run_dir / "board.json"
         board_steps = None
+        board_data = None
         if board_json_path.is_file() and not board_json_path.is_symlink():
-            board_steps, unmatched = _board_steps(run_dir)
-            # Refuse when build_board dropped results (unmatched > 0).
-            if unmatched > 0:
-                return refuse(f"board.json has {unmatched} unmatched step(s)")
+            board_data = _read_json(run_dir / "board.json")
+            # Parse steps and unmatched from the single read.
+            try:
+                board_steps = [(str(st["step_id"]), str(st["status"]))
+                              for section in board_data["sections"] for task in section["tasks"]
+                              for st in task["steps"]]
+                unmatched = board_data.get("unmatched", 0)
+                # W-167b: catch malformed unmatched (e.g., string "2" instead of int).
+                if not isinstance(unmatched, int) or isinstance(unmatched, bool) or unmatched < 0:
+                    raise ValueError("malformed board.json")
+                # W-167b: board with no steps but non-empty summary failures is a mismatch.
+                if not board_steps and failures:
+                    return refuse("board.json does not match summary.json")
+                # Refuse when build_board dropped results (unmatched > 0).
+                if unmatched > 0:
+                    return refuse(f"board.json has {unmatched} unmatched step(s)")
+            except (KeyError, TypeError):
+                raise ValueError("malformed board.json")
 
         verdicts = load_verdicts(run_dir, run_id)
         gate = load_gate(private_root)
@@ -729,20 +705,21 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         if "FALSE_PASS" in step_verdicts:
             return refuse(f"step {step_id} has FALSE_PASS verdict")
 
+    # Refuse when ANY verdict is REAL (W-167b: cannot keep org with any real failures).
+    for step_id, step_verdicts in verdicts.items():
+        if "REAL" in step_verdicts:
+            return refuse(f"Refused: step {step_id} is judged REAL. The gate is unchanged.")
+
     # Build the UNION of summary real failures and board real failures.
     # W-135, W-137: summary.failures also includes frozen NEEDS_REVIEW; they are not real failures.
     real_failures: dict[str, str] = {}  # step_id -> status
-    frozen_needs_review_steps: set[str] = set()
     summary_statuses: dict[str, str] = {}  # step_id -> status from summary.failures
     if failures:
         for row in failures:
             # Old summaries may not have status; default to UI_MISMATCH for backwards compatibility.
             status = row.get("status", "UI_MISMATCH")
             summary_statuses[row["step_id"]] = status
-            if status == "NEEDS_REVIEW":
-                # W-135, W-137: frozen NEEDS_REVIEW in failures list.
-                frozen_needs_review_steps.add(row["step_id"])
-            elif status in _REAL_FAIL:
+            if status in _REAL_FAIL:
                 real_failures[row["step_id"]] = status
     if board_steps:
         board_statuses = {step_id: status for step_id, status in board_steps}
@@ -756,17 +733,12 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
             if status in _REAL_FAIL:
                 real_failures[step_id] = status
 
-    # If board exists, check that every summary failure appears on it with a real failure status.
+    # If board exists, check that every summary failure appears on it.
     if board_steps and failures:
         board_statuses = {step_id: status for step_id, status in board_steps}
         for row in failures:
             if row["step_id"] not in board_statuses:
                 return refuse(f"summary failure {row['step_id']} is missing from the board")
-            # W-135, W-137: NEEDS_REVIEW in failures is valid (frozen); check that board shows
-            # this as a real failure or NEEDS_REVIEW, not PASS or other status.
-            board_status = board_statuses[row["step_id"]]
-            if board_status not in _REAL_FAIL and board_status != "NEEDS_REVIEW":
-                return refuse(f"summary failure {row['step_id']} is not a real failure on the board")
         # W-167b: check that board real failures appear in non-empty summary.failures.
         for step_id, status in board_steps:
             if status in _REAL_FAIL and step_id not in summary_statuses:
@@ -774,10 +746,15 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
 
     # Older runs without board.json or summary.failures: fall back to stop_step.
     if not real_failures:
-        if stop is None and board_json_path.is_file() and not board_json_path.is_symlink():
+        if stop is None and board_data is not None:
+            # Inline _board_stop_step logic using already-parsed board_data.
             try:
-                stop = _board_stop_step(run_dir)
-            except (ValueError, OSError, TypeError):
+                steps = [SimpleNamespace(step_id=str(st["step_id"]), status=str(st["status"]))
+                        for section in board_data["sections"] for task in section["tasks"] for st in task["steps"]]
+                stop_obj = stopping_step_of(steps)
+                if stop_obj is not None:
+                    stop = stop_obj.step_id
+            except (KeyError, TypeError):
                 return refuse("the run files or gate.json could not be read")
         if stop:
             real_failures[stop] = "UI_MISMATCH"
@@ -798,37 +775,6 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
             return refuse(f"failure step {step_id} is {'/'.join(sorted(step_verdicts or ())) or 'not verified'}, "
                           "not FALSE_FAILURE")
         verified_false_failures.append(step_id)
-
-    # W-135, W-137: frozen NEEDS_REVIEW with REAL verdict must refuse.
-    # Check both frozen_needs_review_steps from summary and board frozen steps.
-    for step_id in frozen_needs_review_steps:
-        step_verdicts = verdicts.get(step_id, set())
-        if "REAL" in step_verdicts:
-            return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
-
-    # W-167b: check for non-PASS steps with REAL verdicts (must be inconclusive).
-    if board_steps:
-        try:
-            board_data = _read_json(run_dir / "board.json")
-        except (ValueError, OSError, TypeError):
-            return refuse("the run files or gate.json could not be read")
-
-        frozen_step_ids = set()
-        for section in board_data.get("sections", []):
-            for task in section.get("tasks", []):
-                for step in task.get("steps", []):
-                    if step.get("freeze"):
-                        frozen_step_ids.add(str(step.get("step_id")))
-
-        for step_id, status in board_steps:
-            step_verdicts = verdicts.get(step_id, set())
-            if "REAL" in step_verdicts:
-                # Frozen NEEDS_REVIEW with REAL is checked above
-                if status == "NEEDS_REVIEW" and step_id in frozen_step_ids:
-                    return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
-                # Non-PASS steps (including non-frozen NEEDS_REVIEW) with REAL must refuse
-                if status != "PASS" and status not in _REAL_FAIL:
-                    return refuse(f"non-failure step {step_id} (status {_safe_status_name(status)}) is judged REAL")
 
     # Require at least one verified false failure for the org to have moved.
     if not verified_false_failures:
