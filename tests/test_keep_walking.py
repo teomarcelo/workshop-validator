@@ -374,7 +374,7 @@ class KeepOrgTests(unittest.TestCase):
                                        verdicts=[("s1", "FALSE_FAILURE"), ("s4", "REAL")])
             code, out = self.keep(root, run_dir)
             self.assertEqual(code, 2)
-            self.assertIn("failure step s4 is REAL", out)
+            self.assertIn("step s4 is judged REAL", out)
 
     def test_empty_failures_judge_the_stop_step(self):
         with tempfile.TemporaryDirectory() as folder:
