@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from workshop_validator import team_gates
 
@@ -144,6 +145,49 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
                                     f"Variable not in env for command: {call['cmd']}")
             finally:
                 pass
+
+
+class TestDefaultRunner(unittest.TestCase):
+    """Test that _default_runner passes env to subprocess.run."""
+
+    @patch('subprocess.run')
+    def test_default_runner_passes_env_to_subprocess(self, mock_run):
+        """_default_runner must pass env parameter to subprocess.run."""
+        mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
+
+        test_env = {"TEST_VAR": "test_value"}
+        cmd = ["echo", "test"]
+        cwd = Path("/tmp")
+
+        # Call with env
+        team_gates._default_runner(cmd, cwd, env=test_env)
+
+        # Verify subprocess.run was called with env
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args.kwargs
+        self.assertIn('env', call_kwargs,
+                     "env parameter not passed to subprocess.run")
+        self.assertEqual(call_kwargs['env'], test_env,
+                        "env parameter not passed correctly to subprocess.run")
+
+    @patch('subprocess.run')
+    def test_default_runner_passes_none_env_to_subprocess(self, mock_run):
+        """_default_runner must pass env=None when no env is provided."""
+        mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
+
+        cmd = ["echo", "test"]
+        cwd = Path("/tmp")
+
+        # Call without env (should default to None)
+        team_gates._default_runner(cmd, cwd)
+
+        # Verify subprocess.run was called with env=None
+        mock_run.assert_called_once()
+        call_kwargs = mock_run.call_args.kwargs
+        self.assertIn('env', call_kwargs,
+                     "env parameter not passed to subprocess.run")
+        self.assertIsNone(call_kwargs['env'],
+                         "env should be None when not provided")
 
 
 if __name__ == "__main__":
