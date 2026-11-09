@@ -928,7 +928,12 @@ class KeepOrgTests(unittest.TestCase):
             verdicts = {"run_id": run_dir.name, "verdicts": [
                 {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
             (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
-            self.assertRefusedUnchanged(root, run_dir)
+            gate_before = Path(root, "gate.json").read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = self._keep(root, run_dir)
+            self.assertEqual(result, 2)
+            self.assertEqual(Path(root, "gate.json").read_bytes(), gate_before)
+            self.assertIn("Refused: malformed board.json", out.getvalue())
 
     def test_refuses_unmatched_as_bool(self):
         """W-167b: board.json with unmatched as bool True refuses as malformed."""
@@ -945,7 +950,12 @@ class KeepOrgTests(unittest.TestCase):
             verdicts = {"run_id": run_dir.name, "verdicts": [
                 {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
             (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
-            self.assertRefusedUnchanged(root, run_dir)
+            gate_before = Path(root, "gate.json").read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = self._keep(root, run_dir)
+            self.assertEqual(result, 2)
+            self.assertEqual(Path(root, "gate.json").read_bytes(), gate_before)
+            self.assertIn("Refused: malformed board.json", out.getvalue())
 
     def test_allows_w167_mixed_case(self):
         """W-167 mixed case: NEEDS_REVIEW (UNCLEAR) + multiple FALSE_FAILURE is allowed."""
