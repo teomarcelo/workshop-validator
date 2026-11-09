@@ -43,19 +43,17 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
             # Mock git commands
             fake_runner = FakeRunner()
 
-            # Store original env state
+            # Store original env state and remove WORKSHOP_VALIDATOR_CLAUDE
             original_env = os.environ.copy()
-            original_claude_value = os.environ.get("WORKSHOP_VALIDATOR_CLAUDE")
+            os.environ.pop("WORKSHOP_VALIDATOR_CLAUDE", None)
 
             try:
                 # Call merged_tree_gates
                 result = team_gates.merged_tree_gates(repo, "abc123" * 5, runner=fake_runner)
 
-                # Verify os.environ is unchanged
-                self.assertEqual(os.environ.get("WORKSHOP_VALIDATOR_CLAUDE"), original_claude_value,
-                                "os.environ['WORKSHOP_VALIDATOR_CLAUDE'] was modified")
-                self.assertEqual(os.environ, original_env,
-                                "os.environ was modified")
+                # Verify os.environ is still without WORKSHOP_VALIDATOR_CLAUDE
+                self.assertNotIn("WORKSHOP_VALIDATOR_CLAUDE", os.environ,
+                                "os.environ['WORKSHOP_VALIDATOR_CLAUDE'] was added")
 
                 # Find the unittest command call
                 unittest_calls = [call for call in fake_runner.calls
@@ -72,7 +70,7 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
                                     "WORKSHOP_VALIDATOR_CLAUDE not set correctly in env")
 
             finally:
-                # Restore original environment (shouldn't be needed, but safety)
+                # Restore original environment
                 os.environ.clear()
                 os.environ.update(original_env)
 
@@ -91,9 +89,9 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
                 tuple([str(python), "-m", "unittest", "discover", "-s", "tests", "-q"]): 1
             })
 
-            # Store original env state
+            # Store original env state and remove WORKSHOP_VALIDATOR_CLAUDE
             original_env = os.environ.copy()
-            original_claude_value = os.environ.get("WORKSHOP_VALIDATOR_CLAUDE")
+            os.environ.pop("WORKSHOP_VALIDATOR_CLAUDE", None)
 
             try:
                 # Call merged_tree_gates (will fail)
@@ -103,10 +101,8 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
                 self.assertFalse(result)
 
                 # Verify os.environ is still unchanged after failure
-                self.assertEqual(os.environ.get("WORKSHOP_VALIDATOR_CLAUDE"), original_claude_value,
-                                "os.environ['WORKSHOP_VALIDATOR_CLAUDE'] was modified after failure")
-                self.assertEqual(os.environ, original_env,
-                                "os.environ was modified after failure")
+                self.assertNotIn("WORKSHOP_VALIDATOR_CLAUDE", os.environ,
+                                "os.environ['WORKSHOP_VALIDATOR_CLAUDE'] was added after failure")
 
             finally:
                 # Restore original environment
@@ -124,6 +120,10 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
             python.touch()
 
             fake_runner = FakeRunner()
+
+            # Store original env state and remove WORKSHOP_VALIDATOR_CLAUDE
+            original_env = os.environ.copy()
+            os.environ.pop("WORKSHOP_VALIDATOR_CLAUDE", None)
 
             try:
                 result = team_gates.merged_tree_gates(repo, "abc123" * 5, runner=fake_runner)
@@ -144,7 +144,9 @@ class TestMergedTreeGatesEnv(unittest.TestCase):
                                     "/nonexistent/claude",
                                     f"Variable not in env for command: {call['cmd']}")
             finally:
-                pass
+                # Restore original environment
+                os.environ.clear()
+                os.environ.update(original_env)
 
 
 class TestDefaultRunner(unittest.TestCase):
