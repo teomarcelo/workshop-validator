@@ -1,3 +1,4 @@
+import os
 import re
 import unittest
 from unittest.mock import patch
@@ -4208,6 +4209,204 @@ class UnrelatedPopupCloseTests(unittest.TestCase):
         self.assertEqual(self.clicks(page), [("click", "link", "Accounts")])
         self.assertEqual(outcome.statuses["open-accounts"], "NOT_RUN")
         self.assertIn("exceeded its time limit", outcome.notes["open-accounts"])
+
+
+@unittest.skipUnless(os.environ.get("RUN_BROWSER_SMOKE") == "1", "Browser smoke only")
+class PanelEvidenceTests(unittest.TestCase):
+    """Real browser tests for complementary/region panel click evidence."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from playwright.sync_api import sync_playwright
+            cls.pw = sync_playwright().start()
+            executable = os.environ.get('CHROMIUM_PATH') or None
+            cls.browser = cls.pw.chromium.launch(headless=True, executable_path=executable)
+        except ImportError:
+            cls.browser = None
+
+    @classmethod
+    def tearDownClass(cls):
+        if cls.browser:
+            cls.browser.close()
+            cls.pw.stop()
+
+    def setUp(self):
+        if not self.browser:
+            self.skipTest("Playwright not available")
+        self.page = self.browser.new_page()
+
+    def tearDown(self):
+        if self.page:
+            self.page.close()
+
+    def test_complementary_panel_with_matching_heading_is_pass(self):
+        """Click button, complementary panel appears with matching heading → PASS"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel = document.createElement('div');
+            panel.setAttribute('role', 'complementary');
+            panel.setAttribute('aria-label', 'Field Information');
+            panel.innerHTML = '<h2>Account Name</h2><p>Type: Text</p>';
+            document.body.appendChild(panel);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "PASS")
+        # Evidence is in evidence_ids, not in the note
+        self.assertTrue(any("panel" in eid for eid in result.evidence_ids))
+
+    def test_panel_heading_not_matching_name_is_needs_review(self):
+        """Click button, panel heading doesn't match → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel = document.createElement('div');
+            panel.setAttribute('role', 'complementary');
+            panel.setAttribute('aria-label', 'Field Information');
+            panel.innerHTML = '<h2>Details</h2><p>Type: Text</p>';
+            document.body.appendChild(panel);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_panel_already_there_before_click_is_needs_review(self):
+        """Panel with matching heading exists before click → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <div role="complementary" aria-label="Field Information">
+            <h2>Account Name</h2>
+            <p>Type: Text</p>
+        </div>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_panel_heading_substring_match_is_needs_review(self):
+        """Click Name, panel heading 'Account Name' (contains but not exact) → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel = document.createElement('div');
+            panel.setAttribute('role', 'complementary');
+            panel.setAttribute('aria-label', 'Field Information');
+            panel.innerHTML = '<h2>Account Name</h2><p>Type: Text</p>';
+            document.body.appendChild(panel);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Name")
+        result = guide_walk._act_click(state, step_obj, "Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_multiple_matching_panels_is_needs_review(self):
+        """Two panels with matching heading → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel1 = document.createElement('div');
+            panel1.setAttribute('role', 'complementary');
+            panel1.setAttribute('aria-label', 'Panel 1');
+            panel1.innerHTML = '<h2>Account Name</h2>';
+            document.body.appendChild(panel1);
+
+            const panel2 = document.createElement('div');
+            panel2.setAttribute('role', 'complementary');
+            panel2.setAttribute('aria-label', 'Panel 2');
+            panel2.innerHTML = '<h2>Account Name</h2>';
+            document.body.appendChild(panel2);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_plain_div_with_heading_is_needs_review(self):
+        """Plain div (not complementary/region) with heading → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const div = document.createElement('div');
+            div.innerHTML = '<h2>Account Name</h2>';
+            document.body.appendChild(div);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_region_panel_with_matching_heading_is_pass(self):
+        """Region role also counts as valid panel"""
+        html = """
+        <button id="field-btn">Stage</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel = document.createElement('div');
+            panel.setAttribute('role', 'region');
+            panel.setAttribute('aria-label', 'Properties');
+            panel.innerHTML = '<h2>Stage</h2><p>Type: Picklist</p>';
+            document.body.appendChild(panel);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Stage")
+        result = guide_walk._act_click(state, step_obj, "Stage")
+
+        self.assertEqual(result.status, "PASS")
+        self.assertTrue(any("panel" in eid for eid in result.evidence_ids))
 
 
 if __name__ == "__main__":
