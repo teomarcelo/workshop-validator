@@ -930,6 +930,23 @@ class KeepOrgTests(unittest.TestCase):
             (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
             self.assertRefusedUnchanged(root, run_dir)
 
+    def test_refuses_unmatched_as_bool(self):
+        """W-167b: board.json with unmatched as bool True refuses as malformed."""
+        with tempfile.TemporaryDirectory() as folder:
+            root, run_dir = _keep_org_root(folder, stop=None)
+            summary = {"org": 2, "orgs": 3, "outcome": "failed", "run_dir": str(run_dir),
+                       "failures": [{"step_id": "s2", "status": "UI_MISMATCH"}]}
+            (run_dir / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+            steps = [{"step_id": "s1", "status": "PASS"},
+                     {"step_id": "s2", "status": "UI_MISMATCH"}]
+            # unmatched is True (bool is a subclass of int in Python).
+            board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": True}
+            (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
+            verdicts = {"run_id": run_dir.name, "verdicts": [
+                {"step_id": "s2", "verdict": "FALSE_FAILURE", "frames": "f.png"}]}
+            (run_dir / "verdicts.json").write_text(json.dumps(verdicts), encoding="utf-8")
+            self.assertRefusedUnchanged(root, run_dir)
+
     def test_allows_w167_mixed_case(self):
         """W-167 mixed case: NEEDS_REVIEW (UNCLEAR) + multiple FALSE_FAILURE is allowed."""
         with tempfile.TemporaryDirectory() as folder:
