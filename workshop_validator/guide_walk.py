@@ -156,6 +156,8 @@ class WalkOutcome:
     guide_notes: dict[str, str] = field(default_factory=dict)
     # W-137: which steps were frozen (for filtering summary failures).
     freezes: dict[str, bool] = field(default_factory=dict)
+    # Per-step video timeline: {step_id: (video_basename, t_start, t_end, snapshot)} relative to page creation.
+    timeline: dict[str, tuple[str | None, float | None, float | None, str]] = field(default_factory=dict)
 
 
 def norm(value: str | None) -> str:
@@ -7801,6 +7803,7 @@ def walk_guide(
     heartbeat: Callable[[str, int, int, str, str, float], None] | None = None,
     snapshot_dir=None,
     snapshot_leaks: Callable[[str], bool] | None = None,
+    page_creation_times: dict | None = None,
 ) -> WalkOutcome:
     """Run steps in printed order.
 
@@ -7850,6 +7853,8 @@ def walk_guide(
     guide_notes: dict[str, str] = {}
     freezes: dict[str, bool] = {}
     executed: list[str] = []
+    timeline: dict[str, tuple[str | None, float | None, float | None]] = {}
+    _page_creation_times = page_creation_times or {}
     total = len(steps)
     if progress is not None:
         progress("running", f"Running all {total} guide steps in printed order.")
@@ -7993,6 +7998,30 @@ def walk_guide(
             freezes[step.step_id] = True
         if video_origin is not None:
             timestamps[step.step_id] = (t_start - video_origin, t_end - video_origin)
+        # Record per-page video timeline
+        video_basename = None
+        t_start_offset = None
+        t_end_offset = None
+        if state.page is not None:
+            try:
+                video = getattr(state.page, "video", None)
+                if callable(video):
+                    video = video()
+                if video is not None:
+                    path_of = getattr(video, "path", None)
+                    if callable(path_of):
+                        video_path = path_of()
+                        if video_path:
+                            from pathlib import Path
+                            video_basename = Path(video_path).name
+                            page_creation = _page_creation_times.get(video_path)
+                            if page_creation is not None:
+                                t_start_offset = t_start - page_creation
+                                t_end_offset = t_end - page_creation
+            except Exception:
+                pass
+        snapshot_path = snapshots.get(step.step_id, "")
+        timeline[step.step_id] = (video_basename, t_start_offset, t_end_offset, snapshot_path)
         executed.append(step.step_id)
         if heartbeat is not None:
             heartbeat("", index, total, step.step_id, result.status, t_end)
@@ -8029,5 +8058,5 @@ def walk_guide(
                 else:
                     blocked = "The org session was blocked, so the following steps were not run."
     return WalkOutcome(
-        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes,
+        statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes, timeline,
     )
