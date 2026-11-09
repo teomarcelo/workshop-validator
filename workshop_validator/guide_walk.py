@@ -2975,10 +2975,52 @@ def _act_own(state: WalkState, step: GuideStep, label: str) -> CheckResult | Non
     return CheckResult("NOT_RUN", OWN_VALUE_OPTIONAL.format(label=label), ())
 
 
+def _strip_quotes(name: str) -> str:
+    """Strip straight and curly quotes from the name."""
+    return name.strip('"\'""''')
+
+
+def _open_flow_name(text: str) -> str:
+    """Parse 'Open the flow <name>' and return the name, or empty."""
+    low = text.lower()
+    # Match "open the flow <name>" (case-insensitive verb only)
+    # The pattern must not match "Open the Flow Builder" or names ending in another word
+    match = re.match(r'^open\s+the\s+flow\s+(.+)', text, re.IGNORECASE)
+    if not match:
+        return ""
+    name = match.group(1).rstrip('.').strip()
+    # Strip quotes from the name
+    name = _strip_quotes(name)
+    # Don't match "Open the Flow Builder" (no name after "builder")
+    if not name or name.lower() == "builder":
+        return ""
+    return name
+
+
+def _confirm_flow_name(text: str) -> str:
+    """Parse 'Confirm that flow <name> is activated' and return the name, or empty."""
+    # Match "confirm that flow <name> is activated" (case-insensitive)
+    match = re.match(r'^confirm\s+that\s+flow\s+(.+?)\s+is\s+activated', text, re.IGNORECASE)
+    if not match:
+        return ""
+    name = match.group(1).rstrip('.').strip()
+    # Strip quotes from the name
+    name = _strip_quotes(name)
+    return name
+
+
 def _intent_for(text: str) -> _Intent:
     toggle = _toggle_name(text)
     if toggle:
         return _Intent("toggle", toggle)
+    # "Open the flow <name>" (case-insensitive verb only)
+    flow_name = _open_flow_name(text)
+    if flow_name:
+        return _Intent("open_flow", flow_name)
+    # "Confirm that flow <name> is activated"
+    confirm_flow = _confirm_flow_name(text)
+    if confirm_flow:
+        return _Intent("confirm_flow_active", confirm_flow)
     referred = _referred_click(text)
     if referred:
         return _Intent("click", referred)
@@ -7271,9 +7313,145 @@ def _act_fill(state: WalkState, step: GuideStep, label: str, value: str) -> Chec
     return passed(step, "filled", f"{label} is {value}.")
 
 
+def _flows_list_row(state: WalkState, name: str, time_left: float) -> tuple[object | None, str]:
+    """Find the named flow's row in the Setup Flows list.
+
+    Returns (row_locator, "") when found, or (None, reason) on miss.
+    Reasons: "not-loaded", "none", "several".
+    """
+    origin = _origin(state.page)
+    if not origin:
+        return None, "not-loaded"
+    # Navigate to the Flows list page
+    try:
+        state.page.goto(
+            origin + "/lightning/setup/Flows/home",
+            wait_until="domcontentloaded",
+            timeout=45000,
+        )
+    except Exception:
+        return None, "not-loaded"
+    # Poll for the grid to load (up to time_left)
+    start = state.clock()
+    while True:
+        try:
+            # Look for a grid element with a Flow Label column
+            roots = _roots(state.page)
+            for root in roots:
+                # Find the grid element
+                grid = root.locator('[role="grid"]')
+                if grid.count() == 0:
+                    continue
+                # Check if it has a Flow Label header
+                header = grid.locator('th:has-text("Flow Label")')
+                if header.count() == 0:
+                    continue
+                # Find rows with the exact flow label
+                # Look only in the grid's rows
+                rows = grid.locator('tr')
+                matching_rows = []
+                for i in range(rows.count()):
+                    row = rows.nth(i)
+                    # Find the cell in the Flow Label column
+                    label_cells = row.locator('[data-label="Flow Label"], td:has-text("' + name + '")')
+                    for j in range(label_cells.count()):
+                        cell = label_cells.nth(j)
+                        try:
+                            if not cell.is_visible():
+                                continue
+                            cell_text = cell.inner_text()
+                            if cell_text.strip() == name:
+                                matching_rows.append(row)
+                                break
+                        except Exception:
+                            continue
+                if len(matching_rows) == 1:
+                    return matching_rows[0], ""
+                elif len(matching_rows) > 1:
+                    return None, "several"
+        except Exception:
+            pass
+        # Check if we've run out of time
+        elapsed = state.clock() - start
+        if elapsed >= time_left:
+            return None, "none"
+        # Poll again
+        _sleep(state, min(2.0, time_left - elapsed))
+
+
+def _act_open_flow(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
+    """Open a named flow from the Flows list. Always returns NEEDS_REVIEW (frozen or not)."""
+    # Record which pages show a builder before clicking
+    builder_pages_before = set()
+    for candidate in _browser_pages(state.page):
+        if _flow_builder_open(candidate):
+            builder_pages_before.add(id(candidate))
+
+    # Find the row
+    time_left = state.page_wait_s
+    row, reason = _flows_list_row(state, name, time_left)
+
+    if reason:
+        note = {
+            "not-loaded": "The Flows list did not load.",
+            "none": f"Flow {name} was not found in the Flows list.",
+            "several": f"Found multiple flows named {name} in the Flows list.",
+        }[reason]
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+
+    # Click the row's label link
+    try:
+        # Find the link within the row
+        link = row.locator('a[href*="/builder"]').first
+        if link.count() == 0:
+            return CheckResult("NEEDS_REVIEW", f"Flow {name} row has no builder link.", (), freeze=True)
+        link.click(timeout=8000)
+    except Exception as e:
+        return CheckResult("NEEDS_REVIEW", f"Could not click {name} row: {e}", (), freeze=True)
+
+    # Wait for a new builder page to appear (one that wasn't a builder before)
+    start = state.clock()
+    while state.clock() - start < state.page_wait_s:
+        for candidate in _browser_pages(state.page):
+            if id(candidate) not in builder_pages_before and _flow_builder_open(candidate):
+                # Found a new builder page
+                state.page = candidate
+                note = (f"Opened {name} from its Flows list row. The validator does not yet prove which flow "
+                        "Flow Builder shows; step-verifier judges this step.")
+                return CheckResult("NEEDS_REVIEW", note, (), freeze=False)
+        _sleep(state, 0.5)
+
+    # Timeout: no new builder page appeared
+    return CheckResult("NEEDS_REVIEW", f"Clicked {name} row, but no Flow Builder page appeared.", (), freeze=True)
+
+
+def _act_confirm_flow_active(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
+    """Confirm a flow is activated. Never clicks anything. Always returns NEEDS_REVIEW (frozen or not)."""
+    # Find the row
+    time_left = state.page_wait_s
+    row, reason = _flows_list_row(state, name, time_left)
+
+    if reason:
+        note = {
+            "not-loaded": "The Flows list did not load.",
+            "none": f"Flow {name} was not found in the Flows list.",
+            "several": f"Found multiple flows named {name} in the Flows list.",
+        }[reason]
+        return CheckResult("NEEDS_REVIEW", note, (), freeze=True)
+
+    # Found the row, return NEEDS_REVIEW not frozen
+    note = (f"Found {name} in the Flows list. The validator does not yet read the Active column; "
+            "step-verifier judges this step.")
+    return CheckResult("NEEDS_REVIEW", note, (), freeze=False)
+
+
 def _try_named(state: WalkState, step: GuideStep, intent: _Intent, name: str, opened: dict) -> CheckResult | None:
     if intent.kind == "toggle":
         return _act_toggle(state, step, name)
+    if intent.kind == "open_flow":
+        return _act_open_flow(state, step, intent.target)
+    if intent.kind == "confirm_flow_active":
+        return _act_confirm_flow_active(state, step, intent.target)
     if intent.kind == "click":
         return _act_click(state, step, name)
     if intent.kind == "observe":
