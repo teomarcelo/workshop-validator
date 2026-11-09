@@ -733,23 +733,27 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
     # W-135, W-137: summary.failures also includes frozen NEEDS_REVIEW; they are not real failures.
     real_failures: dict[str, str] = {}  # step_id -> status
     frozen_needs_review_steps: set[str] = set()
+    summary_statuses: dict[str, str] = {}  # step_id -> status from summary.failures
     if failures:
         for row in failures:
             # Old summaries may not have status; default to UI_MISMATCH for backwards compatibility.
             status = row.get("status", "UI_MISMATCH")
+            summary_statuses[row["step_id"]] = status
             if status == "NEEDS_REVIEW":
                 # W-135, W-137: frozen NEEDS_REVIEW in failures list.
                 frozen_needs_review_steps.add(row["step_id"])
             elif status in _REAL_FAIL:
                 real_failures[row["step_id"]] = status
     if board_steps:
+        board_statuses = {step_id: status for step_id, status in board_steps}
+        # W-167b: check for status disagreement on ANY step, not just real failures.
+        for step_id, summary_status in summary_statuses.items():
+            if step_id in board_statuses and board_statuses[step_id] != summary_status:
+                return refuse(f"step {step_id} status disagreement: summary "
+                              f"{_safe_status_name(summary_status)} vs board "
+                              f"{_safe_status_name(board_statuses[step_id])}")
         for step_id, status in board_steps:
             if status in _REAL_FAIL:
-                # Check for status disagreement between summary and board.
-                if step_id in real_failures and real_failures[step_id] != status:
-                    return refuse(f"step {step_id} status disagreement: summary "
-                                  f"{_safe_status_name(real_failures[step_id])} vs board "
-                                  f"{_safe_status_name(status)}")
                 real_failures[step_id] = status
 
     # If board exists, check that every summary failure appears on it with a real failure status.
@@ -763,11 +767,18 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
             board_status = board_statuses[row["step_id"]]
             if board_status not in _REAL_FAIL and board_status != "NEEDS_REVIEW":
                 return refuse(f"summary failure {row['step_id']} is not a real failure on the board")
+        # W-167b: check that board real failures appear in non-empty summary.failures.
+        for step_id, status in board_steps:
+            if status in _REAL_FAIL and step_id not in summary_statuses:
+                return refuse(f"board failure {step_id} is missing from summary.failures")
 
     # Older runs without board.json or summary.failures: fall back to stop_step.
     if not real_failures:
         if stop is None and board_json_path.is_file() and not board_json_path.is_symlink():
-            stop = _board_stop_step(run_dir)
+            try:
+                stop = _board_stop_step(run_dir)
+            except (ValueError, OSError, TypeError):
+                return refuse("the run files or gate.json could not be read")
         if stop:
             real_failures[stop] = "UI_MISMATCH"
 
@@ -794,18 +805,30 @@ def _reset_gate_keep_org(private_root: Path, run_dir: Path) -> int:
         step_verdicts = verdicts.get(step_id, set())
         if "REAL" in step_verdicts:
             return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
+
+    # W-167b: check for non-PASS steps with REAL verdicts (must be inconclusive).
     if board_steps:
+        try:
+            board_data = _read_json(run_dir / "board.json")
+        except (ValueError, OSError, TypeError):
+            return refuse("the run files or gate.json could not be read")
+
+        frozen_step_ids = set()
+        for section in board_data.get("sections", []):
+            for task in section.get("tasks", []):
+                for step in task.get("steps", []):
+                    if step.get("freeze"):
+                        frozen_step_ids.add(str(step.get("step_id")))
+
         for step_id, status in board_steps:
-            if status == "NEEDS_REVIEW":
-                # Check if this step is frozen (by reading board.json freeze attribute).
-                board_data = _read_json(run_dir / "board.json")
-                for section in board_data.get("sections", []):
-                    for task in section.get("tasks", []):
-                        for step in task.get("steps", []):
-                            if str(step.get("step_id")) == step_id and step.get("freeze"):
-                                step_verdicts = verdicts.get(step_id, set())
-                                if "REAL" in step_verdicts:
-                                    return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
+            step_verdicts = verdicts.get(step_id, set())
+            if "REAL" in step_verdicts:
+                # Frozen NEEDS_REVIEW with REAL is checked above
+                if status == "NEEDS_REVIEW" and step_id in frozen_step_ids:
+                    return refuse(f"frozen NEEDS_REVIEW step {step_id} is judged REAL")
+                # Non-PASS steps (including non-frozen NEEDS_REVIEW) with REAL must refuse
+                if status != "PASS" and status not in _REAL_FAIL:
+                    return refuse(f"non-failure step {step_id} (status {_safe_status_name(status)}) is judged REAL")
 
     # Require at least one verified false failure for the org to have moved.
     if not verified_false_failures:
