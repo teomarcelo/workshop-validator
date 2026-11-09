@@ -730,7 +730,12 @@ class KeepOrgTests(unittest.TestCase):
             steps = [{"step_id": "s2", "status": "UI_MISMATCH"}]
             board = {"sections": [{"tasks": [{"steps": steps}]}], "unmatched": 0}
             (run_dir / "board.json").write_text(json.dumps(board), encoding="utf-8")
-            self.assertRefusedUnchanged(root, run_dir)
+            gate_before = Path(root, "gate.json").read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                result = self._keep(root, run_dir)
+            self.assertEqual(result, 2)
+            self.assertEqual(Path(root, "gate.json").read_bytes(), gate_before)
+            self.assertIn("Refused: malformed summary.json", out.getvalue())
 
     def test_refuses_board_unmatched_negative(self):
         """W-167b: refuse when board.unmatched is negative."""
