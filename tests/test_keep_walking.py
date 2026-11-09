@@ -356,7 +356,7 @@ class KeepOrgTests(unittest.TestCase):
             self.assertEqual(code, 0)
             gate = load_gate(root)
             self.assertEqual((gate["org"], gate["frozen"]), (1, False))
-            self.assertEqual(gate["kept_org_reason"]["step_id"], "s1")
+            self.assertEqual(gate["kept_org_reason"]["verified_false_failures"], ["s1"])
 
     def test_unverified_first_failure_refuses_even_when_the_stop_is_false(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -374,7 +374,7 @@ class KeepOrgTests(unittest.TestCase):
                                        verdicts=[("s1", "FALSE_FAILURE"), ("s4", "REAL")])
             code, out = self.keep(root, run_dir)
             self.assertEqual(code, 2)
-            self.assertIn("failure step s4 is REAL", out)
+            self.assertIn("step s4 is judged REAL", out)
 
     def test_empty_failures_judge_the_stop_step(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -382,7 +382,7 @@ class KeepOrgTests(unittest.TestCase):
                                        verdicts=[("s2", "FALSE_FAILURE")])
             code, out = self.keep(root, run_dir)
             self.assertEqual(code, 0, out)
-            self.assertEqual(load_gate(root)["kept_org_reason"]["step_id"], "s2")
+            self.assertEqual(load_gate(root)["kept_org_reason"]["verified_false_failures"], ["s2"])
 
     def test_malformed_failures_refuse(self):
         with tempfile.TemporaryDirectory() as folder:
