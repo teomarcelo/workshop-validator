@@ -955,6 +955,8 @@ class D2_1_Tests(unittest.TestCase):
             <!-- Mutant #9: shadow root traversal (use divs with role=button since buttons don't support shadow) -->
             <div role="button" id="btn-shadow-input"></div>
             <div role="button" id="btn-shadow-text"></div>
+            <div id="shadow-value-match-host"></div>
+            <button id="btn-shadow-value-match">zqShadowMatch9988</button>
 
             <!-- Positives: Save button with hidden input value "Save", dialog heading, link -->
             <button id="btn-save">Save</button>
@@ -1021,6 +1023,14 @@ with sync_playwright() as p:
         const btnShadowText = document.getElementById("btn-shadow-text");
         const shadowText = btnShadowText.attachShadow({{mode: 'open'}});
         shadowText.appendChild(document.createTextNode("Shadow Label"));
+
+        // Shadow root with input for value-match test (mutant 9)
+        const shadowValueHost = document.getElementById("shadow-value-match-host");
+        const shadowValue = shadowValueHost.attachShadow({{mode: 'open'}});
+        const shadowValueInput = document.createElement("input");
+        shadowValueInput.type = "text";
+        shadowValueInput.value = "zqShadowMatch9988";
+        shadowValue.appendChild(shadowValueInput);
     ''')
 
     # Set up shadow root with button inside (Case 6 - combo)
@@ -1148,6 +1158,8 @@ with sync_playwright() as p:
             # Button must be blank (contains control) - check it's NOT in the list or is empty string
             # Button with only text in shadow root: text must appear
             self.assertIn('"Shadow Label"', snapshot_text, "Mutant #9: shadow text not readable")
+            # Value-match must work in shadow roots: input value in shadow should blank button elsewhere
+            self.assertNotIn("zqshadowmatch9988", snapshot_text_lower, "Mutant #9: value-match in shadow root failed")
 
             # Positives: Save button keeps name even with hidden input value "Save"
             self.assertIn('"Save"', snapshot_text, "Save button name missing")
