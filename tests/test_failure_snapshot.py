@@ -853,6 +853,16 @@ class D2_1_Tests(unittest.TestCase):
                 <h2 id="heading-token">Start of heading text ABCDEFGH012345678901234567890123456789012345 IJKLMNOPQRSTUVWXYZ end</h2>
             </dialog>
 
+            <!-- Rule 1 tests: cut before redaction (must fail with 80-char cut, pass with 400-drop) -->
+            <dialog open>
+                <!-- Test (a): ~90 char heading with email split at positions 70-95, so 80-cut leaves "zq-local@exa" -->
+                <h2 id="heading-cut-email">Prefix text is about sixty chars long before the email zq-local@example.com suffix text</h2>
+                <!-- Test (b): 40-char token starting at position 60, so 80-cut gives a 20-char piece -->
+                <h2 id="heading-cut-token">Start text is about sixty characters long before token ABCD0123456789EFGH0123456789WXYZ012345 end</h2>
+                <!-- Test (c): heading over 400 chars must be dropped whole -->
+                <h2 id="heading-over-400">This is a very long heading that exceeds four hundred characters in total length so that it will be dropped entirely by the guard and not appear in the snapshot at all. This text continues for quite a while to reach the required length. More text here to pad it out further and further. Even more text to ensure we definitely exceed the four hundred character limit for this particular test case which validates that over-long names are dropped whole before any redaction occurs.</h2>
+            </dialog>
+
             <!-- Test for M13: button with multiple adjacent text nodes (no spaces between them) -->
             <button id="btn-multitext">Part<!--comment-->One<!--comment-->Two</button>
 
@@ -1002,6 +1012,15 @@ with sync_playwright() as p:
             # M13: multiple adjacent text nodes joined without spaces
             self.assertIn('"PartOneTwo"', snapshot_text, "multitext button should be PartOneTwo")
             self.assertNotIn('"Part One Two"', snapshot_text, "multitext should not have spaces")
+
+            # Rule 1: cut before redaction tests
+            # (a) Email split at position 70-95 in ~90 char heading: "zq-local" must not appear
+            self.assertNotIn("zq-local", snapshot_text, "Rule 1(a): email local part leaked after cut before redaction")
+            # (b) 40-char token starting at position 60: no 16-char piece must appear
+            self.assertNotIn("ABCD0123456789EF", snapshot_text, "Rule 1(b): token piece leaked after cut")
+            self.assertNotIn("456789WXYZ012345", snapshot_text, "Rule 1(b): token piece leaked after cut")
+            # (c) Over-400-char heading: no prefix of it must appear (check first 50 chars)
+            self.assertNotIn("This is a very long heading that exceeds four hun", snapshot_text, "Rule 1(c): over-400 heading not dropped whole")
 
             # Positives: Save button keeps name even with hidden input value "Save"
             self.assertIn('"Save"', snapshot_text, "Save button name missing")

@@ -140,129 +140,155 @@ def _visible(loc, cap: int, budget: _Budget):
             yield item
 
 
-_SAFE_TEXT_JS = r"""
-(element) => {
-    // Returns visible text from text nodes only, never from controls or editable contexts.
-    // Returns "" if element is or contains a control, or is inside an editable ancestor.
-    // Value-match: returns "" if the collected name contains any current control value.
-    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
-    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
-    const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
-    const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
+_SHARED_GUARDS_JS = r"""
+// Shared guards used by both text and aria-label extraction (each guard exactly once)
+const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
+const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
+const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
 
-    function isControl(el) {
-        if (CONTROL_TAGS.has(el.tagName)) return true;
+function getRoleTokens(el) {
+    const roleAttr = el.getAttribute('role');
+    if (!roleAttr) return [];
+    const tokens = roleAttr.toLowerCase().split(/\s+/);
+    return tokens;
+}
 
-        // Check isContentEditable (covers inherited and explicit contenteditable)
-        if (el.isContentEditable) return true;
-
-        // Check designMode
-        if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
-
-        // Check computed -webkit-user-modify (not read-only means editable)
-        try {
-            const style = window.getComputedStyle(el);
-            const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
-            if (userModify && userModify !== 'read-only') return true;
-        } catch (e) {
-            // getComputedStyle can fail on detached elements
-        }
-
-        // Check role attribute (case-insensitive, any token in the space-separated list)
-        const roleAttr = el.getAttribute('role');
-        if (roleAttr) {
-            const tokens = roleAttr.toLowerCase().split(/\s+/);
-            for (const token of tokens) {
-                if (CONTROL_ROLES.has(token)) return true;
-            }
-        }
-
-        return false;
+function isControl(el) {
+    if (CONTROL_TAGS.has(el.tagName)) return true;
+    if (el.isContentEditable) return true;
+    if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
+    try {
+        const style = window.getComputedStyle(el);
+        const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
+        if (userModify && userModify !== 'read-only') return true;
+    } catch (e) {}
+    const tokens = getRoleTokens(el);
+    for (const token of tokens) {
+        if (CONTROL_ROLES.has(token)) return true;
     }
+    return false;
+}
 
-    function isHidden(el) {
-        if (HIDDEN_TAGS.has(el.tagName)) return true;
-        if (el.hasAttribute('hidden')) return true;
-        if (el.getAttribute('aria-hidden') === 'true') return true;
-
-        // Use checkVisibility for visibility: collapse and other cases
-        try {
-            if (!el.checkVisibility({visibilityProperty: true})) return true;
-        } catch (e) {
-            // checkVisibility not supported or element detached, fall back to getComputedStyle
-            try {
-                const style = window.getComputedStyle(el);
-                if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true;
-            } catch (e2) {
-                // getComputedStyle can fail on detached elements
-            }
+function hasControlAncestor(el) {
+    let current = el.parentElement;
+    if (!current) {
+        const root = el.getRootNode();
+        if (root && root.host) {
+            current = root.host;
         }
-
-        return false;
     }
-
-    // Check if element itself is contentEditable or in designMode document
-    if (element.isContentEditable) return '';
-    if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
-
-    // Check if element is inside an editable ancestor, crossing shadow roots
-    function hasControlAncestor(el) {
-        let current = el.parentElement;
-        // If no parent in light DOM, check if element is in a shadow root
-        if (!current) {
-            const root = el.getRootNode();
+    while (current) {
+        if (isControl(current)) return true;
+        const parent = current.parentElement;
+        if (parent) {
+            current = parent;
+        } else {
+            const root = current.getRootNode();
             if (root && root.host) {
                 current = root.host;
-            }
-        }
-        while (current) {
-            if (isControl(current)) return true;
-            // Try to climb up in the same tree
-            const parent = current.parentElement;
-            if (parent) {
-                current = parent;
             } else {
-                // No parent in this tree, try to cross shadow boundary
-                const root = current.getRootNode();
-                if (root && root.host) {
-                    current = root.host;
-                } else {
-                    // Reached the top
-                    break;
-                }
+                break;
             }
         }
-        return false;
     }
+    return false;
+}
 
-    if (hasControlAncestor(element)) return '';
+function isHidden(el) {
+    if (HIDDEN_TAGS.has(el.tagName)) return true;
+    if (el.hasAttribute('hidden')) return true;
+    if (el.getAttribute('aria-hidden') === 'true') return true;
+    try {
+        if (!el.checkVisibility({visibilityProperty: true})) return true;
+    } catch (e) {
+        try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true;
+        } catch (e2) {}
+    }
+    return false;
+}
 
-    // Traverse light children AND open shadow root children with a seen-set
-    function traverse(el, seen) {
-        if (seen.has(el)) return [];
-        seen.add(el);
-
-        const children = [];
-
-        // Light children
-        for (const child of el.childNodes) {
-            if (child.nodeType === 1) {  // ELEMENT_NODE
+function traverse(el, seen) {
+    if (seen.has(el)) return [];
+    seen.add(el);
+    const children = [];
+    for (const child of el.childNodes) {
+        if (child.nodeType === 1) {
+            children.push(child);
+        }
+    }
+    if (el.shadowRoot) {
+        for (const child of el.shadowRoot.childNodes) {
+            if (child.nodeType === 1) {
                 children.push(child);
             }
         }
+    }
+    return children;
+}
 
-        // Open shadow root children
-        if (el.shadowRoot) {
-            for (const child of el.shadowRoot.childNodes) {
-                if (child.nodeType === 1) {  // ELEMENT_NODE
-                    children.push(child);
+function collectValues(el, seen) {
+    const values = [];
+    function addValue(val) {
+        if (val && typeof val === 'string') {
+            const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
+            if (normalized) values.push(normalized);
+        }
+    }
+    function collectFromElement(elem) {
+        if (seen.has(elem)) return;
+        seen.add(elem);
+        const tag = elem.tagName;
+        if (tag === 'INPUT') {
+            const type = (elem.getAttribute('type') || 'text').toLowerCase();
+            if (!SKIPPED_INPUT_TYPES.has(type)) {
+                addValue(elem.value);
+            }
+        }
+        if (tag === 'TEXTAREA') {
+            addValue(elem.value);
+        }
+        if (isControl(elem) && elem.ownerDocument.designMode !== 'on') {
+            addValue(elem.textContent);
+        }
+        if (tag === 'SELECT') {
+            for (const option of elem.options) {
+                if (option.selected) {
+                    addValue(option.textContent);
                 }
             }
         }
-
-        return children;
+        const tokens = getRoleTokens(elem);
+        const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+        for (const token of tokens) {
+            if (inputRoles.has(token)) {
+                addValue(elem.textContent);
+                addValue(elem.getAttribute('aria-valuetext'));
+                break;
+            }
+        }
+        for (const child of elem.childNodes) {
+            if (child.nodeType === 1) {
+                collectFromElement(child);
+            }
+        }
+        if (elem.shadowRoot) {
+            for (const child of elem.shadowRoot.childNodes) {
+                if (child.nodeType === 1) {
+                    collectFromElement(child);
+                }
+            }
+        }
     }
+    collectFromElement(el);
+    return values;
+}
+"""
 
+_SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
+(element) => {
     function containsControl(el, seen) {
         if (isControl(el)) return true;
         for (const child of traverse(el, seen)) {
@@ -274,125 +300,36 @@ _SAFE_TEXT_JS = r"""
     function collectText(el, seen) {
         if (isHidden(el)) return '';
         let text = '';
-
-        // Collect text nodes and recurse into elements in DOM order (light children)
         for (const node of el.childNodes) {
-            if (node.nodeType === 3) {  // TEXT_NODE
+            if (node.nodeType === 3) {
                 text += node.textContent;
-            } else if (node.nodeType === 1) {  // ELEMENT_NODE
+            } else if (node.nodeType === 1) {
                 if (!isControl(node)) {
                     text += collectText(node, seen);
                 }
             }
         }
-
-        // Collect from shadow root in DOM order
         if (el.shadowRoot) {
             for (const node of el.shadowRoot.childNodes) {
-                if (node.nodeType === 3) {  // TEXT_NODE
+                if (node.nodeType === 3) {
                     text += node.textContent;
-                } else if (node.nodeType === 1) {  // ELEMENT_NODE
+                } else if (node.nodeType === 1) {
                     if (!isControl(node)) {
                         text += collectText(node, seen);
                     }
                 }
             }
         }
-
         return text;
     }
 
-    // Collect all values for value-match
-    function collectValues(el, seen) {
-        const values = [];
-
-        function addValue(val) {
-            if (val && typeof val === 'string') {
-                // Lowercase and collapse whitespace
-                const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
-                if (normalized) values.push(normalized);
-            }
-        }
-
-        function collectFromElement(elem) {
-            if (seen.has(elem)) return;
-            seen.add(elem);
-
-            const tag = elem.tagName;
-
-            // Input values (excluding certain types)
-            if (tag === 'INPUT') {
-                const type = (elem.getAttribute('type') || 'text').toLowerCase();
-                if (!SKIPPED_INPUT_TYPES.has(type)) {
-                    addValue(elem.value);
-                }
-            }
-
-            // Textarea values
-            if (tag === 'TEXTAREA') {
-                addValue(elem.value);
-            }
-
-            // ContentEditable text
-            if (elem.isContentEditable && elem.ownerDocument.designMode !== 'on') {
-                addValue(elem.textContent);
-            }
-
-            // Selected option text from selects
-            if (tag === 'SELECT') {
-                for (const option of elem.options) {
-                    if (option.selected) {
-                        addValue(option.textContent);
-                    }
-                }
-            }
-
-            // Role-based input controls: text and aria-valuetext
-            const roleAttr = elem.getAttribute('role');
-            if (roleAttr) {
-                const tokens = roleAttr.toLowerCase().split(/\s+/);
-                const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
-                for (const token of tokens) {
-                    if (inputRoles.has(token)) {
-                        addValue(elem.textContent);
-                        addValue(elem.getAttribute('aria-valuetext'));
-                        break;
-                    }
-                }
-            }
-
-            // Recurse into children (light children)
-            for (const child of elem.childNodes) {
-                if (child.nodeType === 1) {
-                    collectFromElement(child);
-                }
-            }
-
-            // Recurse into shadow root
-            if (elem.shadowRoot) {
-                for (const child of elem.shadowRoot.childNodes) {
-                    if (child.nodeType === 1) {
-                        collectFromElement(child);
-                    }
-                }
-            }
-        }
-
-        collectFromElement(el);
-        return values;
-    }
-
+    if (isControl(element)) return '';
+    if (hasControlAncestor(element)) return '';
     const seen = new Set();
     if (containsControl(element, seen)) return '';
-
-    // Collect text (join text nodes exactly as in the page, then collapse whitespace)
     let text = collectText(element, new Set());
     text = text.replace(/\s+/g, ' ').trim();
-
-    // Over 400 characters: drop whole
     if (text.length > 400) return '';
-
-    // Value-match: if name contains any value, return ""
     const nameLower = text.toLowerCase();
     const values = collectValues(element, new Set());
     for (const value of values) {
@@ -400,141 +337,17 @@ _SAFE_TEXT_JS = r"""
             return '';
         }
     }
-
     return text;
 }
 """
 
-
-_ARIA_LABEL_JS = r"""
+_ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
 (element) => {
-    // For aria-label: apply same checks as text collection (control/ancestor/value-match)
-    // Reuse isControl, hasControlAncestor, and collectValues from _SAFE_TEXT_JS
-    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
-    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
-    const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
-
-    function isControl(el) {
-        if (CONTROL_TAGS.has(el.tagName)) return true;
-        if (el.isContentEditable) return true;
-        if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
-        try {
-            const style = window.getComputedStyle(el);
-            const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
-            if (userModify && userModify !== 'read-only') return true;
-        } catch (e) {}
-        const roleAttr = el.getAttribute('role');
-        if (roleAttr) {
-            const tokens = roleAttr.toLowerCase().split(/\s+/);
-            for (const token of tokens) {
-                if (CONTROL_ROLES.has(token)) return true;
-            }
-        }
-        return false;
-    }
-
-    function hasControlAncestor(el) {
-        let current = el.parentElement;
-        // If no parent in light DOM, check if element is in a shadow root
-        if (!current) {
-            const root = el.getRootNode();
-            if (root && root.host) {
-                current = root.host;
-            }
-        }
-        while (current) {
-            if (isControl(current)) return true;
-            // Try to climb up in the same tree
-            const parent = current.parentElement;
-            if (parent) {
-                current = parent;
-            } else {
-                // No parent in this tree, try to cross shadow boundary
-                const root = current.getRootNode();
-                if (root && root.host) {
-                    current = root.host;
-                } else {
-                    // Reached the top
-                    break;
-                }
-            }
-        }
-        return false;
-    }
-
-    function collectValues(el, seen) {
-        const values = [];
-        function addValue(val) {
-            if (val && typeof val === 'string') {
-                const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
-                if (normalized) values.push(normalized);
-            }
-        }
-        function collectFromElement(elem) {
-            if (seen.has(elem)) return;
-            seen.add(elem);
-            const tag = elem.tagName;
-            if (tag === 'INPUT') {
-                const type = (elem.getAttribute('type') || 'text').toLowerCase();
-                if (!SKIPPED_INPUT_TYPES.has(type)) {
-                    addValue(elem.value);
-                }
-            }
-            if (tag === 'TEXTAREA') {
-                addValue(elem.value);
-            }
-            if (elem.isContentEditable && elem.ownerDocument.designMode !== 'on') {
-                addValue(elem.textContent);
-            }
-            if (tag === 'SELECT') {
-                for (const option of elem.options) {
-                    if (option.selected) {
-                        addValue(option.textContent);
-                    }
-                }
-            }
-            const roleAttr = elem.getAttribute('role');
-            if (roleAttr) {
-                const tokens = roleAttr.toLowerCase().split(/\s+/);
-                const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
-                for (const token of tokens) {
-                    if (inputRoles.has(token)) {
-                        addValue(elem.textContent);
-                        addValue(elem.getAttribute('aria-valuetext'));
-                        break;
-                    }
-                }
-            }
-            for (const child of elem.childNodes) {
-                if (child.nodeType === 1) {
-                    collectFromElement(child);
-                }
-            }
-            if (elem.shadowRoot) {
-                for (const child of elem.shadowRoot.childNodes) {
-                    if (child.nodeType === 1) {
-                        collectFromElement(child);
-                    }
-                }
-            }
-        }
-        collectFromElement(el);
-        return values;
-    }
-
-    // Check if element itself is contentEditable or in designMode document
-    if (element.isContentEditable) return '';
-    if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
-
-    // Check if element is inside a control ancestor (crossing shadow roots)
+    if (isControl(element)) return '';
     if (hasControlAncestor(element)) return '';
-
-    // Get aria-label text
     const ariaLabel = (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
     if (!ariaLabel) return '';
     if (ariaLabel.length > 400) return '';
-
-    // Value-match on aria-label
     const ariaLabelLower = ariaLabel.toLowerCase();
     const values = collectValues(element, new Set());
     for (const value of values) {
@@ -542,7 +355,6 @@ _ARIA_LABEL_JS = r"""
             return '';
         }
     }
-
     return ariaLabel;
 }
 """
