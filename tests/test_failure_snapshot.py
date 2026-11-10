@@ -2246,11 +2246,12 @@ class D2RedoFixesTests(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_iframe_values_merged_across_roots(self):
-        """Medium: Values from same-origin iframe are matched in parent."""
+        """Medium: Values merged BIDIRECTIONALLY across all roots (parent->iframe and iframe->parent)."""
         html = """<!DOCTYPE html>
         <html><body>
-            <iframe srcdoc='<input value="zqframeval17">'></iframe>
-            <button id="btn">Account zqframeval17</button>
+            <input id="parent-input" value="zqparentval31" />
+            <button id="parent-btn">Account zqframeval17</button>
+            <iframe srcdoc='<input value="zqframeval17"><button>Open zqparentval31</button>'></iframe>
         </body></html>
         """
 
@@ -2275,11 +2276,12 @@ with sync_playwright() as p:
     page.set_content(html_content)
     page.wait_for_load_state('networkidle')
 
-    # Type the value in the iframe
-    iframe = page.frames[1]  # Get the iframe frame object
+    # Type values in both roots
+    page.locator('#parent-input').fill('zqparentval31')
+    iframe = page.frames[1]
     iframe.locator('input').fill('zqframeval17')
 
-    # Pass both page and iframe as roots
+    # Pass both page and iframe as roots (the way the walk does)
     href = save_failure_snapshot(
         page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
         roots=[page, iframe], redact_tree=lambda x: x
@@ -2301,11 +2303,13 @@ with sync_playwright() as p:
 
             output = json.loads(result.stdout.strip())
             snapshot_path = Path(tmp) / "run" / output["href"]
-            snapshot_text = snapshot_path.read_text()
+            snapshot_text = snapshot_path.read_text().lower()
 
-            # Button name must be absent because iframe value matches
-            self.assertNotIn("zqframeval17", snapshot_text.lower(),
-                            "Button name not withheld (iframe value should match)")
+            # BOTH markers must be absent (bidirectional merge proof)
+            self.assertNotIn("zqframeval17", snapshot_text,
+                            "Parent button leaked (iframe value should match in parent)")
+            self.assertNotIn("zqparentval31", snapshot_text,
+                            "Iframe button leaked (parent value should match in iframe)")
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_failing_root_withholds_all_roots(self):
