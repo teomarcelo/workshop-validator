@@ -867,6 +867,21 @@ class D2_1_Tests(unittest.TestCase):
             <!-- Test for M13: button with multiple adjacent text nodes (no spaces between them) -->
             <button id="btn-multitext">Part<!--comment-->One<!--comment-->Two</button>
 
+            <!-- Mutant #5: SELECT value-match - div[role=button] containing select and text -->
+            <div role="button" id="btn-mutant5" aria-label="Pick zqSelPick4471">
+                <select id="sel-mutant5"><option>Default</option><option value="chosen">zqSelPick4471</option></select>
+            </div>
+
+            <!-- Mutant #8: hidden/submit inputs must be skipped in value-match -->
+            <input type="hidden" id="input-hidden-mutant8" value="Save" />
+            <input type="submit" id="input-submit-mutant8" value="Send now" />
+            <button id="btn-save-mutant8">Save</button>
+            <button id="btn-send-mutant8">Send now</button>
+
+            <!-- Mutant #9: shadow root traversal (use divs with role=button since buttons don't support shadow) -->
+            <div role="button" id="btn-shadow-input"></div>
+            <div role="button" id="btn-shadow-text"></div>
+
             <!-- Positives: Save button with hidden input value "Save", dialog heading, link -->
             <button id="btn-save">Save</button>
             <input type="hidden" id="hidden-save" value="Save" />
@@ -912,6 +927,26 @@ with sync_playwright() as p:
 
     # Select the mirrored option
     page.locator('#sel-mirror').select_option("2")
+
+    # Mutant #5: select the option in btn-select-mirror
+    page.locator('#sel-mutant5').select_option("chosen")
+
+    # Mutant #9: set up shadow roots
+    page.evaluate('''
+        // Shadow root with input (contains control, should blank button name)
+        const btnShadowInput = document.getElementById("btn-shadow-input");
+        const shadowInput = btnShadowInput.attachShadow({{mode: 'open'}});
+        const input = document.createElement("input");
+        input.type = "text";
+        input.value = "zqShadowVal2290";
+        shadowInput.appendChild(input);
+        shadowInput.appendChild(document.createTextNode("Go"));
+
+        // Shadow root with only text (should be readable)
+        const btnShadowText = document.getElementById("btn-shadow-text");
+        const shadowText = btnShadowText.attachShadow({{mode: 'open'}});
+        shadowText.appendChild(document.createTextNode("Shadow Label"));
+    ''')
 
     # Set up shadow root with button inside (Case 6 - combo)
     page.evaluate('''
@@ -1022,6 +1057,20 @@ with sync_playwright() as p:
             self.assertNotIn("456789WXYZ012345", snapshot_text, "Rule 1(b): token piece leaked after cut")
             # (c) Over-400-char heading: no prefix of it must appear (check first 50 chars)
             self.assertNotIn("This is a very long heading that exceeds four hun", snapshot_text, "Rule 1(c): over-400 heading not dropped whole")
+
+            # Mutant #5: SELECT value-match - chosen option text mirrored in span must blank button
+            self.assertNotIn("zqselpick4471", snapshot_text_lower, "Mutant #5: SELECT value not matched")
+
+            # Mutant #8: hidden/submit inputs must be skipped, button names kept
+            self.assertIn('"Save"', snapshot_text, "Mutant #8: Save button missing (hidden input not skipped)")
+            self.assertIn('"Send now"', snapshot_text, "Mutant #8: Send now button missing (submit input not skipped)")
+
+            # Mutant #9: shadow root traversal
+            # Button with input in shadow root: value must not leak AND button must be blank (contains control)
+            self.assertNotIn("zqshadowval2290", snapshot_text_lower, "Mutant #9: shadow input value leaked")
+            # Button must be blank (contains control) - check it's NOT in the list or is empty string
+            # Button with only text in shadow root: text must appear
+            self.assertIn('"Shadow Label"', snapshot_text, "Mutant #9: shadow text not readable")
 
             # Positives: Save button keeps name even with hidden input value "Save"
             self.assertIn('"Save"', snapshot_text, "Save button name missing")
