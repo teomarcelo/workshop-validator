@@ -171,32 +171,22 @@ function isControl(el) {
 }
 
 function hasControlAncestor(el) {
-    let current = el.parentElement;
-    if (!current) {
-        const root = el.getRootNode();
-        if (root && root.host) {
-            current = root.host;
-        }
-    }
-    // Follow assignedSlot for light DOM elements slotted into shadow DOM
-    if (!current && el.assignedSlot) {
-        current = el.assignedSlot;
-    }
+    let current = el;
     while (current) {
-        if (isControl(current)) return true;
-        const parent = current.parentElement;
-        if (parent) {
-            current = parent;
+        // At each step: try assignedSlot first, then parentElement, then host
+        if (current.assignedSlot) {
+            current = current.assignedSlot;
+        } else if (current.parentElement) {
+            current = current.parentElement;
         } else {
             const root = current.getRootNode();
             if (root && root.host) {
                 current = root.host;
-            } else if (current.assignedSlot) {
-                current = current.assignedSlot;
             } else {
                 break;
             }
         }
+        if (isControl(current)) return true;
     }
     return false;
 }
@@ -470,23 +460,46 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
     names_withheld = ""
-    for root in roots[:ROOT_LIMIT]:
-        # Collect values once per root
-        values_result = None
-        try:
-            values_result = root.evaluate(_COLLECT_VALUES_JS)
-            if values_result is None:
-                values_result = {"values": [], "capped": True}
-                names_withheld = "value collection failed"
-        except Exception:
-            values_result = {"values": [], "capped": True}
+
+    # Fix 5: Skip value collection if budget is nearly spent (< ~1s left)
+    if budget.left() < 1.0:
+        names_withheld = "value collection skipped (time)"
+        # Use empty values_result for all roots
+        merged_values_result = {"values": [], "capped": True}
+    else:
+        # Fix 3: Collect values from ALL roots first, then merge
+        all_values = []
+        collection_failed = False
+        collection_capped = False
+
+        for root in roots[:ROOT_LIMIT]:
+            try:
+                values_result = root.evaluate(_COLLECT_VALUES_JS)
+                # Fix 4: Check that result is a dict with the right keys
+                if not isinstance(values_result, dict) or "values" not in values_result or "capped" not in values_result:
+                    collection_failed = True
+                    break
+                if values_result.get("capped"):
+                    collection_capped = True
+                    break
+                all_values.extend(values_result.get("values", []))
+            except Exception:
+                collection_failed = True
+                break
+
+        # Build merged values_result
+        if collection_failed:
             names_withheld = "value collection failed"
+            merged_values_result = {"values": [], "capped": True}
+        elif collection_capped:
+            names_withheld = "value collection capped"
+            merged_values_result = {"values": [], "capped": True}
+        else:
+            # Dedupe the merged values
+            merged_values_result = {"values": list(dict.fromkeys(all_values)), "capped": False}
 
-        # Check if capped during collection
-        if values_result.get("capped"):
-            if not names_withheld:
-                names_withheld = "value collection capped"
-
+    # Now use merged_values_result for all roots
+    for root in roots[:ROOT_LIMIT]:
         for role in CONTROL_ROLES:
             try:
                 loc = root.get_by_role(role)
@@ -496,9 +509,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
             for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
                 if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
-                name = _name(item, read_text=role != "dialog", budget=budget, values_result=values_result)
+                name = _name(item, read_text=role != "dialog", budget=budget, values_result=merged_values_result)
                 if not name and role == "dialog":
-                    heads = _headings(item, budget, values_result=values_result)
+                    heads = _headings(item, budget, values_result=merged_values_result)
                     name = heads[0] if heads else ""
                 if name and name not in controls[role]:
                     controls[role].append(name)
@@ -512,8 +525,8 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     break
                 panels.append({
                     "role": role,
-                    "name": _name(item, read_text=False, budget=budget, values_result=values_result),
-                    "headings": _headings(item, budget, values_result=values_result),
+                    "name": _name(item, read_text=False, budget=budget, values_result=merged_values_result),
+                    "headings": _headings(item, budget, values_result=merged_values_result),
                 })
     return controls, panels, names_withheld
 

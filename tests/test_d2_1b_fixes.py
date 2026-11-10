@@ -44,7 +44,6 @@ with sync_playwright() as p:
     browser = p.chromium.launch()
     page = browser.new_page()
     page.set_content(html_content)
-    page.locator('#sel').select_option("real")
 
     href = save_failure_snapshot(
         page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
@@ -149,13 +148,14 @@ with sync_playwright() as p:
                             "Value leaked despite cap exceeded (should fail closed)")
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
-    def test_assignedslot_following(self):
-        """Medium: Light-DOM button slotted into shadow role=combobox counts as inside control."""
+    def test_assignedslot_following_plain_host(self):
+        """HIGH: Light-DOM button slotted into shadow with role=combobox, plain host (no role on host)."""
         html = """<!DOCTYPE html>
         <html><body>
-            <div id="combo-host" role="combobox">
-                <button id="light-btn">zqSlottedButton123</button>
-            </div>
+            <x-cb id="custom-host">
+                <button id="light-btn">zqslotted12</button>
+            </x-cb>
+            <button id="plain-btn">Plainsave</button>
         </body></html>
         """
 
@@ -177,14 +177,22 @@ html_content = {repr(html)}
 with sync_playwright() as p:
     browser = p.chromium.launch()
     page = browser.new_page()
-    page.set_content(html_content)
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200,
+        content_type="text/html",
+        body=html_content
+    ))
+    page.goto("https://app.example.com/")
 
-    # Set up shadow DOM with a slot
+    # Set up shadow DOM: plain host with shadow root containing role=combobox
     page.evaluate('''
-        const host = document.getElementById("combo-host");
+        const host = document.getElementById("custom-host");
         const shadow = host.attachShadow({{mode: 'open'}});
+        const wrapper = document.createElement("div");
+        wrapper.setAttribute("role", "combobox");
         const slot = document.createElement("slot");
-        shadow.appendChild(slot);
+        wrapper.appendChild(slot);
+        shadow.appendChild(wrapper);
     ''')
 
     href = save_failure_snapshot(
@@ -211,11 +219,14 @@ with sync_playwright() as p:
 
             output = json.loads(result.stdout.strip())
             snapshot_path = Path(tmp) / "run" / output["href"]
-            snapshot_text = snapshot_path.read_text()
+            snapshot_text = snapshot_path.read_text().lower()
 
-            # Button should be blank (it's inside a control via slot)
-            self.assertNotIn("zqslottedbutton123", snapshot_text.lower(),
+            # Slotted button must be absent (it's inside a control via slot)
+            self.assertNotIn("zqslotted12", snapshot_text,
                             "Slotted button leaked (should be blocked as inside combobox)")
+            # Plain button must be present
+            self.assertIn("plainsave", snapshot_text,
+                          "Plain button missing (should be present)")
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_min_length_3_chars(self):

@@ -3,6 +3,8 @@
 import json
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -2237,6 +2239,240 @@ with sync_playwright() as p:
             btn_names = data["controls"]["button"]
             # Either no buttons listed, or only empty names
             self.assertTrue(all(not n for n in btn_names), f"Expected withheld button names, got {btn_names}")
+
+
+class D2RedoFixesTests(unittest.TestCase):
+    """Tests for D2-redo fixes: iframe values, non-dict result, time bound."""
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_iframe_values_merged_across_roots(self):
+        """Medium: Values from same-origin iframe are matched in parent."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <iframe srcdoc='<input value="zqframeval17">'></iframe>
+            <button id="btn">Account zqframeval17</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+    page.wait_for_load_state('networkidle')
+
+    # Type the value in the iframe
+    iframe = page.frames[1]  # Get the iframe frame object
+    iframe.locator('input').fill('zqframeval17')
+
+    # Pass both page and iframe as roots
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page, iframe], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+
+            # Button name must be absent because iframe value matches
+            self.assertNotIn("zqframeval17", snapshot_text.lower(),
+                            "Button name not withheld (iframe value should match)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_failing_root_withholds_all_roots(self):
+        """Medium: If any root's collection fails, all names are withheld."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <iframe srcdoc='<button>zqroot1btn</button>'></iframe>
+            <button id="btn">zqroot2btn</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+class FakeFrame:
+    def __init__(self, real_frame):
+        self.real_frame = real_frame
+
+    def evaluate(self, js, *args, **kwargs):
+        # Return non-dict to trigger failure
+        return ["not", "a", "dict"]
+
+    def get_by_role(self, role):
+        return self.real_frame.get_by_role(role)
+
+    def locator(self, selector):
+        return self.real_frame.locator(selector)
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Get real frame but wrap it
+    real_frame = page.frames[1]  # iframe
+    fake_frame = FakeFrame(real_frame)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page, fake_frame], redact_tree=lambda x: x
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href, "names_withheld": data["names_withheld"]}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            self.assertEqual(output["names_withheld"], "value collection failed",
+                            "Expected names_withheld='value collection failed'")
+
+    def test_non_dict_result_withholds_names(self):
+        """Low: Non-dict result from value collection counts as failure."""
+        class PageWithListResult:
+            url = "https://app.example.com/"
+            main_frame = None
+
+            def evaluate(self, js, *args, timeout=None):
+                if "collectValuesFromPage(document)" in str(js):
+                    return ["not", "a", "dict"]
+                return None
+
+            def get_by_role(self, role):
+                return Loc([Item(text="TestBtn")])
+
+            def locator(self, selector):
+                if selector == "head > title":
+                    return Loc([Item(text="Test")])
+                if selector == "body":
+                    return Loc(tree="- button 'TestBtn'")
+                return Loc()
+
+            def screenshot(self, **kwargs):
+                return PNG
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            clock = Clock()
+            from workshop_validator.failure_snapshot import save_failure_snapshot
+            href = save_failure_snapshot(
+                PageWithListResult(), run_dir, 1, "TEST", "UI_MISMATCH", "test",
+                roots=[PageWithListResult()], redact_tree=lambda x: x, clock=clock
+            )
+
+            snapshot_path = run_dir / href
+            data = json.loads(snapshot_path.read_text())
+            self.assertEqual(data["names_withheld"], "value collection failed",
+                            "Expected names_withheld='value collection failed' for non-dict result")
+
+    def test_time_budget_skips_value_collection(self):
+        """Medium: Value collection skipped when budget nearly spent."""
+        class AdvancingClock:
+            def __init__(self):
+                self.now = 100.0
+                self.call_count = 0
+
+            def __call__(self):
+                # First call creates the budget (100.0), second call in _controls_and_panels checks budget.left()
+                # We want budget.left() to be < 1.0, so if deadline is 100.0 + 8.0 = 108.0,
+                # we need clock() to return >= 107.0 on second call
+                self.call_count += 1
+                if self.call_count == 1:
+                    return 100.0
+                else:
+                    return 107.5  # 108.0 - 107.5 = 0.5s left
+
+        class PageWithBudget:
+            url = "https://app.example.com/"
+            main_frame = None
+
+            def evaluate(self, js, *args, timeout=None):
+                # Should not be called for value collection
+                if "collectValuesFromPage(document)" in str(js):
+                    raise AssertionError("Value collection should be skipped")
+                return None
+
+            def get_by_role(self, role):
+                return Loc([Item(text="TestBtn")])
+
+            def locator(self, selector):
+                if selector == "head > title":
+                    return Loc([Item(text="Test")])
+                if selector == "body":
+                    return Loc(tree="- button 'TestBtn'")
+                return Loc()
+
+            def screenshot(self, **kwargs):
+                return PNG
+
+        with tempfile.TemporaryDirectory() as tmp:
+            run_dir = Path(tmp)
+            clock = AdvancingClock()
+
+            from workshop_validator.failure_snapshot import save_failure_snapshot
+            href = save_failure_snapshot(
+                PageWithBudget(), run_dir, 1, "TEST", "UI_MISMATCH", "test",
+                roots=[PageWithBudget()], redact_tree=lambda x: x, clock=clock, budget_s=8.0
+            )
+
+            snapshot_path = run_dir / href
+            data = json.loads(snapshot_path.read_text())
+            self.assertEqual(data["names_withheld"], "value collection skipped (time)",
+                            "Expected names_withheld='value collection skipped (time)' when budget low")
 
 
 if __name__ == "__main__":
