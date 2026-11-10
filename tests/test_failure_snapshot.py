@@ -41,8 +41,9 @@ class Item:
         # For tag name check (short lambda)
         if "el => el.tagName" in str(js):
             return "DIV"
-        # For aria-label extraction: return the aria-label attribute (self.name)
-        if "aria-label" in str(js) and "getAttribute" in str(js):
+        # For aria-label extraction: check if it extracts aria-label after the shared guards
+        # The key distinguisher is that it gets aria-label and does value-match on it
+        if "element.getAttribute('aria-label')" in str(js) and "ariaLabel =" in str(js):
             return self.name
         # For safe text extraction: return the text content (self.text)
         return self.text
