@@ -1597,15 +1597,17 @@ class D2TestsSharedGuards(unittest.TestCase):
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_assignedslot_light_dom_child_in_shadow_combobox_withheld(self):
-        """B3: assignedSlot traversal - light DOM slotted into shadow, value withheld."""
+        """B3: assignedSlot traversal via loop (line 194-195) - slotted combobox withholds."""
         import subprocess
         import sys
 
         html = """<!DOCTYPE html>
         <html><body>
-            <div role="combobox" id="combo">
-                <button>zqslot8812</button>
+            <div id="wrapper">
+                <div role="combobox" id="combo"></div>
             </div>
+            <input type="text" id="inp" />
+            <button>zqslot8812</button>
         </body></html>
         """
 
@@ -1632,13 +1634,21 @@ with sync_playwright() as p:
     ))
     page.goto("https://app.example.com/")
 
-    # Build shadow root with slot, button becomes slotted light DOM
+    # Create shadow root on wrapper with slot, combobox becomes slotted
     page.evaluate('''
-        const combo = document.getElementById("combo");
-        const shadow = combo.attachShadow({{mode: 'open'}});
+        const wrapper = document.getElementById("wrapper");
+        const shadow = wrapper.attachShadow({{mode: 'open'}});
         const slot = document.createElement("slot");
         shadow.appendChild(slot);
+
+        // Put input inside the slotted combobox
+        const combo = document.getElementById("combo");
+        const input = document.getElementById("inp");
+        combo.appendChild(input);
     ''')
+
+    # Type value into the input (now inside slotted combobox)
+    page.locator('#inp').press_sequentially("zqslot8812")
 
     href = save_failure_snapshot(
         page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
@@ -1662,7 +1672,7 @@ with sync_playwright() as p:
             output = json.loads(result.stdout.strip())
             snapshot_path = Path(tmp) / "run" / output["href"]
             snapshot_text = snapshot_path.read_text().lower()
-            # assignedSlot guard must withhold the light DOM button text
+            # Value typed in slotted combobox's input should be withheld from button
             self.assertNotIn("zqslot8812", snapshot_text)
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
