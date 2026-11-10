@@ -140,25 +140,106 @@ def _visible(loc, cap: int, budget: _Budget):
             yield item
 
 
+_SAFE_TEXT_JS = """
+(element) => {
+    // Returns visible text from text nodes only, never from controls or editable contexts.
+    // Returns "" if element is or contains a control, or is inside an editable ancestor.
+    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
+    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option']);
+    const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+
+    function isControl(el) {
+        if (CONTROL_TAGS.has(el.tagName)) return true;
+        const role = el.getAttribute('role');
+        if (role && CONTROL_ROLES.has(role)) return true;
+        const editable = el.getAttribute('contenteditable');
+        if (editable !== null && editable !== 'false') return true;
+        return false;
+    }
+
+    function isHidden(el) {
+        if (HIDDEN_TAGS.has(el.tagName)) return true;
+        if (el.hasAttribute('hidden')) return true;
+        if (el.getAttribute('aria-hidden') === 'true') return true;
+        try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return true;
+        } catch (e) {
+            // getComputedStyle can fail on detached elements
+        }
+        return false;
+    }
+
+    // Check if element itself is contentEditable or in designMode document
+    if (element.isContentEditable) return '';
+    if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
+
+    // Check if element is inside an editable ancestor (but not if element itself is a control)
+    const ancestorSelector = 'input,select,textarea,option,output,[contenteditable]:not([contenteditable="false"]),[role=textbox],[role=combobox],[role=searchbox],[role=spinbutton],[role=listbox],[role=option]';
+    const closestAncestor = element.closest(ancestorSelector);
+    if (closestAncestor && closestAncestor !== element) return '';
+
+    function containsControl(el) {
+        if (isControl(el)) return true;
+        for (const child of el.children) {
+            if (containsControl(child)) return true;
+        }
+        return false;
+    }
+
+    function collectText(el) {
+        if (isHidden(el)) return '';
+        let text = '';
+        for (const node of el.childNodes) {
+            if (node.nodeType === 3) {  // TEXT_NODE
+                text += node.textContent;
+            } else if (node.nodeType === 1) {  // ELEMENT_NODE
+                if (!isControl(node)) {
+                    text += collectText(node);
+                }
+            }
+        }
+        return text;
+    }
+
+    if (containsControl(element)) return '';
+    return collectText(element);
+}
+"""
+
+
 def _name(item, *, read_text: bool, budget: _Budget) -> str:
-    """aria-label, then title, then short inner text. Never an input's value."""
+    """aria-label, then safe text from visible text nodes only.
+
+    Safe text never descends into input, select, textarea, option, output, contenteditable
+    elements, or elements with role textbox/combobox/searchbox/spinbutton/listbox/option.
+    Returns "" if element is or contains a control, or is inside an editable ancestor.
+    Never reads title (apps mirror values into it)."""
     # Every read gets a budget-bound timeout; a detached element would otherwise
     # wait the page default (about 20 s).
-    reads = [
-        lambda: item.get_attribute("aria-label", timeout=budget.timeout_ms(500)),
-        lambda: item.get_attribute("title", timeout=budget.timeout_ms(500)),
-    ]
-    if read_text:
-        reads.append(lambda: item.inner_text(timeout=budget.timeout_ms(500)))
-    for read in reads:
-        if budget.over():
-            return ""
-        try:
-            value = " ".join(str(read() or "").split())
-        except Exception:
-            continue
+    if budget.over():
+        return ""
+
+    # Try aria-label first
+    try:
+        value = " ".join(str(item.get_attribute("aria-label", timeout=budget.timeout_ms(500)) or "").split())
         if value and len(value) <= 200:
             return redact_text(value)
+    except Exception:
+        pass
+
+    if budget.over():
+        return ""
+
+    # Try safe text from visible text nodes only
+    if read_text:
+        try:
+            value = " ".join(str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "").split())
+            if value and len(value) <= 200:
+                return redact_text(value)
+        except Exception:
+            pass
+
     return ""
 
 
