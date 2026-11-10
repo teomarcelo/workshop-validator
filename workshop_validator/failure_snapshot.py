@@ -178,6 +178,10 @@ function hasControlAncestor(el) {
             current = root.host;
         }
     }
+    // Follow assignedSlot for light DOM elements slotted into shadow DOM
+    if (!current && el.assignedSlot) {
+        current = el.assignedSlot;
+    }
     while (current) {
         if (isControl(current)) return true;
         const parent = current.parentElement;
@@ -187,6 +191,8 @@ function hasControlAncestor(el) {
             const root = current.getRootNode();
             if (root && root.host) {
                 current = root.host;
+            } else if (current.assignedSlot) {
+                current = current.assignedSlot;
             } else {
                 break;
             }
@@ -198,7 +204,8 @@ function hasControlAncestor(el) {
 function isHidden(el) {
     if (HIDDEN_TAGS.has(el.tagName)) return true;
     if (el.hasAttribute('hidden')) return true;
-    if (el.getAttribute('aria-hidden') === 'true') return true;
+    const ariaHidden = el.getAttribute('aria-hidden');
+    if (ariaHidden && ariaHidden.toLowerCase() === 'true') return true;
     try {
         if (!el.checkVisibility({visibilityProperty: true})) return true;
     } catch (e) {
@@ -224,7 +231,7 @@ function traverse(el, seen) {
     }
     if (el.shadowRoot) {
         for (const child of el.shadowRoot.childNodes) {
-            if (child.nodeType === 1) {
+            if (child.nodeType === 1 && !seen.has(child)) {
                 children.push(child);
             }
         }
@@ -233,20 +240,28 @@ function traverse(el, seen) {
 }
 
 function collectValuesFromPage(doc) {
-    const values = [];
+    const valueSet = new Set();
     const seen = new Set();
     const MAX_VALUES = 300;
+    const MIN_LENGTH = 3;
+    let capped = false;
 
     function addValue(val) {
-        if (values.length >= MAX_VALUES) return;
+        if (capped) return;
         if (val && typeof val === 'string') {
             const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
-            if (normalized) values.push(normalized);
+            if (normalized && normalized.length >= MIN_LENGTH) {
+                valueSet.add(normalized);
+                if (valueSet.size > MAX_VALUES) {
+                    capped = true;
+                    valueSet.clear();
+                }
+            }
         }
     }
 
     function collectFromElement(elem) {
-        if (values.length >= MAX_VALUES) return;
+        if (capped) return;
         if (seen.has(elem)) return;
         seen.add(elem);
 
@@ -267,11 +282,17 @@ function collectValuesFromPage(doc) {
                 }
             }
         }
-        if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT' && tag !== 'OPTION') {
+        const tokens = getRoleTokens(elem);
+        // For role=option, only collect if aria-selected="true"
+        if (tokens.includes('option')) {
+            const ariaSelected = elem.getAttribute('aria-selected');
+            if (ariaSelected && ariaSelected.toLowerCase() === 'true') {
+                addValue(elem.textContent);
+            }
+        } else if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT' && tag !== 'OPTION') {
             addValue(elem.textContent);
         }
-        const tokens = getRoleTokens(elem);
-        const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+        const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton', 'slider']);
         for (const token of tokens) {
             if (inputRoles.has(token)) {
                 addValue(elem.textContent);
@@ -290,15 +311,22 @@ function collectValuesFromPage(doc) {
     if (root) {
         collectFromElement(root);
     }
-    return values;
+    return {values: Array.from(valueSet), capped: capped};
 }
 """
 
+_COLLECT_VALUES_JS = _SHARED_GUARDS_JS + r"""
+(() => {
+    return collectValuesFromPage(document);
+})()
+"""
+
 _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
-(element) => {
+(element, valuesResult) => {
     function containsControl(el, seen) {
         if (isControl(el)) return true;
         for (const child of traverse(el, seen)) {
+            seen.add(child);
             if (containsControl(child, seen)) return true;
         }
         return false;
@@ -337,9 +365,12 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
     let text = collectText(element, new Set());
     text = text.replace(/\s+/g, ' ').trim();
     if (text.length > 400) return '';
+
+    // Fail closed if value collection capped
+    if (valuesResult.capped) return '';
+
     const nameLower = text.toLowerCase();
-    const values = collectValuesFromPage(element.ownerDocument);
-    for (const value of values) {
+    for (const value of valuesResult.values) {
         if (nameLower.includes(value)) {
             return '';
         }
@@ -349,15 +380,18 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
 """
 
 _ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
-(element) => {
+(element, valuesResult) => {
     if (isControl(element)) return '';
     if (hasControlAncestor(element)) return '';
     const ariaLabel = (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
     if (!ariaLabel) return '';
     if (ariaLabel.length > 400) return '';
+
+    // Fail closed if value collection capped
+    if (valuesResult.capped) return '';
+
     const ariaLabelLower = ariaLabel.toLowerCase();
-    const values = collectValuesFromPage(element.ownerDocument);
-    for (const value of values) {
+    for (const value of valuesResult.values) {
         if (ariaLabelLower.includes(value)) {
             return '';
         }
@@ -367,7 +401,7 @@ _ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
 """
 
 
-def _name(item, *, read_text: bool, budget: _Budget) -> str:
+def _name(item, *, read_text: bool, budget: _Budget, values_result=None) -> str:
     """aria-label or safe text from visible text nodes only.
 
     aria-label is read only AFTER control and ancestor checks (done in JS).
@@ -381,9 +415,21 @@ def _name(item, *, read_text: bool, budget: _Budget) -> str:
     if budget.over():
         return ""
 
+    # Collect values once per document if not provided
+    if values_result is None:
+        try:
+            values_result = item.evaluate(_COLLECT_VALUES_JS, timeout=budget.timeout_ms(500))
+            if values_result is None:
+                values_result = {"values": [], "capped": False}
+        except Exception:
+            values_result = {"values": [], "capped": False}
+
+    if budget.over():
+        return ""
+
     # Try aria-label first (with control/ancestor checks and value-match)
     try:
-        value = str(item.evaluate(_ARIA_LABEL_JS, timeout=budget.timeout_ms(500)) or "")
+        value = str(item.evaluate(_ARIA_LABEL_JS, values_result, timeout=budget.timeout_ms(500)) or "")
         if value:
             return redact_text(value, NAME_LIMIT)
     except Exception:
@@ -395,7 +441,7 @@ def _name(item, *, read_text: bool, budget: _Budget) -> str:
     # Try safe text from visible text nodes (includes value-match and full checks)
     if read_text:
         try:
-            value = str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "")
+            value = str(item.evaluate(_SAFE_TEXT_JS, values_result, timeout=budget.timeout_ms(500)) or "")
             if value:
                 # Python redacts first, then trims (no pre-trim in Python)
                 return redact_text(value, NAME_LIMIT)
@@ -405,14 +451,14 @@ def _name(item, *, read_text: bool, budget: _Budget) -> str:
     return ""
 
 
-def _headings(panel, budget: _Budget) -> list[str]:
+def _headings(panel, budget: _Budget, values_result=None) -> list[str]:
     names = []
     try:
         loc = panel.get_by_role("heading")
     except Exception:
         return names
     for item in _visible(loc, HEADINGS_PER_PANEL * 2, budget):
-        name = _name(item, read_text=True, budget=budget)
+        name = _name(item, read_text=True, budget=budget, values_result=values_result)
         if name and name not in names:
             names.append(name)
         if len(names) >= HEADINGS_PER_PANEL:
@@ -424,6 +470,15 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
     for root in roots[:ROOT_LIMIT]:
+        # Collect values once per root
+        values_result = None
+        try:
+            values_result = root.evaluate(_COLLECT_VALUES_JS, timeout=budget.timeout_ms(500))
+            if values_result is None:
+                values_result = {"values": [], "capped": False}
+        except Exception:
+            values_result = {"values": [], "capped": False}
+
         for role in CONTROL_ROLES:
             try:
                 loc = root.get_by_role(role)
@@ -433,9 +488,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
             for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
                 if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
-                name = _name(item, read_text=role != "dialog", budget=budget)
+                name = _name(item, read_text=role != "dialog", budget=budget, values_result=values_result)
                 if not name and role == "dialog":
-                    heads = _headings(item, budget)
+                    heads = _headings(item, budget, values_result=values_result)
                     name = heads[0] if heads else ""
                 if name and name not in controls[role]:
                     controls[role].append(name)
@@ -449,8 +504,8 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     break
                 panels.append({
                     "role": role,
-                    "name": _name(item, read_text=False, budget=budget),
-                    "headings": _headings(item, budget),
+                    "name": _name(item, read_text=False, budget=budget, values_result=values_result),
+                    "headings": _headings(item, budget, values_result=values_result),
                 })
     return controls, panels
 

@@ -37,15 +37,17 @@ class Item:
     def inner_text(self, timeout=None):
         return self.text
 
-    def evaluate(self, js, timeout=None):
+    def evaluate(self, js, *args, timeout=None):
         # For tag name check (short lambda)
         if "el => el.tagName" in str(js):
             return "DIV"
-        # For aria-label extraction: check if it extracts aria-label after the shared guards
-        # The key distinguisher is that it gets aria-label and does value-match on it
+        # For value collection (_COLLECT_VALUES_JS)
+        if "collectValuesFromPage(document)" in str(js):
+            return {"values": [], "capped": False}
+        # For aria-label extraction with values_result parameter
         if "element.getAttribute('aria-label')" in str(js) and "ariaLabel =" in str(js):
             return self.name
-        # For safe text extraction: return the text content (self.text)
+        # For safe text extraction with values_result parameter
         return self.text
 
     def get_by_role(self, role):
