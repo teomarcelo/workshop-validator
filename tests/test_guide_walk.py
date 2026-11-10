@@ -4386,6 +4386,36 @@ class PanelEvidenceTests(unittest.TestCase):
         self.assertEqual(result.status, "NEEDS_REVIEW")
         self.assertIn("no change could be read", result.note)
 
+    def test_two_region_panels_appearing_is_needs_review(self):
+        """No panel before click; click creates two region panels with matching heading → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel1 = document.createElement('div');
+            panel1.setAttribute('role', 'region');
+            panel1.setAttribute('aria-label', 'Info 1');
+            panel1.innerHTML = '<h2>Account Name</h2>';
+            document.body.appendChild(panel1);
+
+            const panel2 = document.createElement('div');
+            panel2.setAttribute('role', 'region');
+            panel2.setAttribute('aria-label', 'Info 2');
+            panel2.innerHTML = '<h2>Account Name</h2>';
+            document.body.appendChild(panel2);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
     def test_plain_div_with_heading_is_needs_review(self):
         """Plain div (not complementary/region) with heading → NEEDS_REVIEW"""
         html = """

@@ -6560,6 +6560,17 @@ def _count_panels_with_heading(page, heading_text: str) -> tuple[int, str]:
     return count, last_role
 
 
+def _panel_heading_evidence(before_count: int, page, name: str) -> str:
+    """Check if a complementary/region panel appeared with heading matching name.
+
+    Returns evidence text if before_count was 0 and after_count is 1, else "".
+    """
+    after_count, panel_role = _count_panels_with_heading(page, name)
+    if before_count == 0 and after_count == 1:
+        return f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
+    return ""
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -6654,9 +6665,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
     # Check if a complementary/region panel appeared with heading matching name
     if not evidence_desc:
-        after_panel_count, panel_role = _count_panels_with_heading(state.page, name)
-        if before_panel_count == 0 and after_panel_count == 1:
-            evidence_desc = f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
+        evidence_desc = _panel_heading_evidence(before_panel_count, state.page, name)
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
@@ -6825,9 +6834,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
 
             # Check if a complementary/region panel appeared with heading matching name
             if not evidence_desc:
-                after_panel_count, panel_role = _count_panels_with_heading(state.page, name)
-                if before_panel_count == 0 and after_panel_count == 1:
-                    evidence_desc = f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
+                evidence_desc = _panel_heading_evidence(before_panel_count, state.page, name)
 
             if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
