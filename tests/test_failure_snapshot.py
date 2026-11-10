@@ -41,8 +41,10 @@ class Item:
         # For tag name check (short lambda)
         if "el => el.tagName" in str(js):
             return "DIV"
-        # For safe text extraction: the JS function expects an element and returns text
-        # Since this is a mock, we simulate it by returning the text content
+        # For aria-label extraction: return the aria-label attribute (self.name)
+        if "aria-label" in str(js) and "getAttribute" in str(js):
+            return self.name
+        # For safe text extraction: return the text content (self.text)
         return self.text
 
     def get_by_role(self, role):
@@ -777,6 +779,246 @@ with sync_playwright() as p:
             # These words appear in the HTML before the controls but must not appear in the snapshot
             for control_prefix in ["Label", "Link", "Cell", "Grid", "Heading"]:
                 self.assertNotIn(f'"{control_prefix}"', snapshot_text, f"Static text '{control_prefix}' from element with control inside leaked")
+
+
+class D2_1_Tests(unittest.TestCase):
+    """D2-1: shared control check and traversal for snapshot names (old fields only).
+
+    Test cases from the design review matrix that apply to old fields (controls/panels).
+    All planted values are ASCII, unique, 10-30 characters, with unique prefixes.
+    """
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_webkit_user_modify_role_spelling_value_match_shadow_visibility_redaction_positives(self):
+        """Comprehensive D2-1 test covering all required cases for old fields."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html>
+        <head><title>D2-1 Comprehensive Test</title></head>
+        <body>
+            <!-- Case 2: CSS -webkit-user-modify inside button, heading, cell -->
+            <button id="btn-webkit">Static <span id="webkit-btn" style="-webkit-user-modify: read-write;">PLANT-webkit-button-val</span></button>
+            <dialog open>
+                <h2 id="heading-webkit">Heading <span style="-webkit-user-modify: read-write-plaintext-only;">PLANT-webkit-heading-val</span></h2>
+            </dialog>
+            <table>
+                <tr>
+                    <td id="cell-webkit">Cell <div style="-webkit-user-modify: read-write;">PLANT-webkit-cell-value</div></td>
+                </tr>
+            </table>
+
+            <!-- Case 3: role "bogus textbox" and "TEXTBOX" (case-insensitive, token matching) inside button and cell -->
+            <button id="btn-bogus">Label <div role="bogus textbox">PLANT-bogus-textbox-btn</div></button>
+            <button id="btn-upper">Label <div role="TEXTBOX">PLANT-upper-textbox-btn</div></button>
+            <table>
+                <tr>
+                    <td id="cell-bogus">Cell <div role="bogus  textbox">PLANT-bogus-textbox-cell</div></td>
+                    <td id="cell-upper">Cell <div role="  TEXTBOX  ">PLANT-upper-textbox-cell</div></td>
+                </tr>
+            </table>
+
+            <!-- Case 5: select chosen option mirrored into a sibling span -->
+            <div id="container-select">
+                <select id="sel-mirror"><option>Default</option><option value="2">PLANT-selected-option-mirrored</option></select>
+                <span id="mirror-span">PLANT-selected-option-mirrored</span>
+            </div>
+
+            <!-- Case 5: faux combobox chosen text mirrored into an aria-label -->
+            <div role="button" aria-label="PLANT-combobox-chosen-mirror" id="faux-combobox">
+                <div role="combobox">PLANT-combobox-chosen-mirror</div>
+            </div>
+
+            <!-- Case 6: button inside a shadow root whose host is inside role=combobox -->
+            <div role="combobox" id="combo-container">
+                <div id="shadow-host-combo"></div>
+            </div>
+
+            <!-- Case 6: getter shim with an input inside a button (button must have has_input: 1, but text should be blocked) -->
+            <button id="btn-shim">Button <input type="text" id="shim-input" value="PLANT-shim-input-value" /></button>
+            <div id="shadow-host-shim"></div>
+
+            <!-- Case 7: visibility: collapse and other hidden cases -->
+            <button id="btn-collapse">Visible <span style="visibility: collapse;">PLANT-collapse-hidden</span></button>
+            <button id="btn-display">Visible <span style="display: none;">PLANT-display-none-hidden</span></button>
+            <button id="btn-hidden">Visible <span hidden>PLANT-attr-hidden</span></button>
+            <button id="btn-aria">Visible <span aria-hidden="true">PLANT-aria-hidden</span></button>
+
+            <!-- Case 9: redaction - split-span hostname and long-token cases -->
+            <dialog open>
+                <h2 id="heading-split">Org is <span>acme-dev-ed</span><span>.my.salesforce.example</span> here</h2>
+                <h2 id="heading-email">Email <span>zq-local</span><span>@example.com</span> split</h2>
+                <!-- 40-char token at position 60 -->
+                <h2 id="heading-token">Start of heading text ABCDEFGH012345678901234567890123456789012345 IJKLMNOPQRSTUVWXYZ end</h2>
+            </dialog>
+
+            <!-- Test for M13: button with multiple adjacent text nodes (no spaces between them) -->
+            <button id="btn-multitext">Part<!--comment-->One<!--comment-->Two</button>
+
+            <!-- Positives: Save button with hidden input value "Save", dialog heading, link -->
+            <button id="btn-save">Save</button>
+            <input type="hidden" id="hidden-save" value="Save" />
+            <dialog open id="dialog-positive">
+                <h2>Example Panel</h2>
+                <p>Dialog content</p>
+            </dialog>
+            <a href="#x" id="link-report">Open report</a>
+
+        </body>
+        </html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+
+    # Serve from https://app.example.com/
+    page.route("https://app.example.com/test", lambda route: route.fulfill(
+        status=200,
+        content_type="text/html",
+        body=html_content
+    ))
+    page.goto("https://app.example.com/test")
+
+    # Set up webkit-user-modify elements with typed values
+    page.evaluate('document.getElementById("webkit-btn").textContent = "PLANT-webkit-button-val"')
+
+    # Select the mirrored option
+    page.locator('#sel-mirror').select_option("2")
+
+    # Set up shadow root with button inside (Case 6 - combo)
+    page.evaluate('''
+        const host = document.getElementById("shadow-host-combo");
+        const shadow = host.attachShadow({{mode: 'open'}});
+        const btn = document.createElement("button");
+        btn.textContent = "PLANT-shadow-button-combo";
+        btn.id = "shadow-btn-combo";
+        shadow.appendChild(btn);
+    ''')
+
+    # Set up shadow root with shim (Case 6 - shim: host with getters hiding shadow, input inside button)
+    page.evaluate('''
+        const shimHost = document.getElementById("shadow-host-shim");
+        const shimShadow = shimHost.attachShadow({{mode: 'open'}});
+
+        // Create a button with an input inside in the shadow root
+        const shimBtn = document.createElement("button");
+        shimBtn.textContent = "ShimButton ";
+        shimBtn.id = "shim-shadow-btn";
+        const shimInput = document.createElement("input");
+        shimInput.type = "text";
+        shimInput.value = "PLANT-shim-shadow-input";
+        shimBtn.appendChild(shimInput);
+        shimShadow.appendChild(shimBtn);
+
+        // Install getter shims on the host that hide the shadow content
+        Object.defineProperty(shimHost, 'children', {{
+            get: function() {{ return []; }}
+        }});
+        Object.defineProperty(shimHost, 'childNodes', {{
+            get: function() {{ return []; }}
+        }});
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "D2TEST", "UI_MISMATCH", "test note",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            snapshot_text_lower = snapshot_text.lower()
+            snapshot_data = json.loads(snapshot_text)
+
+            # Case 2: webkit-user-modify values must not appear
+            for plant in ["PLANT-webkit-button-val", "PLANT-webkit-heading-val", "PLANT-webkit-cell-value"]:
+                self.assertNotIn(plant, snapshot_text, f"webkit-user-modify value leaked: {plant}")
+
+            # Case 3: role spelling - bogus and uppercase tokens must be recognized as controls, values filtered
+            for plant in ["PLANT-bogus-textbox-btn", "PLANT-upper-textbox-btn",
+                          "PLANT-bogus-textbox-cell", "PLANT-upper-textbox-cell"]:
+                self.assertNotIn(plant, snapshot_text, f"role textbox value leaked: {plant}")
+
+            # Case 5: value-match - mirrored select option and combobox text must cause names to be dropped
+            self.assertNotIn("PLANT-selected-option-mirrored", snapshot_text, "select mirror leaked")
+            self.assertNotIn("PLANT-combobox-chosen-mirror", snapshot_text, "combobox mirror leaked")
+
+            # Case 6: shadow root traversal - button inside shadow root should be found
+            # But its host is inside role=combobox, so the combobox container should have no content name
+            # The button itself inside the shadow should NOT appear because it's inside a combobox
+            self.assertNotIn("PLANT-shadow-button-combo", snapshot_text, "shadow button inside combobox leaked")
+
+            # Case 6: shim with getters - button inside shadow root should still be found
+            # and should show has_input, but the input value should not appear in the button name
+            self.assertNotIn("PLANT-shim-shadow-input", snapshot_text, "shim shadow input value leaked")
+
+            # Case 7: visibility - all hidden text must not appear
+            for plant in ["PLANT-collapse-hidden", "PLANT-display-none-hidden",
+                          "PLANT-attr-hidden", "PLANT-aria-hidden"]:
+                self.assertNotIn(plant, snapshot_text, f"hidden text leaked: {plant}")
+
+            # Case 9: redaction - split-span hostnames and emails must be redacted
+            self.assertNotIn("acme-dev-ed", snapshot_text, "split hostname leaked")
+            self.assertNotIn("zq-local", snapshot_text, "split email local part leaked")
+            self.assertNotIn(".my.salesforce.example", snapshot_text_lower, "split hostname domain leaked")
+            # Long token (40 chars) should be redacted - check no 16-char piece appears
+            self.assertNotIn("ABCDEFGH01234567", snapshot_text, "long token piece leaked")
+            self.assertNotIn("0123456789012345", snapshot_text, "long token piece leaked")
+
+            # M13: multiple adjacent text nodes joined without spaces
+            self.assertIn('"PartOneTwo"', snapshot_text, "multitext button should be PartOneTwo")
+            self.assertNotIn('"Part One Two"', snapshot_text, "multitext should not have spaces")
+
+            # Positives: Save button keeps name even with hidden input value "Save"
+            self.assertIn('"Save"', snapshot_text, "Save button name missing")
+
+            # Dialog heading keeps its name
+            found_example_panel = False
+            for panel in snapshot_data["panels"]:
+                if "Example Panel" in panel.get("headings", []):
+                    found_example_panel = True
+                    break
+            self.assertTrue(found_example_panel, "Example Panel dialog heading missing")
+
+            # Link keeps its name
+            self.assertIn('"Open report"', snapshot_text, "Open report link missing")
+
+            # Visible text from buttons should appear (not the hidden parts)
+            self.assertIn('"Visible"', snapshot_text, "Visible text missing from buttons")
 
 
 if __name__ == "__main__":

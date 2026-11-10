@@ -140,20 +140,43 @@ def _visible(loc, cap: int, budget: _Budget):
             yield item
 
 
-_SAFE_TEXT_JS = """
+_SAFE_TEXT_JS = r"""
 (element) => {
     // Returns visible text from text nodes only, never from controls or editable contexts.
     // Returns "" if element is or contains a control, or is inside an editable ancestor.
+    // Value-match: returns "" if the collected name contains any current control value.
     const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
-    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option']);
+    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
     const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+    const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
 
     function isControl(el) {
         if (CONTROL_TAGS.has(el.tagName)) return true;
-        const role = el.getAttribute('role');
-        if (role && CONTROL_ROLES.has(role)) return true;
-        const editable = el.getAttribute('contenteditable');
-        if (editable !== null && editable !== 'false') return true;
+
+        // Check isContentEditable (covers inherited and explicit contenteditable)
+        if (el.isContentEditable) return true;
+
+        // Check designMode
+        if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
+
+        // Check computed -webkit-user-modify (not read-only means editable)
+        try {
+            const style = window.getComputedStyle(el);
+            const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
+            if (userModify && userModify !== 'read-only') return true;
+        } catch (e) {
+            // getComputedStyle can fail on detached elements
+        }
+
+        // Check role attribute (case-insensitive, any token in the space-separated list)
+        const roleAttr = el.getAttribute('role');
+        if (roleAttr) {
+            const tokens = roleAttr.toLowerCase().split(/\s+/);
+            for (const token of tokens) {
+                if (CONTROL_ROLES.has(token)) return true;
+            }
+        }
+
         return false;
     }
 
@@ -161,12 +184,20 @@ _SAFE_TEXT_JS = """
         if (HIDDEN_TAGS.has(el.tagName)) return true;
         if (el.hasAttribute('hidden')) return true;
         if (el.getAttribute('aria-hidden') === 'true') return true;
+
+        // Use checkVisibility for visibility: collapse and other cases
         try {
-            const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') return true;
+            if (!el.checkVisibility({visibilityProperty: true})) return true;
         } catch (e) {
-            // getComputedStyle can fail on detached elements
+            // checkVisibility not supported or element detached, fall back to getComputedStyle
+            try {
+                const style = window.getComputedStyle(el);
+                if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true;
+            } catch (e2) {
+                // getComputedStyle can fail on detached elements
+            }
         }
+
         return false;
     }
 
@@ -174,69 +205,381 @@ _SAFE_TEXT_JS = """
     if (element.isContentEditable) return '';
     if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
 
-    // Check if element is inside an editable ancestor (but not if element itself is a control)
-    const ancestorSelector = 'input,select,textarea,option,output,[contenteditable]:not([contenteditable="false"]),[role=textbox],[role=combobox],[role=searchbox],[role=spinbutton],[role=listbox],[role=option]';
-    const closestAncestor = element.closest(ancestorSelector);
-    if (closestAncestor && closestAncestor !== element) return '';
-
-    function containsControl(el) {
-        if (isControl(el)) return true;
-        for (const child of el.children) {
-            if (containsControl(child)) return true;
+    // Check if element is inside an editable ancestor, crossing shadow roots
+    function hasControlAncestor(el) {
+        let current = el.parentElement;
+        // If no parent in light DOM, check if element is in a shadow root
+        if (!current) {
+            const root = el.getRootNode();
+            if (root && root.host) {
+                current = root.host;
+            }
+        }
+        while (current) {
+            if (isControl(current)) return true;
+            // Try to climb up in the same tree
+            const parent = current.parentElement;
+            if (parent) {
+                current = parent;
+            } else {
+                // No parent in this tree, try to cross shadow boundary
+                const root = current.getRootNode();
+                if (root && root.host) {
+                    current = root.host;
+                } else {
+                    // Reached the top
+                    break;
+                }
+            }
         }
         return false;
     }
 
-    function collectText(el) {
+    if (hasControlAncestor(element)) return '';
+
+    // Traverse light children AND open shadow root children with a seen-set
+    function traverse(el, seen) {
+        if (seen.has(el)) return [];
+        seen.add(el);
+
+        const children = [];
+
+        // Light children
+        for (const child of el.childNodes) {
+            if (child.nodeType === 1) {  // ELEMENT_NODE
+                children.push(child);
+            }
+        }
+
+        // Open shadow root children
+        if (el.shadowRoot) {
+            for (const child of el.shadowRoot.childNodes) {
+                if (child.nodeType === 1) {  // ELEMENT_NODE
+                    children.push(child);
+                }
+            }
+        }
+
+        return children;
+    }
+
+    function containsControl(el, seen) {
+        if (isControl(el)) return true;
+        for (const child of traverse(el, seen)) {
+            if (containsControl(child, seen)) return true;
+        }
+        return false;
+    }
+
+    function collectText(el, seen) {
         if (isHidden(el)) return '';
         let text = '';
+
+        // Collect text nodes and recurse into elements in DOM order (light children)
         for (const node of el.childNodes) {
             if (node.nodeType === 3) {  // TEXT_NODE
                 text += node.textContent;
             } else if (node.nodeType === 1) {  // ELEMENT_NODE
                 if (!isControl(node)) {
-                    text += collectText(node);
+                    text += collectText(node, seen);
                 }
             }
         }
+
+        // Collect from shadow root in DOM order
+        if (el.shadowRoot) {
+            for (const node of el.shadowRoot.childNodes) {
+                if (node.nodeType === 3) {  // TEXT_NODE
+                    text += node.textContent;
+                } else if (node.nodeType === 1) {  // ELEMENT_NODE
+                    if (!isControl(node)) {
+                        text += collectText(node, seen);
+                    }
+                }
+            }
+        }
+
         return text;
     }
 
-    if (containsControl(element)) return '';
-    return collectText(element);
+    // Collect all values for value-match
+    function collectValues(el, seen) {
+        const values = [];
+
+        function addValue(val) {
+            if (val && typeof val === 'string') {
+                // Lowercase and collapse whitespace
+                const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
+                if (normalized) values.push(normalized);
+            }
+        }
+
+        function collectFromElement(elem) {
+            if (seen.has(elem)) return;
+            seen.add(elem);
+
+            const tag = elem.tagName;
+
+            // Input values (excluding certain types)
+            if (tag === 'INPUT') {
+                const type = (elem.getAttribute('type') || 'text').toLowerCase();
+                if (!SKIPPED_INPUT_TYPES.has(type)) {
+                    addValue(elem.value);
+                }
+            }
+
+            // Textarea values
+            if (tag === 'TEXTAREA') {
+                addValue(elem.value);
+            }
+
+            // ContentEditable text
+            if (elem.isContentEditable && elem.ownerDocument.designMode !== 'on') {
+                addValue(elem.textContent);
+            }
+
+            // Selected option text from selects
+            if (tag === 'SELECT') {
+                for (const option of elem.options) {
+                    if (option.selected) {
+                        addValue(option.textContent);
+                    }
+                }
+            }
+
+            // Role-based input controls: text and aria-valuetext
+            const roleAttr = elem.getAttribute('role');
+            if (roleAttr) {
+                const tokens = roleAttr.toLowerCase().split(/\s+/);
+                const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+                for (const token of tokens) {
+                    if (inputRoles.has(token)) {
+                        addValue(elem.textContent);
+                        addValue(elem.getAttribute('aria-valuetext'));
+                        break;
+                    }
+                }
+            }
+
+            // Recurse into children (light children)
+            for (const child of elem.childNodes) {
+                if (child.nodeType === 1) {
+                    collectFromElement(child);
+                }
+            }
+
+            // Recurse into shadow root
+            if (elem.shadowRoot) {
+                for (const child of elem.shadowRoot.childNodes) {
+                    if (child.nodeType === 1) {
+                        collectFromElement(child);
+                    }
+                }
+            }
+        }
+
+        collectFromElement(el);
+        return values;
+    }
+
+    const seen = new Set();
+    if (containsControl(element, seen)) return '';
+
+    // Collect text (join text nodes exactly as in the page, then collapse whitespace)
+    let text = collectText(element, new Set());
+    text = text.replace(/\s+/g, ' ').trim();
+
+    // Over 400 characters: drop whole
+    if (text.length > 400) return '';
+
+    // Value-match: if name contains any value, return ""
+    const nameLower = text.toLowerCase();
+    const values = collectValues(element, new Set());
+    for (const value of values) {
+        if (nameLower.includes(value)) {
+            return '';
+        }
+    }
+
+    return text;
+}
+"""
+
+
+_ARIA_LABEL_JS = r"""
+(element) => {
+    // For aria-label: apply same checks as text collection (control/ancestor/value-match)
+    // Reuse isControl, hasControlAncestor, and collectValues from _SAFE_TEXT_JS
+    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
+    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
+    const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
+
+    function isControl(el) {
+        if (CONTROL_TAGS.has(el.tagName)) return true;
+        if (el.isContentEditable) return true;
+        if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
+        try {
+            const style = window.getComputedStyle(el);
+            const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
+            if (userModify && userModify !== 'read-only') return true;
+        } catch (e) {}
+        const roleAttr = el.getAttribute('role');
+        if (roleAttr) {
+            const tokens = roleAttr.toLowerCase().split(/\s+/);
+            for (const token of tokens) {
+                if (CONTROL_ROLES.has(token)) return true;
+            }
+        }
+        return false;
+    }
+
+    function hasControlAncestor(el) {
+        let current = el.parentElement;
+        // If no parent in light DOM, check if element is in a shadow root
+        if (!current) {
+            const root = el.getRootNode();
+            if (root && root.host) {
+                current = root.host;
+            }
+        }
+        while (current) {
+            if (isControl(current)) return true;
+            // Try to climb up in the same tree
+            const parent = current.parentElement;
+            if (parent) {
+                current = parent;
+            } else {
+                // No parent in this tree, try to cross shadow boundary
+                const root = current.getRootNode();
+                if (root && root.host) {
+                    current = root.host;
+                } else {
+                    // Reached the top
+                    break;
+                }
+            }
+        }
+        return false;
+    }
+
+    function collectValues(el, seen) {
+        const values = [];
+        function addValue(val) {
+            if (val && typeof val === 'string') {
+                const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
+                if (normalized) values.push(normalized);
+            }
+        }
+        function collectFromElement(elem) {
+            if (seen.has(elem)) return;
+            seen.add(elem);
+            const tag = elem.tagName;
+            if (tag === 'INPUT') {
+                const type = (elem.getAttribute('type') || 'text').toLowerCase();
+                if (!SKIPPED_INPUT_TYPES.has(type)) {
+                    addValue(elem.value);
+                }
+            }
+            if (tag === 'TEXTAREA') {
+                addValue(elem.value);
+            }
+            if (elem.isContentEditable && elem.ownerDocument.designMode !== 'on') {
+                addValue(elem.textContent);
+            }
+            if (tag === 'SELECT') {
+                for (const option of elem.options) {
+                    if (option.selected) {
+                        addValue(option.textContent);
+                    }
+                }
+            }
+            const roleAttr = elem.getAttribute('role');
+            if (roleAttr) {
+                const tokens = roleAttr.toLowerCase().split(/\s+/);
+                const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+                for (const token of tokens) {
+                    if (inputRoles.has(token)) {
+                        addValue(elem.textContent);
+                        addValue(elem.getAttribute('aria-valuetext'));
+                        break;
+                    }
+                }
+            }
+            for (const child of elem.childNodes) {
+                if (child.nodeType === 1) {
+                    collectFromElement(child);
+                }
+            }
+            if (elem.shadowRoot) {
+                for (const child of elem.shadowRoot.childNodes) {
+                    if (child.nodeType === 1) {
+                        collectFromElement(child);
+                    }
+                }
+            }
+        }
+        collectFromElement(el);
+        return values;
+    }
+
+    // Check if element itself is contentEditable or in designMode document
+    if (element.isContentEditable) return '';
+    if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
+
+    // Check if element is inside a control ancestor (crossing shadow roots)
+    if (hasControlAncestor(element)) return '';
+
+    // Get aria-label text
+    const ariaLabel = (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    if (!ariaLabel) return '';
+    if (ariaLabel.length > 400) return '';
+
+    // Value-match on aria-label
+    const ariaLabelLower = ariaLabel.toLowerCase();
+    const values = collectValues(element, new Set());
+    for (const value of values) {
+        if (ariaLabelLower.includes(value)) {
+            return '';
+        }
+    }
+
+    return ariaLabel;
 }
 """
 
 
 def _name(item, *, read_text: bool, budget: _Budget) -> str:
-    """aria-label, then safe text from visible text nodes only.
+    """aria-label or safe text from visible text nodes only.
 
-    Safe text never descends into input, select, textarea, option, output, contenteditable
-    elements, or elements with role textbox/combobox/searchbox/spinbutton/listbox/option.
+    aria-label is read only AFTER control and ancestor checks (done in JS).
+    Safe text never descends into controls or editable contexts.
     Returns "" if element is or contains a control, or is inside an editable ancestor.
-    Never reads title (apps mirror values into it)."""
+    Value-match: returns "" if the collected name contains any current control value.
+    Never reads title (apps mirror values into it).
+    Over 400 characters: dropped whole. Python applies redact_text before trimming."""
     # Every read gets a budget-bound timeout; a detached element would otherwise
     # wait the page default (about 20 s).
     if budget.over():
         return ""
 
-    # Try aria-label first
+    # Try aria-label first (with control/ancestor checks and value-match)
     try:
-        value = " ".join(str(item.get_attribute("aria-label", timeout=budget.timeout_ms(500)) or "").split())
-        if value and len(value) <= 200:
-            return redact_text(value)
+        value = str(item.evaluate(_ARIA_LABEL_JS, timeout=budget.timeout_ms(500)) or "")
+        if value:
+            return redact_text(value, NAME_LIMIT)
     except Exception:
         pass
 
     if budget.over():
         return ""
 
-    # Try safe text from visible text nodes only
+    # Try safe text from visible text nodes (includes value-match and full checks)
     if read_text:
         try:
-            value = " ".join(str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "").split())
-            if value and len(value) <= 200:
-                return redact_text(value)
+            value = str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "")
+            if value:
+                # Python redacts first, then trims (no pre-trim in Python)
+                return redact_text(value, NAME_LIMIT)
         except Exception:
             pass
 
