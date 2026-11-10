@@ -429,5 +429,93 @@ class ReportTests(unittest.TestCase):
         self.assertIn("<span class='stat-value'>2</span><span class='stat-label'>passes need a check", html)
 
 
+class EnvBlockedNoteTests(unittest.TestCase):
+    """Tests for the note given to steps after an ENV_BLOCKED stop."""
+
+    def test_env_blocked_with_note_describes_the_reason(self):
+        """ENV_BLOCKED (non-frozen) with a note: later steps get the step id and reason."""
+        def blocked(state, step):
+            return CheckResult(
+                "ENV_BLOCKED",
+                "Blocked by a covering dialog. Details about the issue.",
+                ()
+            )
+
+        page = Page(HOME, body="Home")
+        items = (
+            _step("S1", EX_A, "Task 1: Sample one", "1"),
+            _step("S2", EX_A, "Task 1: Sample one", "2"),
+            _step("S3", EX_A, "Task 1: Sample one", "3"),
+        )
+        outcome, _calls = _walk(page, items, {"S2": blocked})
+        self.assertEqual(outcome.statuses["S2"], "ENV_BLOCKED")
+        self.assertEqual(outcome.statuses["S3"], "NOT_RUN")
+        # S3's note contains the step id and reason
+        self.assertIn("S2", outcome.notes["S3"])
+        self.assertIn("covering dialog", outcome.notes["S3"])
+        # Does not contain the old generic text
+        self.assertNotIn("org session", outcome.notes["S3"])
+
+    def test_env_blocked_with_empty_note_says_environment_blocked(self):
+        """ENV_BLOCKED (non-frozen) with empty note: later steps get 'environment blocked'."""
+        def blocked(state, step):
+            return CheckResult("ENV_BLOCKED", "")
+
+        page = Page(HOME, body="Home")
+        items = (
+            _step("S1", EX_A, "Task 1: Sample one", "1"),
+            _step("S2", EX_A, "Task 1: Sample one", "2"),
+            _step("S3", EX_A, "Task 1: Sample one", "3"),
+        )
+        outcome, _calls = _walk(page, items, {"S2": blocked})
+        self.assertEqual(outcome.statuses["S2"], "ENV_BLOCKED")
+        self.assertEqual(outcome.statuses["S3"], "NOT_RUN")
+        # S3's note contains the fallback reason
+        self.assertIn("environment blocked", outcome.notes["S3"])
+
+    def test_page_lost_note_unchanged(self):
+        """Page-lost stops still get the page-lost note."""
+        def closed(state, step):
+            state.page.url = "about:blank"
+            return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
+
+        page = Page(HOME, body="Home")
+        items = (
+            _step("S1", EX_A, "Task 1: Sample one", "1"),
+            _step("S2", EX_A, "Task 1: Sample one", "2"),
+            _step("S3", EX_A, "Task 1: Sample one", "3"),
+        )
+        outcome, _calls = _walk(page, items, {"S2": closed})
+        self.assertEqual(outcome.statuses["S2"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["S3"], "NOT_RUN")
+        # S3's note says page left the org
+        self.assertIn("page left the org", outcome.notes["S3"])
+        self.assertIn("S2", outcome.notes["S3"])
+
+    def test_login_note_unchanged(self):
+        """Login stops still get the session ended note."""
+        def login_redirect(state, step):
+            # Redirect to login and prevent return_home from working
+            state.page.url = "https://login.salesforce.com/setup"
+            # Make goto fail (so return_home returns False)
+            def fail_goto(url):
+                raise RuntimeError("Cannot return to org")
+            state.page.on_goto = fail_goto
+            return CheckResult("UI_MISMATCH", "Sample control was not found.", (), freeze=True)
+
+        page = Page(HOME, body="Home")
+        items = (
+            _step("S1", EX_A, "Task 1: Sample one", "1"),
+            _step("S2", EX_A, "Task 1: Sample one", "2"),
+            _step("S3", EX_A, "Task 1: Sample one", "3"),
+        )
+        outcome, _calls = _walk(page, items, {"S2": login_redirect})
+        self.assertEqual(outcome.statuses["S2"], "UI_MISMATCH")
+        self.assertEqual(outcome.statuses["S3"], "NOT_RUN")
+        # S3's note says session ended
+        self.assertIn("session ended", outcome.notes["S3"])
+        self.assertIn("S2", outcome.notes["S3"])
+
+
 if __name__ == "__main__":
     unittest.main()
