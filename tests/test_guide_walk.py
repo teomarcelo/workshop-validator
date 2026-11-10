@@ -4257,12 +4257,12 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        import time
+        state = guide_walk.WalkState(self.page, sleeper=time.sleep, step_deadline=time.monotonic() + 30)
         step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
         result = guide_walk._act_click(state, step_obj, "Account Name")
 
         self.assertEqual(result.status, "PASS")
-        # Evidence is in evidence_ids, not in the note
         self.assertTrue(any("panel" in eid for eid in result.evidence_ids))
 
     def test_panel_heading_not_matching_name_is_needs_review(self):
@@ -4282,7 +4282,31 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_panel_heading_case_mismatch_is_needs_review(self):
+        """Click Account Name, panel heading 'account name' (lowercase) → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const panel = document.createElement('div');
+            panel.setAttribute('role', 'complementary');
+            panel.setAttribute('aria-label', 'Field Information');
+            panel.innerHTML = '<h2>account name</h2><p>Type: Text</p>';
+            document.body.appendChild(panel);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
         step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
         result = guide_walk._act_click(state, step_obj, "Account Name")
 
@@ -4301,7 +4325,7 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
         step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
         result = guide_walk._act_click(state, step_obj, "Account Name")
 
@@ -4325,7 +4349,7 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
         step_obj = step("test", "Exercise", "Task", "1", "Click Name")
         result = guide_walk._act_click(state, step_obj, "Name")
 
@@ -4355,7 +4379,7 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
         step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
         result = guide_walk._act_click(state, step_obj, "Account Name")
 
@@ -4377,7 +4401,36 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
+        step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
+        result = guide_walk._act_click(state, step_obj, "Account Name")
+
+        self.assertEqual(result.status, "NEEDS_REVIEW")
+        self.assertIn("no change could be read", result.note)
+
+    def test_panel_moved_by_rerender_is_needs_review(self):
+        """Panel exists at index 0, click inserts another before it (moves to index 1) → NEEDS_REVIEW"""
+        html = """
+        <button id="field-btn">Account Name</button>
+        <div role="region" aria-label="Existing Panel" id="existing">
+            <h2>Account Name</h2>
+            <p>Existing content</p>
+        </div>
+        <script>
+        document.getElementById('field-btn').addEventListener('click', function() {
+            const newPanel = document.createElement('div');
+            newPanel.setAttribute('role', 'region');
+            newPanel.setAttribute('aria-label', 'Inserted Panel');
+            newPanel.innerHTML = '<h2>Other Field</h2>';
+            const existing = document.getElementById('existing');
+            document.body.insertBefore(newPanel, existing);
+        });
+        </script>
+        """
+        self.page.set_content(html)
+
+        from workshop_validator import guide_walk
+        state = guide_walk.WalkState(self.page, timeout_s=1, page_wait_s=1)
         step_obj = step("test", "Exercise", "Task", "1", "Click Account Name")
         result = guide_walk._act_click(state, step_obj, "Account Name")
 
@@ -4401,7 +4454,8 @@ class PanelEvidenceTests(unittest.TestCase):
         self.page.set_content(html)
 
         from workshop_validator import guide_walk
-        state = guide_walk.WalkState(self.page)
+        import time
+        state = guide_walk.WalkState(self.page, sleeper=time.sleep, step_deadline=time.monotonic() + 30)
         step_obj = step("test", "Exercise", "Task", "1", "Click Stage")
         result = guide_walk._act_click(state, step_obj, "Stage")
 

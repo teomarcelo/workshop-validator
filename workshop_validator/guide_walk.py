@@ -6511,53 +6511,53 @@ def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
     return frozenset(named)
 
 
-def _capture_panel_headings(page) -> dict[str, str]:
-    """Capture complementary/region panel identities and their first heading text.
+def _fold_text(text: str) -> str:
+    """Normalize text: collapse whitespace, NFKC normalize, fold quotes. Case-sensitive."""
+    import unicodedata
+    normalized = unicodedata.normalize("NFKC", text or "")
+    # Fold various quote characters to ASCII quotes
+    normalized = normalized.replace("‘", "'").replace("’", "'")
+    normalized = normalized.replace("“", '"').replace("”", '"')
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
-    Returns a dict mapping panel identity (aria-label or accessible name) to the
-    text of its first h2/h3/heading element. Only visible panels are included.
+
+def _count_panels_with_heading(page, heading_text: str) -> tuple[int, str]:
+    """Count visible complementary/region panels with first heading matching text.
+
+    Returns (count, role_of_last_match). The role is read from the matched element.
+    Only checks the page itself, not frames, to avoid counting the same panel twice.
     """
-    panels: dict[str, str] = {}
-    for root in _roots(page):
-        for role in ("complementary", "region"):
+    folded_target = _fold_text(heading_text)
+    count = 0
+    last_role = ""
+    for role in ("complementary", "region"):
+        try:
+            loc = page.locator(f"[role='{role}']")
+        except Exception:
+            continue
+        for index in range(min(_count(loc), 20)):
             try:
-                loc = root.locator(f"[role='{role}']")
+                panel = loc.nth(index)
+                if hasattr(panel, "is_visible") and not panel.is_visible():
+                    continue
+                # Find first heading in the panel
+                heading_found = ""
+                for heading_sel in ("h2", "h3", "[role='heading']"):
+                    try:
+                        heading_loc = panel.locator(heading_sel)
+                        if _count(heading_loc) > 0:
+                            heading_found = (heading_loc.first.inner_text(timeout=500) or "").strip()
+                            if heading_found:
+                                break
+                    except Exception:
+                        continue
+                if heading_found and _fold_text(heading_found) == folded_target:
+                    count += 1
+                    last_role = role
             except Exception:
                 continue
-            for index in range(min(_count(loc), 20)):
-                try:
-                    panel = loc.nth(index)
-                    if hasattr(panel, "is_visible") and not panel.is_visible():
-                        continue
-                    # Use aria-label or inner text as panel identity
-                    panel_id = ""
-                    try:
-                        aria_label = panel.get_attribute("aria-label")
-                        if aria_label and aria_label.strip():
-                            panel_id = norm(aria_label)
-                    except Exception:
-                        pass
-                    if not panel_id:
-                        try:
-                            # Use a stable identifier based on position and role
-                            panel_id = f"{role}_{index}"
-                        except Exception:
-                            continue
-                    # Find first heading in the panel
-                    heading_text = ""
-                    for heading_sel in ("h2", "h3", "[role='heading']"):
-                        try:
-                            heading_loc = panel.locator(heading_sel)
-                            if _count(heading_loc) > 0:
-                                heading_text = (heading_loc.first.inner_text(timeout=500) or "").strip()
-                                if heading_text:
-                                    break
-                        except Exception:
-                            continue
-                    panels[panel_id] = norm(heading_text) if heading_text else ""
-                except Exception:
-                    continue
-    return panels
+    return count, last_role
 
 
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
@@ -6602,7 +6602,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_messages = _read_status_messages(state.page)
     before_has_saved = _words_visible(state.page, "successfully saved")
     before_named_dialogs = _target_dialogs(state.page, frozenset(target_names))
-    before_panels = _capture_panel_headings(state.page)
+    before_panel_count, _ = _count_panels_with_heading(state.page, name)
 
     loc = _locator_for_name(state.page, name)
     if loc is None:
@@ -6652,26 +6652,11 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     if not evidence_desc and accepted:
         evidence_desc = "after-state: dialog text read"
 
-    # Check if a complementary/region panel appeared or changed with heading matching name
+    # Check if a complementary/region panel appeared with heading matching name
     if not evidence_desc:
-        after_panels = _capture_panel_headings(state.page)
-        matching_panels = []
-        for panel_id, heading in after_panels.items():
-            # Heading must exactly match the clicked name (case-sensitive after normalization)
-            if heading == norm(name):
-                # Panel is new, or its heading changed
-                before_heading = before_panels.get(panel_id, "")
-                if panel_id not in before_panels or before_heading != heading:
-                    matching_panels.append((panel_id, heading))
-        # Only one matching panel may be visible
-        if len(matching_panels) == 1:
-            panel_id, heading = matching_panels[0]
-            # Determine panel role from panel_id (it includes the role)
-            panel_role = "complementary" if "complementary" in panel_id else "region"
-            if panel_id in before_panels:
-                evidence_desc = f"after-state: {panel_role} panel heading changed to {heading}"
-            else:
-                evidence_desc = f"after-state: {panel_role} panel with heading {heading} opened"
+        after_panel_count, panel_role = _count_panels_with_heading(state.page, name)
+        if before_panel_count == 0 and after_panel_count == 1:
+            evidence_desc = f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
@@ -6838,26 +6823,11 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
             ):
                 evidence_desc = "after-state: dialog opened"
 
-            # Check if a complementary/region panel appeared or changed with heading matching name
+            # Check if a complementary/region panel appeared with heading matching name
             if not evidence_desc:
-                after_panels = _capture_panel_headings(state.page)
-                matching_panels = []
-                for panel_id, heading in after_panels.items():
-                    # Heading must exactly match the clicked name (case-sensitive after normalization)
-                    if heading == norm(name):
-                        # Panel is new, or its heading changed
-                        before_heading = before_panels.get(panel_id, "")
-                        if panel_id not in before_panels or before_heading != heading:
-                            matching_panels.append((panel_id, heading))
-                # Only one matching panel may be visible
-                if len(matching_panels) == 1:
-                    panel_id, heading = matching_panels[0]
-                    # Determine panel role from panel_id (it includes the role)
-                    panel_role = "complementary" if "complementary" in panel_id else "region"
-                    if panel_id in before_panels:
-                        evidence_desc = f"after-state: {panel_role} panel heading changed to {heading}"
-                    else:
-                        evidence_desc = f"after-state: {panel_role} panel with heading {heading} opened"
+                after_panel_count, panel_role = _count_panels_with_heading(state.page, name)
+                if before_panel_count == 0 and after_panel_count == 1:
+                    evidence_desc = f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
 
             if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
