@@ -180,6 +180,23 @@ def _text(step: GuideStep) -> str:
     return norm(step.text)
 
 
+def _extract_block_reason(note: str) -> str:
+    """Extract a short reason from a stop-step note.
+
+    Returns the first sentence (up to about 120 chars) or 'environment blocked'.
+    """
+    if not note:
+        return "environment blocked"
+    # Take the first sentence (up to first period, or the whole note if none)
+    first_sentence = note.split('.')[0].strip()
+    if not first_sentence:
+        return "environment blocked"
+    # Cap at about 120 characters
+    if len(first_sentence) > 120:
+        first_sentence = first_sentence[:120].strip()
+    return first_sentence
+
+
 def org_host(url: str) -> str:
     host = (urlparse(url or "").hostname or "").lower()
     if host in {"login.salesforce.com", "test.salesforce.com", "salesforce.com", "www.salesforce.com"}:
@@ -8098,7 +8115,9 @@ def walk_guide(
                 elif session_stop == "login":
                     blocked = "The org session ended (sent to the login page), so the following steps were not run."
                 else:
-                    blocked = "The org session was blocked, so the following steps were not run."
+                    # Extract a short reason from the stopping step's result
+                    reason = _extract_block_reason(result.note)
+                    blocked = f"Not run: {step.step_id} was blocked ({reason}), so the walk stopped."
     return WalkOutcome(
         statuses, notes, evidence, tuple(executed), suspects, timestamps, snapshots, guide_notes, freezes,
     )
