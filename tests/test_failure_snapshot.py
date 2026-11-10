@@ -20,21 +20,32 @@ PNG = b"\x89PNG\r\n\x1a\nfake"
 
 
 class Item:
-    def __init__(self, name="", text="", visible=True, headings=()):
+    def __init__(self, name="", text="", visible=True, headings=(), tag="div", role_attr=""):
         self.name, self.text, self.visible = name, text, visible
-        self.heads = [Item(text=h) for h in headings]
+        self.heads = [Item(text=h, tag="h2") for h in headings]
+        self.tag = tag
+        self.role_attr = role_attr
 
     def is_visible(self):
         return self.visible
 
     def get_attribute(self, attr, timeout=None):
-        return self.name if attr == "aria-label" else None
+        if attr == "aria-label":
+            return self.name
+        elif attr == "role":
+            return self.role_attr
+        elif attr == "aria-level":
+            return "2" if self.tag.startswith("h") else ""
+        return None
 
     def text_content(self, timeout=None):
         return self.text
 
     def inner_text(self, timeout=None):
         return self.text
+
+    def evaluate(self, script, timeout=None):
+        return self.tag
 
     def get_by_role(self, role):
         return Loc(self.heads if role == "heading" else [])
@@ -67,7 +78,7 @@ class Page:
         self.selectors = []
         self.roles = {
             "button": [Item(text=f"Signed in as {EMAIL}"), Item(text="Save"), Item(text="Hidden", visible=False)],
-            "link": [Item(name=f"Open {HOST}"), Item(text="Setup Home")],
+            "link": [Item(name=f"Open {HOST}"), Item(text="Example Panel")],
             "tab": [Item(text="Details")],
             "dialog": [Item(name="", text="whole dialog body text", headings=("Welcome Tour",))],
             "complementary": [Item(name="Help panel", headings=("Need help?",))],
@@ -159,7 +170,7 @@ class SnapshotWrittenTests(unittest.TestCase):
             self.assertEqual(data["screenshot"], "snapshots/003-S3.png")
             self.assertIn("Save", data["controls"]["button"])
             self.assertNotIn("Hidden", data["controls"]["button"])
-            self.assertIn("Setup Home", data["controls"]["link"])
+            self.assertIn("Example Panel", data["controls"]["link"])
             self.assertEqual(data["controls"]["tab"], ["Details"])
             self.assertEqual(data["controls"]["dialog"], ["Welcome Tour"])
             panels = {(p["role"], p["name"]): p["headings"] for p in data["panels"]}
@@ -203,10 +214,10 @@ class SnapshotRedactionTests(unittest.TestCase):
                 Page(), GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
                 checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
                 sleeper=clock.sleep, snapshot_dir=Path(tmp),
-                snapshot_leaks=lambda value: "Setup Home" in value,
+                snapshot_leaks=lambda value: "Example Panel" in value,
             )
             text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
-            self.assertNotIn("Setup Home", text)
+            self.assertNotIn("Example Panel", text)
             self.assertIn("<omitted>", text)
 
 
@@ -475,6 +486,346 @@ class SnapshotBoardTests(unittest.TestCase):
         board = build_board(inventory, outcomes=outcomes_from_report_steps([bad]), notice="n", run_id="r1")
         views = [v for s in board.sections for t in s.tasks for v in t.steps]
         self.assertEqual(views[0].snapshot, "")
+
+
+class ParseAriaLineTests(unittest.TestCase):
+    def test_quoted_line_with_colon_in_name_parses_role_correctly(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        # Playwright quotes lines when name contains ": "
+        line = "  - 'row \"Field Label: Name\"'"
+        result = _parse_aria_line(line)
+        self.assertIsNotNone(result)
+        indent, role, name = result
+        self.assertEqual(role, "row")
+        self.assertEqual(name, "Field Label: Name")
+        self.assertEqual(indent, "  ")
+
+    def test_double_quoted_line_with_escaped_quotes_parses_correctly(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        # Double-quoted outer wrapper with escaped inner quotes
+        line = "  - \"button \\\"Save: Draft\\\"\""
+        result = _parse_aria_line(line)
+        self.assertIsNotNone(result)
+        indent, role, name = result
+        self.assertEqual(role, "button")
+        self.assertEqual(name, "Save: Draft")
+
+    def test_unquoted_line_parses_correctly(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        line = '- button "Save"'
+        result = _parse_aria_line(line)
+        self.assertIsNotNone(result)
+        indent, role, name = result
+        self.assertEqual(role, "button")
+        self.assertEqual(name, "Save")
+
+    def test_role_without_name_parses_correctly(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        line = "- heading"
+        result = _parse_aria_line(line)
+        self.assertIsNotNone(result)
+        indent, role, name = result
+        self.assertEqual(role, "heading")
+        self.assertEqual(name, "")
+
+    def test_text_node_returns_none(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        self.assertIsNone(_parse_aria_line("  - text: some content"))
+
+    def test_property_line_returns_none(self):
+        from workshop_validator.failure_snapshot import _parse_aria_line
+        self.assertIsNone(_parse_aria_line("  - /link/"))
+
+
+class RegionPage(Page):
+    """Page with regions for testing."""
+    def __init__(self):
+        super().__init__()
+        self.roles.update({
+            "region": [
+                Item(name="Navigation"),
+                Item(name="Content", headings=("Page Title", "Section 1")),
+            ],
+            "tabpanel": [Item(name="Details Panel")],
+            "grid": [Item(name="Data Grid", headings=("Grid Header",))],
+        })
+
+
+class RegionsTests(unittest.TestCase):
+    def test_regions_field_includes_visible_regions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(RegionPage(), Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            self.assertIn("regions", data)
+            regions = data["regions"]
+            self.assertIsInstance(regions, list)
+            # Should have collected region, tabpanel, grid, dialog, complementary
+            self.assertGreater(len(regions), 0)
+            # Check structure of a region entry
+            if regions:
+                first = regions[0]
+                self.assertIn("role", first)
+                self.assertIn("name", first)
+                self.assertIn("tag", first)
+                self.assertIn("role_attr", first)
+                self.assertIn("frame", first)
+                self.assertIn("headings", first)
+
+    def test_regions_capped_at_twelve(self):
+        """Guard: region cap 12"""
+        page = Page()
+        # Add 15 regions
+        page.roles["region"] = [Item(name=f"Region {i}") for i in range(15)]
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(page, Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            # Should be capped at 12
+            self.assertLessEqual(len(data["regions"]), 12)
+
+
+class NamedTreePage(Page):
+    """Page with a richer tree for testing named_tree."""
+    def __init__(self):
+        super().__init__()
+
+    def locator(self, selector):
+        self.selectors.append(selector)
+        if selector == "head > title":
+            return Loc([Item(text=self.title())])
+        if selector == "body":
+            return Loc(tree=(
+                f'- heading "Page Title"\n'
+                f'- region "Main Content"\n'
+                f'  - button "Save"\n'
+                f'  - link "Help"\n'
+                f'  - textbox "Account Name": secret-value-123\n'
+                f'- dialog "Confirmation"\n'
+                f'  - button "OK"\n'
+            ))
+        return Loc()
+
+
+class NamedTreeTests(unittest.TestCase):
+    def test_named_tree_keeps_names_for_structural_roles(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(NamedTreePage(), Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            self.assertIn("named_tree", data)
+            named_tree = data["named_tree"]
+            self.assertIn('heading "Page Title"', named_tree)
+            self.assertIn('region "Main Content"', named_tree)
+            self.assertIn('button "Save"', named_tree)
+            self.assertIn('link "Help"', named_tree)
+            self.assertIn('dialog "Confirmation"', named_tree)
+            self.assertIn('button "OK"', named_tree)
+
+    def test_named_tree_keeps_textbox_label_not_value(self):
+        """Guard: input value dropped"""
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(NamedTreePage(), Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            named_tree = data["named_tree"]
+            # Should have the label (name)
+            self.assertIn('textbox "Account Name"', named_tree)
+            # Should NOT have the value
+            self.assertNotIn("secret-value-123", named_tree)
+            # Should not have the colon and value part
+            self.assertNotIn(": secret", named_tree)
+
+    def test_named_tree_caps_names_at_eighty_chars(self):
+        """Guard: name cap 80"""
+        # Use a long name with spaces so it's not treated as a token
+        long_name = " ".join(["Word"] * 30)  # 120+ characters with spaces
+
+        class LongNamePage(Page):
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    return Loc(tree=f'- button "{long_name}"\n')
+                return Loc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(LongNamePage(), Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            named_tree = data["named_tree"]
+            # Should be truncated with ...
+            self.assertIn("...", named_tree)
+            # Check that no single name exceeds the cap in the output
+            for line in named_tree.splitlines():
+                if '"' in line:
+                    # Extract the quoted part
+                    start = line.find('"')
+                    end = line.rfind('"')
+                    if start != end and start >= 0:
+                        quoted = line[start+1:end]
+                        self.assertLessEqual(len(quoted), 80)
+
+
+class TruncatedRolesTests(unittest.TestCase):
+    def test_truncated_roles_lists_capped_control_roles(self):
+        """Test that truncated_roles lists roles that hit their cap."""
+        page = Page()
+        # Add 70 buttons (cap is 60)
+        page.roles["button"] = [Item(text=f"Button {i}") for i in range(70)]
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(page, Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            self.assertIn("truncated_roles", data)
+            # button should be in the list
+            self.assertIn("button", data["truncated_roles"])
+
+    def test_truncated_roles_empty_when_under_cap(self):
+        """Test that truncated_roles is empty when no roles hit cap."""
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(Page(), Path(tmp), ("UI_MISMATCH",))
+            data = json.loads((Path(tmp) / "snapshots" / "001-S1.json").read_text())
+            self.assertEqual(data["truncated_roles"], [])
+
+
+class NewFieldsLeakGuardTests(unittest.TestCase):
+    def test_leak_guard_applied_to_regions(self):
+        """Guard: leak guard applied to new fields"""
+        page = RegionPage()
+        page.roles["region"] = [Item(name="Example Panel")]
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = Clock()
+            walk_guide(
+                page, GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
+                checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
+                sleeper=clock.sleep, snapshot_dir=Path(tmp),
+                snapshot_leaks=lambda value: "Example Panel" in value,
+            )
+            text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
+            self.assertNotIn("Example Panel", text)
+            self.assertIn("<omitted>", text)
+
+    def test_leak_guard_applied_to_named_tree(self):
+        """Guard: leak guard applied to new fields"""
+        class LeakPage(Page):
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    return Loc(tree='- button "Secret Button"\n')
+                return Loc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = Clock()
+            walk_guide(
+                LeakPage(), GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
+                checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
+                sleeper=clock.sleep, snapshot_dir=Path(tmp),
+                snapshot_leaks=lambda value: "Secret Button" in value,
+            )
+            text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
+            self.assertNotIn("Secret Button", text)
+            self.assertIn("<omitted>", text)
+
+
+class NamedTreePrivacyTests(unittest.TestCase):
+    def test_named_tree_drops_text_nodes_and_property_lines(self):
+        """Guard: non-element lines dropped from named_tree"""
+        email = "user@example.com"
+        host = "test.example.com"
+        token = "sid=abc123token456def789"
+        contenteditable = "typed: secret content"
+
+        class LeakyPage(Page):
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    # Tree with text nodes and property lines that could leak
+                    return Loc(tree=(
+                        f'- button "Safe Button"\n'
+                        f'- text: {contenteditable}\n'
+                        f'- link "Safe Link"\n'
+                        f'- /url: https://{host}/path?{token}\n'
+                        f'- heading "Safe Heading"\n'
+                        f'- text: Contact {email} for help\n'
+                    ))
+                return Loc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(LeakyPage(), Path(tmp), ("UI_MISMATCH",))
+            # Read the whole file as bytes to check for any occurrence
+            file_bytes = (Path(tmp) / "snapshots" / "001-S1.json").read_bytes()
+            file_text = file_bytes.decode("utf-8")
+
+            # None of these secrets should appear anywhere in the file
+            self.assertNotIn(email, file_text)
+            self.assertNotIn(host, file_text)
+            self.assertNotIn(token, file_text)
+            self.assertNotIn(contenteditable, file_text)
+            self.assertNotIn("sid=", file_text)
+
+            # But element names should be present (redacted)
+            data = json.loads(file_text)
+            named_tree = data["named_tree"]
+            self.assertIn("button", named_tree)
+            self.assertIn("link", named_tree)
+            self.assertIn("heading", named_tree)
+            # Text nodes and properties should not appear
+            self.assertNotIn("- text:", named_tree)
+            self.assertNotIn("- /url:", named_tree)
+
+    def test_screenshot_taken_before_new_reads(self):
+        """Test that budget running out during new reads still gets screenshot."""
+        clock = Clock()
+
+        class SlowRegionPage(Page):
+            def __init__(self, clock):
+                super().__init__()
+                self.clock = clock
+                self.roles["region"] = [SlowItem(clock, f"Region {i}") for i in range(20)]
+
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    return Loc(tree='- button "Test"\n')
+                return Loc()
+
+        page = SlowRegionPage(clock)
+        with tempfile.TemporaryDirectory() as tmp:
+            from workshop_validator.guide_walk import _redact_aria_snapshot
+            href = save_failure_snapshot(
+                page, Path(tmp), 1, "S1", "UI_MISMATCH", "test",
+                roots=[page], redact_tree=_redact_aria_snapshot, clock=clock,
+                budget_s=8.0,
+            )
+            data = json.loads((Path(tmp) / href).read_text())
+            # Screenshot should be present even if budget ran out during new reads
+            self.assertNotEqual(data["screenshot"], "unavailable (TimeoutError)")
+            self.assertTrue(data["screenshot"].startswith("snapshots/"))
+
+
+class BudgetOverrunTests(unittest.TestCase):
+    def test_budget_overrun_drops_new_fields_not_old(self):
+        """Guard: budget overrun drops only new fields"""
+        clock = Clock()
+        page = SlowPage(clock)
+        with tempfile.TemporaryDirectory() as tmp:
+            from workshop_validator.guide_walk import _redact_aria_snapshot
+            href = save_failure_snapshot(
+                page, Path(tmp), 1, "S1", "UI_MISMATCH", "missed",
+                roots=[page], redact_tree=_redact_aria_snapshot, clock=clock,
+            )
+            data = json.loads((Path(tmp) / href).read_text())
+        # Old fields should be present
+        self.assertIn("controls", data)
+        self.assertIn("button", data["controls"])
+        self.assertIn("panels", data)
+        # New fields should be empty due to budget overrun
+        self.assertEqual(data["regions"], [])
+        self.assertEqual(data["named_tree"], "")
+        # Truncated flag should be set
+        self.assertEqual(data["truncated"], "snapshot truncated (time)")
 
 
 if __name__ == "__main__":
