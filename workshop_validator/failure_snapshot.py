@@ -267,7 +267,7 @@ function collectValuesFromPage(doc) {
                 }
             }
         }
-        if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT') {
+        if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT' && tag !== 'OPTION') {
             addValue(elem.textContent);
         }
         const tokens = getRoleTokens(elem);
