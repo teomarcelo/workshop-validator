@@ -588,21 +588,36 @@ class PlantedValueTests(unittest.TestCase):
                 <h2 id="heading-in-editable">PLANT-heading-in-contenteditable</h2>
             </div>
 
-            <!-- Elements that are themselves contenteditable -->
+            <!-- Inherited contenteditable (guards isContentEditable for inherited case) -->
+            <dialog id="inherited-dialog" open>
+                <div contenteditable="true">
+                    <h2 id="h-inherited">PLANT-inherited-heading</h2>
+                </div>
+            </dialog>
+
+            <!-- Elements that are themselves contenteditable (guards isContentEditable check) -->
             <button contenteditable="true" id="btn-itself-editable">PLANT-btn-itself-editable</button>
             <a href="#x" contenteditable="true" id="link-itself-editable">PLANT-link-itself-editable</a>
             <div role="button" contenteditable="true" id="div-btn-editable">PLANT-div-btn-editable</div>
             <div role="link" contenteditable="true" id="div-link-editable">PLANT-div-link-editable</div>
 
-            <!-- Button/link/heading inside role=textbox -->
+            <!-- Self-editable heading in dialog (guards isContentEditable for headings) -->
+            <dialog id="selfedit-dialog" open>
+                <h2 contenteditable="true" id="h-selfedit">PLANT-selfedit-heading</h2>
+            </dialog>
+
+            <!-- Self-editable link (guards isContentEditable for links) -->
+            <a href="#x" contenteditable="true" id="link-selfedit">PLANT-selfedit-link</a>
+
+            <!-- Button/link/heading inside role=textbox (guards closest ancestor check) -->
             <div role="textbox" id="textbox-parent">
                 <button id="btn-in-textbox">PLANT-btn-in-textbox</button>
                 <a href="#x" id="link-in-textbox">PLANT-link-in-textbox</a>
                 <h2 id="heading-in-textbox">PLANT-heading-in-textbox</h2>
             </div>
 
-            <!-- Frame for designMode test -->
-            <iframe id="design-frame" srcdoc="<button>PLANT-btn-in-designMode</button>"></iframe>
+            <!-- Frame for designMode test (guards designMode check) -->
+            <iframe id="design-frame"></iframe>
         </body>
         </html>
         """
@@ -665,12 +680,31 @@ with sync_playwright() as p:
     page.locator('#sel5').select_option("1")
     page.locator('#edit5').press_sequentially("PLANT-editable-gridcell")
 
+    # Set up designMode iframe with content (same origin)
+    iframe_html = '<button id="dm-btn">PLANT-btn-in-designMode</button><h2 id="dm-h2">PLANT-heading-in-designMode</h2>'
+    page.route("https://app.example.com/iframe", lambda route: route.fulfill(
+        status=200,
+        content_type="text/html",
+        body=iframe_html
+    ))
+    page.evaluate('''
+        const frame = document.getElementById("design-frame");
+        frame.src = "https://app.example.com/iframe";
+    ''')
+    page.wait_for_load_state("networkidle")
+
     # Set designMode on the iframe
     page.evaluate('document.getElementById("design-frame").contentDocument.designMode = "on"')
 
     # Get all roots including the frame
     try:
-        frame_handle = page.frame('design-frame')
+        frame_handle = page.frame(name='')
+        if not frame_handle:
+            # Try by URL
+            for f in page.frames:
+                if 'iframe' in f.url:
+                    frame_handle = f
+                    break
         roots = [page, frame_handle] if frame_handle else [page]
     except:
         roots = [page]
@@ -717,8 +751,10 @@ with sync_playwright() as p:
                 "PLANT-btn-in-contenteditable", "PLANT-link-in-contenteditable", "PLANT-heading-in-contenteditable",
                 "PLANT-btn-itself-editable", "PLANT-link-itself-editable",
                 "PLANT-div-btn-editable", "PLANT-div-link-editable",
+                "PLANT-selfedit-heading", "PLANT-selfedit-link",
+                "PLANT-inherited-heading",
                 "PLANT-btn-in-textbox", "PLANT-link-in-textbox", "PLANT-heading-in-textbox",
-                "PLANT-btn-in-designMode",
+                "PLANT-btn-in-designMode", "PLANT-heading-in-designMode",
             ]
             for plant in planted_values:
                 self.assertNotIn(plant, snapshot_text, f"Leaked {plant}")
