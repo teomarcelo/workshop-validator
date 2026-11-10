@@ -229,17 +229,24 @@ function traverse(el, seen) {
     return children;
 }
 
-function collectValues(el, seen) {
+function collectValuesFromPage(doc) {
     const values = [];
+    const seen = new Set();
+    const MAX_VALUES = 300;
+
     function addValue(val) {
+        if (values.length >= MAX_VALUES) return;
         if (val && typeof val === 'string') {
             const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
             if (normalized) values.push(normalized);
         }
     }
+
     function collectFromElement(elem) {
+        if (values.length >= MAX_VALUES) return;
         if (seen.has(elem)) return;
         seen.add(elem);
+
         const tag = elem.tagName;
         if (tag === 'INPUT') {
             const type = (elem.getAttribute('type') || 'text').toLowerCase();
@@ -250,15 +257,15 @@ function collectValues(el, seen) {
         if (tag === 'TEXTAREA') {
             addValue(elem.value);
         }
-        if (isControl(elem) && elem.ownerDocument.designMode !== 'on') {
-            addValue(elem.textContent);
-        }
         if (tag === 'SELECT') {
             for (const option of elem.options) {
                 if (option.selected) {
                     addValue(option.textContent);
                 }
             }
+        }
+        if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT') {
+            addValue(elem.textContent);
         }
         const tokens = getRoleTokens(elem);
         const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
@@ -269,20 +276,17 @@ function collectValues(el, seen) {
                 break;
             }
         }
-        for (const child of elem.childNodes) {
-            if (child.nodeType === 1) {
-                collectFromElement(child);
-            }
-        }
-        if (elem.shadowRoot) {
-            for (const child of elem.shadowRoot.childNodes) {
-                if (child.nodeType === 1) {
-                    collectFromElement(child);
-                }
-            }
+
+        // Use shared traverse to walk light children and shadow roots
+        for (const child of traverse(elem, seen)) {
+            collectFromElement(child);
         }
     }
-    collectFromElement(el);
+
+    const root = doc.body || doc.documentElement;
+    if (root) {
+        collectFromElement(root);
+    }
     return values;
 }
 """
@@ -331,7 +335,7 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
     text = text.replace(/\s+/g, ' ').trim();
     if (text.length > 400) return '';
     const nameLower = text.toLowerCase();
-    const values = collectValues(element, new Set());
+    const values = collectValuesFromPage(element.ownerDocument);
     for (const value of values) {
         if (nameLower.includes(value)) {
             return '';
@@ -349,7 +353,7 @@ _ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
     if (!ariaLabel) return '';
     if (ariaLabel.length > 400) return '';
     const ariaLabelLower = ariaLabel.toLowerCase();
-    const values = collectValues(element, new Set());
+    const values = collectValuesFromPage(element.ownerDocument);
     for (const value of values) {
         if (ariaLabelLower.includes(value)) {
             return '';

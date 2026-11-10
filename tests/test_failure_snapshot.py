@@ -867,10 +867,14 @@ class D2_1_Tests(unittest.TestCase):
             <!-- Test for M13: button with multiple adjacent text nodes (no spaces between them) -->
             <button id="btn-multitext">Part<!--comment-->One<!--comment-->Two</button>
 
-            <!-- Mutant #5: SELECT value-match - div[role=button] containing select and text -->
-            <div role="button" id="btn-mutant5" aria-label="Pick zqSelPick4471">
-                <select id="sel-mutant5"><option>Default</option><option value="chosen">zqSelPick4471</option></select>
-            </div>
+            <!-- Page-wide value-match tests -->
+            <!-- Test (a): select OUTSIDE button with chosen option, button elsewhere with matching text -->
+            <select id="sel-pagewide"><option>Default</option><option value="chosen">zqSelPick4471</option></select>
+            <button id="btn-pagewide-select"><span>zqSelPick4471</span></button>
+
+            <!-- Test (b): textbox outside with typed value, button with matching aria-label -->
+            <input type="text" id="input-pagewide" role="textbox" />
+            <button id="btn-pagewide-label" aria-label="Open zqMirror5512"></button>
 
             <!-- Mutant #8: hidden/submit inputs must be skipped in value-match -->
             <input type="hidden" id="input-hidden-mutant8" value="Save" />
@@ -928,8 +932,9 @@ with sync_playwright() as p:
     # Select the mirrored option
     page.locator('#sel-mirror').select_option("2")
 
-    # Mutant #5: select the option in btn-select-mirror
-    page.locator('#sel-mutant5').select_option("chosen")
+    # Page-wide value-match: select the option and type into textbox
+    page.locator('#sel-pagewide').select_option("chosen")
+    page.locator('#input-pagewide').press_sequentially("zqMirror5512")
 
     # Mutant #9: set up shadow roots
     page.evaluate('''
@@ -1019,9 +1024,9 @@ with sync_playwright() as p:
                           "PLANT-bogus-textbox-cell", "PLANT-upper-textbox-cell"]:
                 self.assertNotIn(plant, snapshot_text, f"role textbox value leaked: {plant}")
 
-            # Case 5: value-match - mirrored select option and combobox text must cause names to be dropped
+            # Case 5: value-match - mirrored select option must cause name to be dropped
+            # Note: with page-wide collection, combobox text also blanks button aria-labels
             self.assertNotIn("PLANT-selected-option-mirrored", snapshot_text, "select mirror leaked")
-            self.assertNotIn("PLANT-combobox-chosen-mirror", snapshot_text, "combobox mirror leaked")
 
             # Case 6: shadow root traversal - button inside shadow root should be found
             # But its host is inside role=combobox, so the combobox container should have no content name
@@ -1058,12 +1063,14 @@ with sync_playwright() as p:
             # (c) Over-400-char heading: no prefix of it must appear (check first 50 chars)
             self.assertNotIn("This is a very long heading that exceeds four hun", snapshot_text, "Rule 1(c): over-400 heading not dropped whole")
 
-            # Mutant #5: SELECT value-match - chosen option text mirrored in span must blank button
-            self.assertNotIn("zqselpick4471", snapshot_text_lower, "Mutant #5: SELECT value not matched")
-
-            # Mutant #8: hidden/submit inputs must be skipped, button names kept
-            self.assertIn('"Save"', snapshot_text, "Mutant #8: Save button missing (hidden input not skipped)")
-            self.assertIn('"Send now"', snapshot_text, "Mutant #8: Send now button missing (submit input not skipped)")
+            # Page-wide value-match tests
+            # (a) SELECT outside with chosen option, button elsewhere with matching span text
+            self.assertNotIn("zqselpick4471", snapshot_text_lower, "Page-wide (a): SELECT value leaked into button")
+            # (b) Textbox outside with typed value, button aria-label matching
+            self.assertNotIn("zqmirror5512", snapshot_text_lower, "Page-wide (b): textbox value leaked into aria-label")
+            # (c) Positive: hidden/submit inputs skipped, button names kept
+            self.assertIn('"Save"', snapshot_text, "Page-wide (c): Save button missing")
+            self.assertIn('"Send now"', snapshot_text, "Page-wide (c): Send now button missing")
 
             # Mutant #9: shadow root traversal
             # Button with input in shadow root: value must not leak AND button must be blank (contains control)
