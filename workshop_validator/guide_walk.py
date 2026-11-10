@@ -6511,6 +6511,66 @@ def _target_dialogs(page, targets: frozenset[str]) -> frozenset[str]:
     return frozenset(named)
 
 
+def _fold_text(text: str) -> str:
+    """Normalize text: collapse whitespace, NFKC normalize, fold quotes. Case-sensitive."""
+    import unicodedata
+    normalized = unicodedata.normalize("NFKC", text or "")
+    # Fold various quote characters to ASCII quotes
+    normalized = normalized.replace("‘", "'").replace("’", "'")
+    normalized = normalized.replace("“", '"').replace("”", '"')
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _count_panels_with_heading(page, heading_text: str) -> tuple[int, str]:
+    """Count visible complementary/region panels with first heading matching text.
+
+    Returns (count, role_of_last_match). The role is read from the matched element.
+    Only checks the page itself, not frames, to avoid counting the same panel twice.
+    """
+    folded_target = _fold_text(heading_text)
+    count = 0
+    last_role = ""
+    for role in ("complementary", "region"):
+        try:
+            loc = page.locator(f"[role='{role}']")
+        except Exception:
+            continue
+        for index in range(min(_count(loc), 20)):
+            try:
+                panel = loc.nth(index)
+                if hasattr(panel, "is_visible") and not panel.is_visible():
+                    continue
+                # Find first heading in the panel
+                heading_found = ""
+                for heading_sel in ("h2", "h3", "[role='heading']"):
+                    try:
+                        heading_loc = panel.locator(heading_sel)
+                        if _count(heading_loc) > 0:
+                            heading_found = (heading_loc.first.inner_text(timeout=500) or "").strip()
+                            if heading_found:
+                                break
+                    except Exception:
+                        continue
+                if heading_found and _fold_text(heading_found) == folded_target:
+                    count += 1
+                    last_role = role
+            except Exception:
+                continue
+    return count, last_role
+
+
+def _panel_heading_evidence(before_count: int, page, name: str) -> str:
+    """Check if a complementary/region panel appeared with heading matching name.
+
+    Returns evidence text if before_count was 0 and after_count is 1, else "".
+    """
+    after_count, panel_role = _count_panels_with_heading(page, name)
+    if before_count == 0 and after_count == 1:
+        return f"after-state: {panel_role} panel heading read: {_fold_text(name)}"
+    return ""
+
+
 def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | None:
     if norm(name) == "fields":
         _focus_screen_editor(state)
@@ -6553,6 +6613,7 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     before_messages = _read_status_messages(state.page)
     before_has_saved = _words_visible(state.page, "successfully saved")
     before_named_dialogs = _target_dialogs(state.page, frozenset(target_names))
+    before_panel_count, _ = _count_panels_with_heading(state.page, name)
 
     loc = _locator_for_name(state.page, name)
     if loc is None:
@@ -6601,6 +6662,10 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
     accepted = str(getattr(state.page, "_accepted_dialog", "") or "").strip()
     if not evidence_desc and accepted:
         evidence_desc = "after-state: dialog text read"
+
+    # Check if a complementary/region panel appeared with heading matching name
+    if not evidence_desc:
+        evidence_desc = _panel_heading_evidence(before_panel_count, state.page, name)
 
     # Check if success message appeared
     # For a control named exactly Save or Submit: must be NEW (V6), and only these
@@ -6766,6 +6831,10 @@ def _act_click(state: WalkState, step: GuideStep, name: str) -> CheckResult | No
                 _target_dialogs(state.page, frozenset(target_names)) - before_named_dialogs
             ):
                 evidence_desc = "after-state: dialog opened"
+
+            # Check if a complementary/region panel appeared with heading matching name
+            if not evidence_desc:
+                evidence_desc = _panel_heading_evidence(before_panel_count, state.page, name)
 
             if not evidence_desc and is_save_submit:
                 after_messages = _read_status_messages(state.page)
