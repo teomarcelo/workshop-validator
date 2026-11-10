@@ -2479,5 +2479,275 @@ with sync_playwright() as p:
                             "Expected names_withheld='value collection skipped (time)' when budget low")
 
 
+class PrivacyRound1FixesTests(unittest.TestCase):
+    """Tests for privacy round-1 fixes: too many frames, shadow host without slot, closed details."""
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_too_many_frames_withholds_all_names(self):
+        """HIGH: More than ROOT_LIMIT (4) frames fails closed."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button id="page-btn">KeepPage</button>
+            <iframe srcdoc='<div>f1</div>'></iframe>
+            <iframe srcdoc='<div>f2</div>'></iframe>
+            <iframe srcdoc='<div>f3</div>'></iframe>
+            <iframe srcdoc='<div>f4</div>'></iframe>
+            <iframe srcdoc='<input value="zqframe5val"><button>Mirror zqframe5val</button>'></iframe>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+    page.wait_for_load_state('networkidle')
+
+    # Type value in the 5th iframe
+    iframe5 = page.frames[5]
+    iframe5.locator('input').fill('zqframe5val')
+
+    # Pass page + all 5 iframes as roots
+    all_roots = [page] + page.frames[1:]
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=all_roots, redact_tree=lambda x: x
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href, "names_withheld": data["names_withheld"]}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            self.assertEqual(output["names_withheld"], "too many frames to check values",
+                            "Expected names_withheld='too many frames to check values' with >4 roots")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_three_frames_positive_case(self):
+        """HIGH positive: With 3 frames (total 4 roots with page), button is named."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button id="page-btn">KeepPage</button>
+            <iframe srcdoc='<div>f1</div>'></iframe>
+            <iframe srcdoc='<div>f2</div>'></iframe>
+            <iframe srcdoc='<div>f3</div>'></iframe>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+    page.wait_for_load_state('networkidle')
+
+    # Pass page + 3 iframes as roots (total 4 = ROOT_LIMIT)
+    all_roots = [page] + page.frames[1:]
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=all_roots, redact_tree=lambda x: x
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href, "names_withheld": data["names_withheld"]}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            # With exactly 4 roots, names should NOT be withheld
+            self.assertEqual(output["names_withheld"], "",
+                            "Expected no withholding with exactly 4 roots")
+
+            # Read snapshot and verify button is named
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            self.assertIn("keeppage", snapshot_text,
+                          "Button name missing (should be present with <=4 roots)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_shadow_host_without_slot_skips_light_dom(self):
+        """Low: Light-DOM text under shadow host with no slot is not read."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div id="host">
+                <button>Light zqshadowleak99</button>
+            </div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Attach shadow root WITHOUT a slot
+    page.evaluate('''
+        const host = document.getElementById("host");
+        const shadow = host.attachShadow({{mode: 'open'}});
+        shadow.innerHTML = '<div>Shadow content</div>';
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Light DOM content should not appear
+            self.assertNotIn("zqshadowleak99", snapshot_text,
+                            "Light-DOM text leaked (should be skipped without slot)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_closed_details_body_skipped(self):
+        """Low: Closed details body text is not read from parent wrapper."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div id="wrapper">
+                Wrapper text
+                <details id="closed">
+                    <summary>Summary</summary>
+                    <div>Hidden zqdetailsleak88</div>
+                </details>
+            </div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Make the body div visible (override default hidden)
+    page.evaluate('''
+        document.querySelector('#closed > div').style.display = 'block';
+        document.querySelector('#closed > div').style.visibility = 'visible';
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Closed details body should not appear (even though manually made visible)
+            self.assertNotIn("zqdetailsleak88", snapshot_text,
+                            "Closed details body leaked (should be skipped)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -172,7 +172,13 @@ function isControl(el) {
 
 function hasControlAncestor(el) {
     let current = el;
+    const seen = new Set();
+    let steps = 0;
+    const MAX_STEPS = 200;
     while (current) {
+        if (seen.has(current) || steps >= MAX_STEPS) break;
+        seen.add(current);
+        steps++;
         // At each step: try assignedSlot first, then parentElement, then host
         if (current.assignedSlot) {
             current = current.assignedSlot;
@@ -325,12 +331,20 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
     function collectText(el, seen) {
         if (isHidden(el)) return '';
         let text = '';
-        for (const node of el.childNodes) {
-            if (node.nodeType === 3) {
-                text += node.textContent;
-            } else if (node.nodeType === 1) {
-                if (!isControl(node)) {
-                    text += collectText(node, seen);
+        // Skip light DOM children if this element has a shadow root with no slot
+        const hasSlotlessRender = el.shadowRoot && el.shadowRoot.querySelector('slot') === null;
+        if (!hasSlotlessRender) {
+            for (const node of el.childNodes) {
+                if (node.nodeType === 3) {
+                    text += node.textContent;
+                } else if (node.nodeType === 1) {
+                    // Skip closed details body (not the summary)
+                    if (el.tagName === 'DETAILS' && !el.hasAttribute('open') && node.tagName !== 'SUMMARY') {
+                        continue;
+                    }
+                    if (!isControl(node)) {
+                        text += collectText(node, seen);
+                    }
                 }
             }
         }
@@ -461,8 +475,12 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
     panels: list[dict] = []
     names_withheld = ""
 
+    # HIGH: Fail closed if more roots than we can check
+    if len(roots) > ROOT_LIMIT:
+        names_withheld = "too many frames to check values"
+        merged_values_result = {"values": [], "capped": True}
     # Fix 5: Skip value collection if budget is nearly spent (< ~1s left)
-    if budget.left() < 1.0:
+    elif budget.left() < 1.0:
         names_withheld = "value collection skipped (time)"
         # Use empty values_result for all roots
         merged_values_result = {"values": [], "capped": True}
