@@ -113,6 +113,13 @@ class Page:
         self.masks = kwargs.get("mask")
         return PNG
 
+    def evaluate(self, js, *args, timeout=None):
+        # For value collection (_COLLECT_VALUES_JS)
+        if "collectValuesFromPage(document)" in str(js):
+            return {"values": [], "capped": False}
+        # Default fallback
+        return None
+
 
 class Clock:
     def __init__(self):
@@ -260,10 +267,10 @@ class SlowItem(Item):
         self.clock.now += 1.0
         return True
 
-    def evaluate(self, js, timeout=None):
+    def evaluate(self, js, *args, timeout=None):
         # Slow evaluate also costs time
         self.clock.now += 0.1
-        return super().evaluate(js, timeout)
+        return super().evaluate(js, *args, timeout=timeout)
 
 
 class SlowPage(Page):
@@ -345,7 +352,7 @@ class DetachedItem(Item):
         _wait(self.clock, timeout)
         raise TimeoutError("detached")
 
-    def evaluate(self, js, timeout=None):
+    def evaluate(self, js, *args, timeout=None):
         _wait(self.clock, timeout)
         raise TimeoutError("detached")
 

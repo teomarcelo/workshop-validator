@@ -316,9 +316,9 @@ function collectValuesFromPage(doc) {
 """
 
 _COLLECT_VALUES_JS = _SHARED_GUARDS_JS + r"""
-(() => {
+() => {
     return collectValuesFromPage(document);
-})()
+}
 """
 
 _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
@@ -473,7 +473,7 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
         # Collect values once per root
         values_result = None
         try:
-            values_result = root.evaluate(_COLLECT_VALUES_JS, timeout=budget.timeout_ms(500))
+            values_result = root.evaluate(_COLLECT_VALUES_JS)
             if values_result is None:
                 values_result = {"values": [], "capped": False}
         except Exception:
