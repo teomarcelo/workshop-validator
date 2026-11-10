@@ -1587,5 +1587,650 @@ with sync_playwright() as p:
             self.assertIn("Visible", str(data["controls"]["button"]))
             self.assertNotIn("zqhiddenup4410", snapshot_text.lower())
 
+
+class D2TestsSharedGuards(unittest.TestCase):
+    """D2-tests: six unproven privacy guards (W-203).
+
+    Tests for assignedSlot, min length, slider aria-valuetext, aria-hidden case,
+    shadow traversal, and fallback capped=True on value collection failure.
+    """
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_assignedslot_light_dom_child_in_shadow_combobox_withheld(self):
+        """B3: assignedSlot traversal - light DOM slotted into shadow, value withheld."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="combobox" id="combo">
+                <button>zqslot8812</button>
+            </div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    # Build shadow root with slot, button becomes slotted light DOM
+    page.evaluate('''
+        const combo = document.getElementById("combo");
+        const shadow = combo.attachShadow({{mode: 'open'}});
+        const slot = document.createElement("slot");
+        shadow.appendChild(slot);
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            # assignedSlot guard must withhold the light DOM button text
+            self.assertNotIn("zqslot8812", snapshot_text)
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_min_length_three_chars_short_values_not_collected(self):
+        """B4: MIN_LENGTH=3 - short values under 3 chars not collected, long names present."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="slider">s</div>
+            <button>Save</button>
+            <input type="text" id="inp" value="ab" />
+            <button>Tab list</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # Short values (1-2 chars) not collected, so long button names present
+            self.assertIn("save", str(data["controls"]["button"]).lower())
+            self.assertIn("tab list", str(data["controls"]["button"]).lower())
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_slider_aria_valuetext_collected_and_withholds_button_name(self):
+        """B5: slider role aria-valuetext collected for value-match."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="slider" aria-valuetext="zqslidervt3390"></div>
+            <button>zqslidervt3390</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            # aria-valuetext should be collected and blank the button
+            self.assertNotIn("zqslidervt3390", snapshot_text)
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_aria_hidden_case_insensitive_uppercase_true_withholds(self):
+        """B6: aria-hidden='TRUE' (uppercase) must withhold text."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button>Ok <span aria-hidden="TRUE">zqhiddenup4410</span></button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # aria-hidden text withheld, visible text present
+            self.assertNotIn("zqhiddenup4410", snapshot_text)
+            self.assertIn("ok", str(data["controls"]["button"]).lower())
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_shadow_root_input_typed_value_withheld_from_button_name(self):
+        """B7: shadow root traversal - typed value in shadow input withholds button name."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="button" id="btn"></div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    # Build shadow root with input and text after page load
+    page.evaluate('''
+        const btn = document.getElementById("btn");
+        const shadow = btn.attachShadow({{mode: 'open'}});
+        const input = document.createElement("input");
+        input.type = "text";
+        shadow.appendChild(input);
+        shadow.appendChild(document.createTextNode("Go"));
+    ''')
+
+    # Type into shadow input
+    page.evaluate('''
+        const btn = document.getElementById("btn");
+        const input = btn.shadowRoot.querySelector("input");
+        input.value = "zqshadowtyp6620";
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # Shadow input value collected, button name withheld
+            self.assertNotIn("zqshadowtyp6620", snapshot_text)
+            # Button name should be empty (has control in shadow root)
+            btn_names = [n.lower() for n in data["controls"]["button"]]
+            self.assertNotIn("go", btn_names)
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_fallback_evaluate_raises_sets_capped_true_withholds_mirrored_value(self):
+        """C1: root.evaluate raising sets capped=True, names_withheld set, value withheld."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="inp" />
+            <button>zqfallback5150</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Monkey-patch evaluate to raise on _COLLECT_VALUES_JS
+import workshop_validator.failure_snapshot as fs
+_original_collect = fs._COLLECT_VALUES_JS
+
+class RaisingPage:
+    def __init__(self, real_page):
+        self._page = real_page
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    def evaluate(self, js, *args, **kwargs):
+        if "collectValuesFromPage(document)" in str(js):
+            raise RuntimeError("forced evaluation error")
+        return self._page.evaluate(js, *args, **kwargs)
+
+    def get_by_role(self, role):
+        return self._page.get_by_role(role)
+
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    # Type value that would normally be collected
+    page.locator('#inp').press_sequentially("zqfallback5150")
+
+    # Wrap page to raise on value collection
+    wrapped = RaisingPage(page)
+
+    href = save_failure_snapshot(
+        wrapped, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[wrapped], redact_tree=_redact_aria_snapshot
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href, "names_withheld": data.get("names_withheld", "")}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # Fallback must set capped=True, withhold name, set names_withheld
+            self.assertNotIn("zqfallback5150", snapshot_text)
+            # Button name should be withheld (empty or not present in list)
+            btn_names = data["controls"]["button"]
+            # Either no buttons listed, or only empty names
+            self.assertTrue(all(not n for n in btn_names), f"Expected withheld button names, got {btn_names}")
+            self.assertEqual(data.get("names_withheld"), "value collection failed")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_fallback_evaluate_returns_none_sets_capped_true_withholds(self):
+        """C2: root.evaluate returning None sets capped=True, names_withheld set."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="inp" />
+            <button>zqfallback5150</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+class NoneReturningPage:
+    def __init__(self, real_page):
+        self._page = real_page
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    def evaluate(self, js, *args, **kwargs):
+        if "collectValuesFromPage(document)" in str(js):
+            return None
+        return self._page.evaluate(js, *args, **kwargs)
+
+    def get_by_role(self, role):
+        return self._page.get_by_role(role)
+
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    page.locator('#inp').press_sequentially("zqfallback5150")
+    wrapped = NoneReturningPage(page)
+
+    href = save_failure_snapshot(
+        wrapped, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[wrapped], redact_tree=_redact_aria_snapshot
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href, "names_withheld": data.get("names_withheld", "")}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # None fallback must set capped=True and withhold
+            self.assertNotIn("zqfallback5150", snapshot_text)
+            btn_names = data["controls"]["button"]
+            # Either no buttons listed, or only empty names
+            self.assertTrue(all(not n for n in btn_names), f"Expected withheld button names, got {btn_names}")
+            self.assertEqual(data.get("names_withheld"), "value collection failed")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_fallback_item_evaluate_raises_sets_capped_true_withholds(self):
+        """C3: item.evaluate raising in _name sets capped=True, withholds per-item."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="inp" />
+            <button id="btn">zqfallback5150</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+class ItemRaisingLocator:
+    def __init__(self, real_loc):
+        self._loc = real_loc
+
+    def count(self):
+        return self._loc.count()
+
+    def nth(self, i):
+        item = self._loc.nth(i)
+        return ItemRaisingItem(item)
+
+class ItemRaisingItem:
+    def __init__(self, real_item):
+        self._item = real_item
+
+    def __getattr__(self, name):
+        return getattr(self._item, name)
+
+    def evaluate(self, js, *args, **kwargs):
+        # Fail on per-item value collection
+        if "collectValuesFromPage(document)" in str(js):
+            raise RuntimeError("forced item error")
+        return self._item.evaluate(js, *args, **kwargs)
+
+class ItemRaisingPage:
+    def __init__(self, real_page):
+        self._page = real_page
+
+    def __getattr__(self, name):
+        return getattr(self._page, name)
+
+    def evaluate(self, js, *args, **kwargs):
+        # Root evaluate succeeds
+        if "collectValuesFromPage(document)" in str(js):
+            return {{"values": ["zqfallback5150"], "capped": False}}
+        return self._page.evaluate(js, *args, **kwargs)
+
+    def get_by_role(self, role):
+        real_loc = self._page.get_by_role(role)
+        return ItemRaisingLocator(real_loc)
+
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.route("https://app.example.com/", lambda route: route.fulfill(
+        status=200, content_type="text/html", body=html_content
+    ))
+    page.goto("https://app.example.com/")
+
+    page.locator('#inp').press_sequentially("zqfallback5150")
+    wrapped = ItemRaisingPage(page)
+
+    href = save_failure_snapshot(
+        wrapped, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[wrapped], redact_tree=_redact_aria_snapshot
+    )
+
+    snapshot_path = run_dir / href
+    data = json.loads(snapshot_path.read_text())
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+            data = json.loads(snapshot_text)
+            # Item-level fallback withholds the button name
+            self.assertNotIn("zqfallback5150", snapshot_text)
+            btn_names = data["controls"]["button"]
+            # Either no buttons listed, or only empty names
+            self.assertTrue(all(not n for n in btn_names), f"Expected withheld button names, got {btn_names}")
+
+
 if __name__ == "__main__":
     unittest.main()
