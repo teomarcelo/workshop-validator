@@ -782,6 +782,76 @@ with sync_playwright() as p:
                 self.assertNotIn(f'"{control_prefix}"', snapshot_text, f"Static text '{control_prefix}' from element with control inside leaked")
 
 
+class TraverseValueMatchTests(unittest.TestCase):
+    """Test that traverse() returns children even when parent is in seen, for value-match."""
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_traverse_returns_children_when_parent_in_seen(self):
+        """Regression: traverse must return children even if the parent is already in seen."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <select id="sel"><option value="v">zqTestVal123</option></select>
+            <button><span>zqTestVal123</span></button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+    page.locator('#sel').select_option("v")
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            snapshot_text_lower = snapshot_text.lower()
+
+            # The selected value from the select should be collected by value-match
+            # and should blank the button name containing that value
+            self.assertNotIn("zqtestval123", snapshot_text_lower,
+                            "Value-match failed: select value leaked into button name")
+
+
 class D2_1_Tests(unittest.TestCase):
     """D2-1: shared control check and traversal for snapshot names (old fields only).
 

@@ -211,11 +211,14 @@ function isHidden(el) {
 }
 
 function traverse(el, seen) {
-    if (seen.has(el)) return [];
-    seen.add(el);
     const children = [];
+    // Skip SCRIPT, STYLE, TEMPLATE - they never contribute visible text
+    const tag = el.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE') {
+        return children;
+    }
     for (const child of el.childNodes) {
-        if (child.nodeType === 1) {
+        if (child.nodeType === 1 && !seen.has(child)) {
             children.push(child);
         }
     }
