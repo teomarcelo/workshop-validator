@@ -34,6 +34,15 @@ BUDGET_S = 8.0
 TRUNCATED_NOTE = "snapshot truncated (time)"
 CONTROL_ROLES = ("button", "link", "tab", "dialog")
 PANEL_ROLES = ("dialog", "alertdialog", "complementary")
+REGION_ROLES = ("dialog", "alertdialog", "complementary", "region", "tabpanel", "grid", "table")
+REGION_LIMIT = 12
+NAMED_TREE_ROLES = frozenset({
+    "heading", "region", "dialog", "tab", "tabpanel", "button", "link",
+    "row", "cell", "gridcell", "columnheader", "rowheader",
+    "listitem", "group", "table", "grid"
+})
+NAMED_TREE_INPUT_ROLES = frozenset({"textbox", "combobox", "searchbox", "spinbutton"})
+NAMED_TREE_NAME_LIMIT = 80
 _INPUT_MASK = (
     "input, textarea, select, [contenteditable=''], [contenteditable='true'], "
     "[contenteditable='plaintext-only']"
@@ -81,6 +90,87 @@ def redact_text(value: object, limit: int = NAME_LIMIT) -> str:
     return text
 
 
+def _parse_aria_line(line: str) -> tuple[str, str, str] | None:
+    """Parse aria_snapshot line into (indent, role, name). None if not an element line.
+
+    Handles Playwright's YAML quoting: when a name contains ': ', Playwright quotes
+    the entire line like: - 'row "Field Label: Name"'
+    """
+    stripped = line.lstrip()
+    if not stripped.startswith("- "):
+        return None
+    if stripped.startswith("- /"):  # property line
+        return None
+    if stripped.startswith("- text:"):  # text node
+        return None
+
+    indent = line[: len(line) - len(stripped)]
+    rest = stripped[2:]
+
+    # Handle YAML-quoted line: - 'role "name"' or - "role \"name\""
+    if rest.startswith("'"):
+        try:
+            # Find closing single quote
+            end_quote = rest.find("'", 1)
+            if end_quote > 0:
+                # Extract the content between quotes
+                rest = rest[1:end_quote]
+        except Exception:
+            pass
+    elif rest.startswith('"'):
+        # For double-quoted outer wrapper, handle escaped inner quotes
+        try:
+            i = 1
+            escaped_content = []
+            while i < len(rest):
+                if rest[i] == '\\' and i + 1 < len(rest):
+                    # Escaped character
+                    if rest[i + 1] == '"':
+                        escaped_content.append('"')
+                        i += 2
+                        continue
+                    else:
+                        escaped_content.append(rest[i])
+                        i += 1
+                        continue
+                if rest[i] == '"':
+                    # End of outer quote
+                    rest = ''.join(escaped_content)
+                    break
+                escaped_content.append(rest[i])
+                i += 1
+        except Exception:
+            pass
+
+    # Extract role (first word, before first space)
+    space_idx = rest.find(' ')
+    if space_idx == -1:
+        role = rest.rstrip(":")
+        remainder = ""
+    else:
+        role = rest[:space_idx].rstrip(":")
+        remainder = rest[space_idx + 1:]
+
+    # Parse quoted name if present
+    name = ""
+    if remainder.startswith('"'):
+        try:
+            # Find the closing quote, handling escapes
+            i = 1
+            while i < len(remainder):
+                if remainder[i] == '\\' and i + 1 < len(remainder):
+                    i += 2
+                    continue
+                if remainder[i] == '"':
+                    name = remainder[1:i]
+                    break
+                i += 1
+        except Exception:
+            pass
+
+    return indent, role, name
+
+
 def snapshot_stem(index: int, step_id: str) -> str:
     safe_id = re.sub(r"[^A-Za-z0-9_.-]", "_", str(step_id or "step"))[:80] or "step"
     return f"{int(index):03d}-{safe_id}"
@@ -116,6 +206,50 @@ def _tree(page, redact_tree: Callable[..., str], budget: _Budget) -> str:
     try:
         tree = page.locator("body").aria_snapshot(timeout=budget.timeout_ms(1500))
         return redact_tree(tree, limit=TREE_LIMIT)
+    except Exception:
+        return "unavailable"
+
+
+def _named_tree(page, budget: _Budget) -> str:
+    """Create aria snapshot with names kept for structural roles, redacted and capped."""
+    if budget.over():
+        return "skipped (time)"
+    try:
+        tree = page.locator("body").aria_snapshot(timeout=budget.timeout_ms(1500))
+        lines = []
+        for line in tree.splitlines():
+            parsed = _parse_aria_line(line)
+            if parsed is None:
+                # Keep non-element lines (text nodes, properties) as-is
+                lines.append(line)
+                continue
+
+            indent, role, name = parsed
+
+            # Keep names for structural and control roles
+            if role in NAMED_TREE_ROLES:
+                # Keep the name, redacted and capped
+                if name:
+                    name_out = redact_text(name, NAMED_TREE_NAME_LIMIT)
+                    lines.append(f'{indent}- {role} "{name_out}"')
+                else:
+                    lines.append(f'{indent}- {role}')
+            # Input roles keep their label (name) but never their value
+            elif role in NAMED_TREE_INPUT_ROLES:
+                # Keep only the name (label), never the value
+                if name:
+                    name_out = redact_text(name, NAMED_TREE_NAME_LIMIT)
+                    lines.append(f'{indent}- {role} "{name_out}"')
+                else:
+                    lines.append(f'{indent}- {role}')
+            else:
+                # Other roles: keep structure without name
+                lines.append(f'{indent}- {role}')
+
+        result = "\n".join(lines)
+        if len(result) > TREE_LIMIT:
+            result = result[:TREE_LIMIT - 3] + "..."
+        return result
     except Exception:
         return "unavailable"
 
@@ -177,9 +311,68 @@ def _headings(panel, budget: _Budget) -> list[str]:
     return names
 
 
-def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict]]:
+def _region_headings(panel, budget: _Budget) -> list[dict]:
+    """Get headings with text, level, and tag for a region."""
+    headings = []
+    try:
+        loc = panel.get_by_role("heading")
+    except Exception:
+        return headings
+    for item in _visible(loc, HEADINGS_PER_PANEL * 2, budget):
+        try:
+            text = _name(item, read_text=True, budget=budget)
+            if not text:
+                continue
+            # Get level from aria-level attribute
+            level_str = item.get_attribute("aria-level", timeout=budget.timeout_ms(200))
+            level = int(level_str) if level_str and level_str.isdigit() else 0
+            # Get tag name
+            tag = item.evaluate("el => el.tagName.toLowerCase()", timeout=budget.timeout_ms(200))
+            headings.append({"text": text, "level": level, "tag": str(tag or "")})
+            if len(headings) >= HEADINGS_PER_PANEL:
+                break
+        except Exception:
+            continue
+    return headings
+
+
+def _regions(roots: list, budget: _Budget) -> list[dict]:
+    """Collect visible regions with their structure."""
+    regions = []
+    for frame_idx, root in enumerate(roots[:ROOT_LIMIT]):
+        for role in REGION_ROLES:
+            if len(regions) >= REGION_LIMIT or budget.over():
+                break
+            try:
+                loc = root.get_by_role(role)
+            except Exception:
+                continue
+            for item in _visible(loc, REGION_LIMIT, budget):
+                if len(regions) >= REGION_LIMIT or budget.over():
+                    break
+                try:
+                    name = _name(item, read_text=False, budget=budget)
+                    tag = item.evaluate("el => el.tagName.toLowerCase()", timeout=budget.timeout_ms(200))
+                    role_attr = item.get_attribute("role", timeout=budget.timeout_ms(200)) or ""
+                    headings = _region_headings(item, budget)
+                    regions.append({
+                        "role": role,
+                        "name": name,
+                        "tag": str(tag or ""),
+                        "role_attr": role_attr,
+                        "frame": frame_idx,
+                        "parent": -1,  # Parent tracking would need nested traversal
+                        "headings": headings,
+                    })
+                except Exception:
+                    continue
+    return regions
+
+
+def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict], list[str]]:
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
+    truncated_roles: list[str] = []
     for root in roots[:ROOT_LIMIT]:
         for role in CONTROL_ROLES:
             try:
@@ -187,7 +380,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
             except Exception:
                 continue
             # A dialog's inner text is its whole body; name it by label or heading only.
+            candidates_seen = 0
             for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
+                candidates_seen += 1
                 if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
                 name = _name(item, read_text=role != "dialog", budget=budget)
@@ -196,6 +391,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     name = heads[0] if heads else ""
                 if name and name not in controls[role]:
                     controls[role].append(name)
+            # Track if we hit the cap
+            if len(controls[role]) >= NAMES_PER_ROLE and role not in truncated_roles:
+                truncated_roles.append(role)
         for role in PANEL_ROLES:
             try:
                 loc = root.get_by_role(role)
@@ -209,7 +407,7 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     "name": _name(item, read_text=False, budget=budget),
                     "headings": _headings(item, budget),
                 })
-    return controls, panels
+    return controls, panels, truncated_roles
 
 
 def _screenshot(page, roots: list, budget: _Budget) -> bytes:
@@ -296,7 +494,16 @@ def save_failure_snapshot(
     png_error = ""
     title = _title(page, budget)
     tree = _tree(page, redact_tree, budget)
-    controls, panels = _controls_and_panels(roots, budget)
+    controls, panels, truncated_roles = _controls_and_panels(roots, budget)
+
+    # New fields: collect only if budget allows
+    regions_data = []
+    named_tree_data = ""
+    if not budget.over():
+        regions_data = _regions(roots, budget)
+    if not budget.over():
+        named_tree_data = _named_tree(page, budget)
+
     try:
         if budget.over():
             raise TimeoutError("snapshot time used")
@@ -316,6 +523,9 @@ def save_failure_snapshot(
         "tree": tree,
         "controls": controls,
         "panels": panels,
+        "regions": regions_data,
+        "named_tree": named_tree_data,
+        "truncated_roles": truncated_roles,
         "screenshot": png_href or f"unavailable ({png_error or 'empty'})",
         # Set only when a read was skipped because the cap was reached.
         "truncated": TRUNCATED_NOTE if budget.hit else "",
