@@ -140,25 +140,102 @@ def _visible(loc, cap: int, budget: _Budget):
             yield item
 
 
+_SAFE_TEXT_JS = """
+(element) => {
+    // Returns text from text nodes only, never descending into form controls or contenteditable.
+    // Returns "" if element itself is a control or contains one.
+    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
+    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option']);
+
+    function isControl(el) {
+        if (CONTROL_TAGS.has(el.tagName)) return true;
+        const role = el.getAttribute('role');
+        if (role && CONTROL_ROLES.has(role)) return true;
+        const editable = el.getAttribute('contenteditable');
+        if (editable !== null && editable !== 'false') return true;
+        return false;
+    }
+
+    function containsControl(el) {
+        if (isControl(el)) return true;
+        for (const child of el.children) {
+            if (containsControl(child)) return true;
+        }
+        return false;
+    }
+
+    function collectText(el) {
+        let text = '';
+        for (const node of el.childNodes) {
+            if (node.nodeType === 3) {  // TEXT_NODE
+                text += node.textContent;
+            } else if (node.nodeType === 1) {  // ELEMENT_NODE
+                if (!isControl(node)) {
+                    text += collectText(node);
+                }
+            }
+        }
+        return text;
+    }
+
+    if (containsControl(element)) return '';
+    return collectText(element);
+}
+"""
+
+
 def _name(item, *, read_text: bool, budget: _Budget) -> str:
-    """aria-label, then title, then short inner text. Never an input's value."""
+    """aria-label, then title (never on controls), then safe text from text nodes only.
+
+    Safe text never descends into input, select, textarea, option, output, contenteditable
+    elements, or elements with role textbox/combobox/searchbox/spinbutton/listbox/option.
+    Returns "" if the element itself is a control or contains one."""
     # Every read gets a budget-bound timeout; a detached element would otherwise
     # wait the page default (about 20 s).
-    reads = [
-        lambda: item.get_attribute("aria-label", timeout=budget.timeout_ms(500)),
-        lambda: item.get_attribute("title", timeout=budget.timeout_ms(500)),
-    ]
-    if read_text:
-        reads.append(lambda: item.inner_text(timeout=budget.timeout_ms(500)))
-    for read in reads:
-        if budget.over():
-            return ""
-        try:
-            value = " ".join(str(read() or "").split())
-        except Exception:
-            continue
+    if budget.over():
+        return ""
+
+    # Try aria-label first
+    try:
+        value = " ".join(str(item.get_attribute("aria-label", timeout=budget.timeout_ms(500)) or "").split())
         if value and len(value) <= 200:
             return redact_text(value)
+    except Exception:
+        pass
+
+    if budget.over():
+        return ""
+
+    # Try title, but never on controls (apps mirror values into it)
+    try:
+        # Check if element itself is a control by trying to get its role
+        is_control = False
+        try:
+            tag_name = item.evaluate("el => el.tagName", timeout=budget.timeout_ms(200))
+            if tag_name in ("INPUT", "SELECT", "TEXTAREA", "OPTION", "OUTPUT"):
+                is_control = True
+        except Exception:
+            pass
+
+        if not is_control:
+            value = " ".join(str(item.get_attribute("title", timeout=budget.timeout_ms(500)) or "").split())
+            if value and len(value) <= 200:
+                return redact_text(value)
+    except Exception:
+        pass
+
+    if budget.over():
+        return ""
+
+    # Try safe text from text nodes only
+    if read_text:
+        try:
+            value = " ".join(str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "").split())
+            if value and len(value) <= 200:
+                return redact_text(value)
+        except Exception:
+            pass
+
     return ""
 
 

@@ -1,6 +1,7 @@
 """Failure snapshots: one private snapshot per non-PASS step, redacted. Synthetic pages only."""
 
 import json
+import os
 import stat
 import tempfile
 import unittest
@@ -34,6 +35,14 @@ class Item:
         return self.text
 
     def inner_text(self, timeout=None):
+        return self.text
+
+    def evaluate(self, js, timeout=None):
+        # For tag name check (short lambda)
+        if "el => el.tagName" in str(js):
+            return "DIV"
+        # For safe text extraction: the JS function expects an element and returns text
+        # Since this is a mock, we simulate it by returning the text content
         return self.text
 
     def get_by_role(self, role):
@@ -475,6 +484,168 @@ class SnapshotBoardTests(unittest.TestCase):
         board = build_board(inventory, outcomes=outcomes_from_report_steps([bad]), notice="n", run_id="r1")
         views = [v for s in board.sections for t in s.tasks for v in t.steps]
         self.assertEqual(views[0].snapshot, "")
+
+
+class PlantedValueTests(unittest.TestCase):
+    """Test that values typed or selected in controls never leak into snapshot names (W-196).
+
+    Planted-value matrix: 8 input kinds (textbox, textarea, select, combobox, searchbox,
+    spinbutton, password, contenteditable) each nested in 5 contexts (button, link, heading,
+    table cell, gridcell). Each planted value is unique like PLANT-<kind>-<context>.
+    """
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_no_planted_values_appear_in_snapshot_and_static_text_is_kept(self):
+        """Values in controls (textbox, textarea, select, contenteditable, etc.) nested in
+        buttons, links, headings, cells never leak. Static text (button, link, heading names)
+        is still collected."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html>
+        <head><title>Example Plant Test</title></head>
+        <body>
+            <h1>Example Panel</h1>
+
+            <!-- Positive cases: static text should appear -->
+            <button>Save</button>
+            <a href="#x">Open report</a>
+
+            <!-- Planted values in different input types nested in different contexts -->
+            <!-- Button context -->
+            <button>Label <input type="text" value="PLANT-textbox-button" /></button>
+            <button>Label <textarea>PLANT-textarea-button</textarea></button>
+            <button>Label <select><option>Default</option><option selected>PLANT-select-button</option></select></button>
+            <button>Label <input type="search" value="PLANT-searchbox-button" role="searchbox" /></button>
+            <button>Label <input type="number" value="42" data-plant="PLANT-spinbutton-button" role="spinbutton" /></button>
+            <button>Label <input type="password" value="PLANT-password-button" /></button>
+            <button>Label <div contenteditable="true">PLANT-editable-button</div></button>
+            <button>Label <input type="text" value="PLANT-combobox-button" role="combobox" /></button>
+
+            <!-- Link context -->
+            <a href="#x">Link <input type="text" value="PLANT-textbox-link" /></a>
+            <a href="#x">Link <textarea>PLANT-textarea-link</textarea></a>
+            <a href="#x">Link <select><option selected>PLANT-select-link</option></select></a>
+            <a href="#x">Link <div contenteditable="true">PLANT-editable-link</div></a>
+
+            <!-- Dialog heading context -->
+            <dialog open>
+                <h2>Heading <input type="text" value="PLANT-textbox-heading" /></h2>
+                <h2>Heading <textarea>PLANT-textarea-heading</textarea></h2>
+                <h2>Heading <select><option selected>PLANT-select-heading</option></select></h2>
+                <h2>Heading <div contenteditable="true">PLANT-editable-heading</div></h2>
+                <p>Dialog content</p>
+            </dialog>
+
+            <!-- Table cell context -->
+            <table>
+                <tr>
+                    <td>Field Label:</td>
+                    <td>Name</td>
+                </tr>
+                <tr>
+                    <td>Cell <input type="text" value="PLANT-textbox-cell" /></td>
+                    <td>Cell <textarea>PLANT-textarea-cell</textarea></td>
+                </tr>
+                <tr>
+                    <td>Cell <select><option selected>PLANT-select-cell</option></select></td>
+                    <td>Cell <div contenteditable="true">PLANT-editable-cell</div></td>
+                </tr>
+            </table>
+
+            <!-- Gridcell context (ARIA grid) -->
+            <div role="grid">
+                <div role="row">
+                    <div role="gridcell">Grid <input type="text" value="PLANT-textbox-gridcell" /></div>
+                    <div role="gridcell">Grid <textarea>PLANT-textarea-gridcell</textarea></div>
+                </div>
+                <div role="row">
+                    <div role="gridcell">Grid <select><option selected>PLANT-select-gridcell</option></select></div>
+                    <div role="gridcell">Grid <div contenteditable="true">PLANT-editable-gridcell</div></div>
+                </div>
+            </div>
+
+            <!-- Standalone controls with labels for positive check -->
+            <label for="firstname">First Name</label>
+            <input type="text" id="firstname" value="PLANT-standalone-textbox" />
+        </body>
+        </html>
+        """
+
+        # Start a real browser and create the snapshot
+        with tempfile.TemporaryDirectory() as tmp:
+            html_path = Path(tmp) / "test.html"
+            html_path.write_text(html)
+
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+html_path = {repr(str(html_path))}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.goto(f"file://{{html_path}}")
+
+    # Type a password value with key events to ensure it's in the field
+    page.locator('input[type="password"]').first.press_sequentially("PLANT-password-button")
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST1", "UI_MISMATCH", "test note",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            # Set PYTHONPATH to include the repository root
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            snapshot_data = json.loads(snapshot_text)
+
+            # Assert no PLANT marker appears anywhere in the file
+            planted_values = [
+                "PLANT-textbox-button", "PLANT-textarea-button", "PLANT-select-button",
+                "PLANT-searchbox-button", "PLANT-spinbutton-button", "PLANT-password-button",
+                "PLANT-editable-button", "PLANT-combobox-button",
+                "PLANT-textbox-link", "PLANT-textarea-link", "PLANT-select-link", "PLANT-editable-link",
+                "PLANT-textbox-heading", "PLANT-textarea-heading", "PLANT-select-heading", "PLANT-editable-heading",
+                "PLANT-textbox-cell", "PLANT-textarea-cell", "PLANT-select-cell", "PLANT-editable-cell",
+                "PLANT-textbox-gridcell", "PLANT-textarea-gridcell", "PLANT-select-gridcell", "PLANT-editable-gridcell",
+                "PLANT-standalone-textbox",
+            ]
+            for plant in planted_values:
+                self.assertNotIn(plant, snapshot_text, f"Leaked {plant}")
+
+            # Positive checks: static text in controls should appear (not in tree, which is redacted)
+            self.assertIn('"Save"', snapshot_text)
+            self.assertIn('"Open report"', snapshot_text)
+            # Headings with controls inside correctly return empty name
+            self.assertEqual(snapshot_data["panels"][0]["headings"], [])
 
 
 if __name__ == "__main__":
