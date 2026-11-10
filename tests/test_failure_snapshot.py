@@ -78,7 +78,7 @@ class Page:
         self.selectors = []
         self.roles = {
             "button": [Item(text=f"Signed in as {EMAIL}"), Item(text="Save"), Item(text="Hidden", visible=False)],
-            "link": [Item(name=f"Open {HOST}"), Item(text="Setup Home")],
+            "link": [Item(name=f"Open {HOST}"), Item(text="Example Panel")],
             "tab": [Item(text="Details")],
             "dialog": [Item(name="", text="whole dialog body text", headings=("Welcome Tour",))],
             "complementary": [Item(name="Help panel", headings=("Need help?",))],
@@ -170,7 +170,7 @@ class SnapshotWrittenTests(unittest.TestCase):
             self.assertEqual(data["screenshot"], "snapshots/003-S3.png")
             self.assertIn("Save", data["controls"]["button"])
             self.assertNotIn("Hidden", data["controls"]["button"])
-            self.assertIn("Setup Home", data["controls"]["link"])
+            self.assertIn("Example Panel", data["controls"]["link"])
             self.assertEqual(data["controls"]["tab"], ["Details"])
             self.assertEqual(data["controls"]["dialog"], ["Welcome Tour"])
             panels = {(p["role"], p["name"]): p["headings"] for p in data["panels"]}
@@ -214,10 +214,10 @@ class SnapshotRedactionTests(unittest.TestCase):
                 Page(), GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
                 checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
                 sleeper=clock.sleep, snapshot_dir=Path(tmp),
-                snapshot_leaks=lambda value: "Setup Home" in value,
+                snapshot_leaks=lambda value: "Example Panel" in value,
             )
             text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
-            self.assertNotIn("Setup Home", text)
+            self.assertNotIn("Example Panel", text)
             self.assertIn("<omitted>", text)
 
 
@@ -569,7 +569,6 @@ class RegionsTests(unittest.TestCase):
                 self.assertIn("tag", first)
                 self.assertIn("role_attr", first)
                 self.assertIn("frame", first)
-                self.assertIn("parent", first)
                 self.assertIn("headings", first)
 
     def test_regions_capped_at_twelve(self):
@@ -689,17 +688,17 @@ class NewFieldsLeakGuardTests(unittest.TestCase):
     def test_leak_guard_applied_to_regions(self):
         """Guard: leak guard applied to new fields"""
         page = RegionPage()
-        page.roles["region"] = [Item(name="Setup Home")]
+        page.roles["region"] = [Item(name="Example Panel")]
         with tempfile.TemporaryDirectory() as tmp:
             clock = Clock()
             walk_guide(
                 page, GuideInventory(1, (step("S1", "UI_MISMATCH"),), (), ()),
                 checks=checks_by_text(), timeout_s=0, interval_s=1, clock=clock,
                 sleeper=clock.sleep, snapshot_dir=Path(tmp),
-                snapshot_leaks=lambda value: "Setup Home" in value,
+                snapshot_leaks=lambda value: "Example Panel" in value,
             )
             text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
-            self.assertNotIn("Setup Home", text)
+            self.assertNotIn("Example Panel", text)
             self.assertIn("<omitted>", text)
 
     def test_leak_guard_applied_to_named_tree(self):
@@ -724,6 +723,86 @@ class NewFieldsLeakGuardTests(unittest.TestCase):
             text = (Path(tmp) / "snapshots" / "001-S1.json").read_text()
             self.assertNotIn("Secret Button", text)
             self.assertIn("<omitted>", text)
+
+
+class NamedTreePrivacyTests(unittest.TestCase):
+    def test_named_tree_drops_text_nodes_and_property_lines(self):
+        """Guard: non-element lines dropped from named_tree"""
+        email = "user@example.com"
+        host = "test.example.com"
+        token = "sid=abc123token456def789"
+        contenteditable = "typed: secret content"
+
+        class LeakyPage(Page):
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    # Tree with text nodes and property lines that could leak
+                    return Loc(tree=(
+                        f'- button "Safe Button"\n'
+                        f'- text: {contenteditable}\n'
+                        f'- link "Safe Link"\n'
+                        f'- /url: https://{host}/path?{token}\n'
+                        f'- heading "Safe Heading"\n'
+                        f'- text: Contact {email} for help\n'
+                    ))
+                return Loc()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            walk(LeakyPage(), Path(tmp), ("UI_MISMATCH",))
+            # Read the whole file as bytes to check for any occurrence
+            file_bytes = (Path(tmp) / "snapshots" / "001-S1.json").read_bytes()
+            file_text = file_bytes.decode("utf-8")
+
+            # None of these secrets should appear anywhere in the file
+            self.assertNotIn(email, file_text)
+            self.assertNotIn(host, file_text)
+            self.assertNotIn(token, file_text)
+            self.assertNotIn(contenteditable, file_text)
+            self.assertNotIn("sid=", file_text)
+
+            # But element names should be present (redacted)
+            data = json.loads(file_text)
+            named_tree = data["named_tree"]
+            self.assertIn("button", named_tree)
+            self.assertIn("link", named_tree)
+            self.assertIn("heading", named_tree)
+            # Text nodes and properties should not appear
+            self.assertNotIn("- text:", named_tree)
+            self.assertNotIn("- /url:", named_tree)
+
+    def test_screenshot_taken_before_new_reads(self):
+        """Test that budget running out during new reads still gets screenshot."""
+        clock = Clock()
+
+        class SlowRegionPage(Page):
+            def __init__(self, clock):
+                super().__init__()
+                self.clock = clock
+                self.roles["region"] = [SlowItem(clock, f"Region {i}") for i in range(20)]
+
+            def locator(self, selector):
+                self.selectors.append(selector)
+                if selector == "head > title":
+                    return Loc([Item(text=self.title())])
+                if selector == "body":
+                    return Loc(tree='- button "Test"\n')
+                return Loc()
+
+        page = SlowRegionPage(clock)
+        with tempfile.TemporaryDirectory() as tmp:
+            from workshop_validator.guide_walk import _redact_aria_snapshot
+            href = save_failure_snapshot(
+                page, Path(tmp), 1, "S1", "UI_MISMATCH", "test",
+                roots=[page], redact_tree=_redact_aria_snapshot, clock=clock,
+                budget_s=8.0,
+            )
+            data = json.loads((Path(tmp) / href).read_text())
+            # Screenshot should be present even if budget ran out during new reads
+            self.assertNotEqual(data["screenshot"], "unavailable (TimeoutError)")
+            self.assertTrue(data["screenshot"].startswith("snapshots/"))
 
 
 class BudgetOverrunTests(unittest.TestCase):

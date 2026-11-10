@@ -211,7 +211,10 @@ def _tree(page, redact_tree: Callable[..., str], budget: _Budget) -> str:
 
 
 def _named_tree(page, budget: _Budget) -> str:
-    """Create aria snapshot with names kept for structural roles, redacted and capped."""
+    """Create aria snapshot with names kept for structural roles, redacted and capped.
+
+    Keeps ONLY element lines; drops all text nodes and property lines to prevent leaks.
+    """
     if budget.over():
         return "skipped (time)"
     try:
@@ -220,8 +223,7 @@ def _named_tree(page, budget: _Budget) -> str:
         for line in tree.splitlines():
             parsed = _parse_aria_line(line)
             if parsed is None:
-                # Keep non-element lines (text nodes, properties) as-is
-                lines.append(line)
+                # Drop non-element lines (text nodes, properties) - they can leak secrets
                 continue
 
             indent, role, name = parsed
@@ -361,7 +363,6 @@ def _regions(roots: list, budget: _Budget) -> list[dict]:
                         "tag": str(tag or ""),
                         "role_attr": role_attr,
                         "frame": frame_idx,
-                        "parent": -1,  # Parent tracking would need nested traversal
                         "headings": headings,
                     })
                 except Exception:
@@ -380,9 +381,7 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
             except Exception:
                 continue
             # A dialog's inner text is its whole body; name it by label or heading only.
-            candidates_seen = 0
             for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
-                candidates_seen += 1
                 if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
                 name = _name(item, read_text=role != "dialog", budget=budget)
@@ -496,14 +495,7 @@ def save_failure_snapshot(
     tree = _tree(page, redact_tree, budget)
     controls, panels, truncated_roles = _controls_and_panels(roots, budget)
 
-    # New fields: collect only if budget allows
-    regions_data = []
-    named_tree_data = ""
-    if not budget.over():
-        regions_data = _regions(roots, budget)
-    if not budget.over():
-        named_tree_data = _named_tree(page, budget)
-
+    # Take screenshot before new reads, so a slow page loses only new fields
     try:
         if budget.over():
             raise TimeoutError("snapshot time used")
@@ -513,6 +505,14 @@ def save_failure_snapshot(
             png_href = f"{SNAPSHOT_FOLDER}/{stem}.png"
     except Exception as exc:
         png_error = type(exc).__name__
+
+    # New fields: collect only if budget allows
+    regions_data = []
+    named_tree_data = ""
+    if not budget.over():
+        regions_data = _regions(roots, budget)
+    if not budget.over():
+        named_tree_data = _named_tree(page, budget)
     payload = _guarded({
         "step_id": str(step_id),
         "index": int(index),
