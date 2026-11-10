@@ -255,6 +255,11 @@ class SlowItem(Item):
         self.clock.now += 1.0
         return True
 
+    def evaluate(self, js, timeout=None):
+        # Slow evaluate also costs time
+        self.clock.now += 0.1
+        return super().evaluate(js, timeout)
+
 
 class SlowPage(Page):
     def __init__(self, clock):
@@ -332,6 +337,10 @@ class DetachedItem(Item):
         raise TimeoutError("detached")
 
     def inner_text(self, timeout=None):
+        _wait(self.clock, timeout)
+        raise TimeoutError("detached")
+
+    def evaluate(self, js, timeout=None):
         _wait(self.clock, timeout)
         raise TimeoutError("detached")
 
@@ -491,14 +500,13 @@ class PlantedValueTests(unittest.TestCase):
 
     Planted-value matrix: 8 input kinds (textbox, textarea, select, combobox, searchbox,
     spinbutton, password, contenteditable) each nested in 5 contexts (button, link, heading,
-    table cell, gridcell). Each planted value is unique like PLANT-<kind>-<context>.
+    table cell, gridcell), plus editable-ancestor cases and hidden text.
     """
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_no_planted_values_appear_in_snapshot_and_static_text_is_kept(self):
-        """Values in controls (textbox, textarea, select, contenteditable, etc.) nested in
-        buttons, links, headings, cells never leak. Static text (button, link, heading names)
-        is still collected."""
+        """Values in controls nested in buttons/links/headings/cells never leak. Controls inside
+        editable ancestors never leak. Hidden text never appears. Static text is still collected."""
         import subprocess
         import sys
 
@@ -506,78 +514,101 @@ class PlantedValueTests(unittest.TestCase):
         <html>
         <head><title>Example Plant Test</title></head>
         <body>
-            <h1>Example Panel</h1>
+            <!-- Positive case: dialog heading with no control -->
+            <dialog id="clean-dialog" open>
+                <h2>Example Panel</h2>
+                <p>Dialog content</p>
+            </dialog>
 
             <!-- Positive cases: static text should appear -->
-            <button>Save</button>
-            <a href="#x">Open report</a>
+            <button id="btn-save">Save</button>
+            <a href="#x" id="link-report">Open report</a>
 
-            <!-- Planted values in different input types nested in different contexts -->
-            <!-- Button context -->
-            <button>Label <input type="text" value="PLANT-textbox-button" /></button>
-            <button>Label <textarea>PLANT-textarea-button</textarea></button>
-            <button>Label <select><option>Default</option><option selected>PLANT-select-button</option></select></button>
-            <button>Label <input type="search" value="PLANT-searchbox-button" role="searchbox" /></button>
-            <button>Label <input type="number" value="42" data-plant="PLANT-spinbutton-button" role="spinbutton" /></button>
-            <button>Label <input type="password" value="PLANT-password-button" /></button>
-            <button>Label <div contenteditable="true">PLANT-editable-button</div></button>
-            <button>Label <input type="text" value="PLANT-combobox-button" role="combobox" /></button>
+            <!-- Button with title that holds a marker (title never read) -->
+            <button id="btn-title" title="PLANT-title-marker">Pick</button>
+
+            <!-- Hidden text inside button -->
+            <button id="btn-hidden">Visible <span hidden>PLANT-hidden-span</span></button>
+            <button id="btn-aria-hidden">Visible <span aria-hidden="true">PLANT-aria-hidden</span></button>
+            <button id="btn-display-none">Visible <span style="display:none">PLANT-display-none</span></button>
+            <button id="btn-visibility">Visible <span style="visibility:hidden">PLANT-visibility-hidden</span></button>
+
+            <!-- Planted values: button context -->
+            <button id="btn1">Label <input type="text" id="inp1" /></button>
+            <button id="btn2">Label <textarea id="ta1"></textarea></button>
+            <button id="btn3">Label <select id="sel1"><option>Default</option><option value="2">PLANT-select-button</option></select></button>
+            <button id="btn4">Label <input type="search" id="search1" role="searchbox" /></button>
+            <button id="btn5">Label <input type="number" id="spin1" role="spinbutton" /></button>
+            <button id="btn6">Label <input type="password" id="pass1" /></button>
+            <button id="btn7">Label <div contenteditable="true" id="edit1"></div></button>
+            <button id="btn8">Label <input type="text" id="combo1" role="combobox" /></button>
 
             <!-- Link context -->
-            <a href="#x">Link <input type="text" value="PLANT-textbox-link" /></a>
-            <a href="#x">Link <textarea>PLANT-textarea-link</textarea></a>
-            <a href="#x">Link <select><option selected>PLANT-select-link</option></select></a>
-            <a href="#x">Link <div contenteditable="true">PLANT-editable-link</div></a>
+            <a href="#x" id="link1">Link <input type="text" id="inp2" /></a>
+            <a href="#x" id="link2">Link <textarea id="ta2"></textarea></a>
+            <a href="#x" id="link3">Link <select id="sel2"><option value="1">PLANT-select-link</option></select></a>
+            <a href="#x" id="link4">Link <div contenteditable="true" id="edit2"></div></a>
 
             <!-- Dialog heading context -->
-            <dialog open>
-                <h2>Heading <input type="text" value="PLANT-textbox-heading" /></h2>
-                <h2>Heading <textarea>PLANT-textarea-heading</textarea></h2>
-                <h2>Heading <select><option selected>PLANT-select-heading</option></select></h2>
-                <h2>Heading <div contenteditable="true">PLANT-editable-heading</div></h2>
-                <p>Dialog content</p>
+            <dialog id="main-dialog" open>
+                <h2 id="h1">Heading <input type="text" id="inp3" /></h2>
+                <h2 id="h2">Heading <textarea id="ta3"></textarea></h2>
+                <h2 id="h3">Heading <select id="sel3"><option value="1">PLANT-select-heading</option></select></h2>
+                <h2 id="h4">Heading <div contenteditable="true" id="edit3"></div></h2>
             </dialog>
 
             <!-- Table cell context -->
             <table>
                 <tr>
-                    <td>Field Label:</td>
-                    <td>Name</td>
+                    <td id="cell1">Cell <input type="text" id="inp4" /></td>
+                    <td id="cell2">Cell <textarea id="ta4"></textarea></td>
                 </tr>
                 <tr>
-                    <td>Cell <input type="text" value="PLANT-textbox-cell" /></td>
-                    <td>Cell <textarea>PLANT-textarea-cell</textarea></td>
-                </tr>
-                <tr>
-                    <td>Cell <select><option selected>PLANT-select-cell</option></select></td>
-                    <td>Cell <div contenteditable="true">PLANT-editable-cell</div></td>
+                    <td id="cell3">Cell <select id="sel4"><option value="1">PLANT-select-cell</option></select></td>
+                    <td id="cell4">Cell <div contenteditable="true" id="edit4"></div></td>
                 </tr>
             </table>
 
-            <!-- Gridcell context (ARIA grid) -->
+            <!-- Gridcell context -->
             <div role="grid">
                 <div role="row">
-                    <div role="gridcell">Grid <input type="text" value="PLANT-textbox-gridcell" /></div>
-                    <div role="gridcell">Grid <textarea>PLANT-textarea-gridcell</textarea></div>
+                    <div role="gridcell" id="gc1">Grid <input type="text" id="inp5" /></div>
+                    <div role="gridcell" id="gc2">Grid <textarea id="ta5"></textarea></div>
                 </div>
                 <div role="row">
-                    <div role="gridcell">Grid <select><option selected>PLANT-select-gridcell</option></select></div>
-                    <div role="gridcell">Grid <div contenteditable="true">PLANT-editable-gridcell</div></div>
+                    <div role="gridcell" id="gc3">Grid <select id="sel5"><option value="1">PLANT-select-gridcell</option></select></div>
+                    <div role="gridcell" id="gc4">Grid <div contenteditable="true" id="edit5"></div></div>
                 </div>
             </div>
 
-            <!-- Standalone controls with labels for positive check -->
-            <label for="firstname">First Name</label>
-            <input type="text" id="firstname" value="PLANT-standalone-textbox" />
+            <!-- Editable-ancestor cases: button/link/heading inside contenteditable -->
+            <div contenteditable="true" id="editable-parent">
+                <button id="btn-in-editable">PLANT-btn-in-contenteditable</button>
+                <a href="#x" id="link-in-editable">PLANT-link-in-contenteditable</a>
+                <h2 id="heading-in-editable">PLANT-heading-in-contenteditable</h2>
+            </div>
+
+            <!-- Elements that are themselves contenteditable -->
+            <button contenteditable="true" id="btn-itself-editable">PLANT-btn-itself-editable</button>
+            <a href="#x" contenteditable="true" id="link-itself-editable">PLANT-link-itself-editable</a>
+            <div role="button" contenteditable="true" id="div-btn-editable">PLANT-div-btn-editable</div>
+            <div role="link" contenteditable="true" id="div-link-editable">PLANT-div-link-editable</div>
+
+            <!-- Button/link/heading inside role=textbox -->
+            <div role="textbox" id="textbox-parent">
+                <button id="btn-in-textbox">PLANT-btn-in-textbox</button>
+                <a href="#x" id="link-in-textbox">PLANT-link-in-textbox</a>
+                <h2 id="heading-in-textbox">PLANT-heading-in-textbox</h2>
+            </div>
+
+            <!-- Frame for designMode test -->
+            <iframe id="design-frame" srcdoc="<button>PLANT-btn-in-designMode</button>"></iframe>
         </body>
         </html>
         """
 
         # Start a real browser and create the snapshot
         with tempfile.TemporaryDirectory() as tmp:
-            html_path = Path(tmp) / "test.html"
-            html_path.write_text(html)
-
             script = f"""
 import json
 import sys
@@ -589,19 +620,64 @@ from workshop_validator.guide_walk import _redact_aria_snapshot
 
 run_dir = Path({repr(tmp)}) / "run"
 run_dir.mkdir()
-html_path = {repr(str(html_path))}
+
+html_content = {repr(html)}
 
 with sync_playwright() as p:
     browser = p.chromium.launch()
     page = browser.new_page()
-    page.goto(f"file://{{html_path}}")
 
-    # Type a password value with key events to ensure it's in the field
-    page.locator('input[type="password"]').first.press_sequentially("PLANT-password-button")
+    # Serve from https://app.example.com/
+    page.route("https://app.example.com/test", lambda route: route.fulfill(
+        status=200,
+        content_type="text/html",
+        body=html_content
+    ))
+    page.goto("https://app.example.com/test")
+
+    # Type real values with key events
+    page.locator('#inp1').press_sequentially("PLANT-textbox-button")
+    page.locator('#ta1').press_sequentially("PLANT-textarea-button")
+    page.locator('#sel1').select_option("2")
+    page.locator('#search1').press_sequentially("PLANT-searchbox-button")
+    page.locator('#spin1').press_sequentially("731904")
+    page.locator('#pass1').press_sequentially("PLANT-password-button")
+    page.locator('#edit1').press_sequentially("PLANT-editable-button")
+    page.locator('#combo1').press_sequentially("PLANT-combobox-button")
+
+    page.locator('#inp2').press_sequentially("PLANT-textbox-link")
+    page.locator('#ta2').press_sequentially("PLANT-textarea-link")
+    page.locator('#sel2').select_option("1")
+    page.locator('#edit2').press_sequentially("PLANT-editable-link")
+
+    page.locator('#inp3').press_sequentially("PLANT-textbox-heading")
+    page.locator('#ta3').press_sequentially("PLANT-textarea-heading")
+    page.locator('#sel3').select_option("1")
+    page.locator('#edit3').press_sequentially("PLANT-editable-heading")
+
+    page.locator('#inp4').press_sequentially("PLANT-textbox-cell")
+    page.locator('#ta4').press_sequentially("PLANT-textarea-cell")
+    page.locator('#sel4').select_option("1")
+    page.locator('#edit4').press_sequentially("PLANT-editable-cell")
+
+    page.locator('#inp5').press_sequentially("PLANT-textbox-gridcell")
+    page.locator('#ta5').press_sequentially("PLANT-textarea-gridcell")
+    page.locator('#sel5').select_option("1")
+    page.locator('#edit5').press_sequentially("PLANT-editable-gridcell")
+
+    # Set designMode on the iframe
+    page.evaluate('document.getElementById("design-frame").contentDocument.designMode = "on"')
+
+    # Get all roots including the frame
+    try:
+        frame_handle = page.frame('design-frame')
+        roots = [page, frame_handle] if frame_handle else [page]
+    except:
+        roots = [page]
 
     href = save_failure_snapshot(
         page, run_dir, 1, "TEST1", "UI_MISMATCH", "test note",
-        roots=[page], redact_tree=_redact_aria_snapshot
+        roots=roots, redact_tree=_redact_aria_snapshot
     )
     print(json.dumps({{"href": href}}))
     browser.close()
@@ -630,22 +706,41 @@ with sync_playwright() as p:
             # Assert no PLANT marker appears anywhere in the file
             planted_values = [
                 "PLANT-textbox-button", "PLANT-textarea-button", "PLANT-select-button",
-                "PLANT-searchbox-button", "PLANT-spinbutton-button", "PLANT-password-button",
+                "PLANT-searchbox-button", "731904", "PLANT-password-button",
                 "PLANT-editable-button", "PLANT-combobox-button",
                 "PLANT-textbox-link", "PLANT-textarea-link", "PLANT-select-link", "PLANT-editable-link",
                 "PLANT-textbox-heading", "PLANT-textarea-heading", "PLANT-select-heading", "PLANT-editable-heading",
                 "PLANT-textbox-cell", "PLANT-textarea-cell", "PLANT-select-cell", "PLANT-editable-cell",
                 "PLANT-textbox-gridcell", "PLANT-textarea-gridcell", "PLANT-select-gridcell", "PLANT-editable-gridcell",
-                "PLANT-standalone-textbox",
+                "PLANT-title-marker",
+                "PLANT-hidden-span", "PLANT-aria-hidden", "PLANT-display-none", "PLANT-visibility-hidden",
+                "PLANT-btn-in-contenteditable", "PLANT-link-in-contenteditable", "PLANT-heading-in-contenteditable",
+                "PLANT-btn-itself-editable", "PLANT-link-itself-editable",
+                "PLANT-div-btn-editable", "PLANT-div-link-editable",
+                "PLANT-btn-in-textbox", "PLANT-link-in-textbox", "PLANT-heading-in-textbox",
+                "PLANT-btn-in-designMode",
             ]
             for plant in planted_values:
                 self.assertNotIn(plant, snapshot_text, f"Leaked {plant}")
 
-            # Positive checks: static text in controls should appear (not in tree, which is redacted)
+            # Positive checks: static text in controls should appear
             self.assertIn('"Save"', snapshot_text)
             self.assertIn('"Open report"', snapshot_text)
-            # Headings with controls inside correctly return empty name
-            self.assertEqual(snapshot_data["panels"][0]["headings"], [])
+            self.assertIn('"Pick"', snapshot_text)
+            self.assertIn('"Visible"', snapshot_text)
+
+            # Dialog heading with no control keeps its name
+            found_example_panel = False
+            for panel in snapshot_data["panels"]:
+                if "Example Panel" in panel.get("headings", []):
+                    found_example_panel = True
+                    break
+            self.assertTrue(found_example_panel, "Dialog heading 'Example Panel' not found")
+
+            # Buttons and links with controls inside have no static text (e.g., "Label", "Link", "Cell", "Grid")
+            # These words appear in the HTML before the controls but must not appear in the snapshot
+            for control_prefix in ["Label", "Link", "Cell", "Grid", "Heading"]:
+                self.assertNotIn(f'"{control_prefix}"', snapshot_text, f"Static text '{control_prefix}' from element with control inside leaked")
 
 
 if __name__ == "__main__":
