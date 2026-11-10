@@ -420,9 +420,9 @@ def _name(item, *, read_text: bool, budget: _Budget, values_result=None) -> str:
         try:
             values_result = item.evaluate(_COLLECT_VALUES_JS, timeout=budget.timeout_ms(500))
             if values_result is None:
-                values_result = {"values": [], "capped": False}
+                values_result = {"values": [], "capped": True}
         except Exception:
-            values_result = {"values": [], "capped": False}
+            values_result = {"values": [], "capped": True}
 
     if budget.over():
         return ""
@@ -466,18 +466,26 @@ def _headings(panel, budget: _Budget, values_result=None) -> list[str]:
     return names
 
 
-def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict]]:
+def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict], str]:
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
+    names_withheld = ""
     for root in roots[:ROOT_LIMIT]:
         # Collect values once per root
         values_result = None
         try:
             values_result = root.evaluate(_COLLECT_VALUES_JS)
             if values_result is None:
-                values_result = {"values": [], "capped": False}
+                values_result = {"values": [], "capped": True}
+                names_withheld = "value collection failed"
         except Exception:
-            values_result = {"values": [], "capped": False}
+            values_result = {"values": [], "capped": True}
+            names_withheld = "value collection failed"
+
+        # Check if capped during collection
+        if values_result.get("capped"):
+            if not names_withheld:
+                names_withheld = "value collection capped"
 
         for role in CONTROL_ROLES:
             try:
@@ -507,7 +515,7 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     "name": _name(item, read_text=False, budget=budget, values_result=values_result),
                     "headings": _headings(item, budget, values_result=values_result),
                 })
-    return controls, panels
+    return controls, panels, names_withheld
 
 
 def _screenshot(page, roots: list, budget: _Budget) -> bytes:
@@ -594,7 +602,7 @@ def save_failure_snapshot(
     png_error = ""
     title = _title(page, budget)
     tree = _tree(page, redact_tree, budget)
-    controls, panels = _controls_and_panels(roots, budget)
+    controls, panels, names_withheld = _controls_and_panels(roots, budget)
     try:
         if budget.over():
             raise TimeoutError("snapshot time used")
@@ -617,6 +625,8 @@ def save_failure_snapshot(
         "screenshot": png_href or f"unavailable ({png_error or 'empty'})",
         # Set only when a read was skipped because the cap was reached.
         "truncated": TRUNCATED_NOTE if budget.hit else "",
+        # Set when value collection failed or was capped.
+        "names_withheld": names_withheld,
         # A lookup or Resource Type miss: up to 3 options' tags, roles, classes and nesting,
         # each text node as its length only.
         "option_shapes": list(option_shapes or [])[:3],

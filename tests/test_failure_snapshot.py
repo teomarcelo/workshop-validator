@@ -1187,6 +1187,405 @@ with sync_playwright() as p:
             # Visible text from buttons should appear (not the hidden parts)
             self.assertIn('"Visible"', snapshot_text, "Visible text missing from buttons")
 
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_value_collection_failure_fails_closed(self):
+        """When value collection fails, all names are withheld (fail closed)."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" value="testvalue">
+            <button>testvalue button</button>
+            <button>Save</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+# Monkey-patch to make _COLLECT_VALUES_JS throw
+import workshop_validator.failure_snapshot as fs
+original_js = fs._COLLECT_VALUES_JS
+fs._COLLECT_VALUES_JS = "() => {{ throw new Error('forced error'); }}"
+
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            data = json.loads(snapshot_path.read_text())
+
+            # All button names should be empty (fail closed)
+            self.assertEqual(data["controls"]["button"], [])
+            # names_withheld should be set
+            self.assertIn("value collection", data["names_withheld"])
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_w200_cap_fails_closed_at_301_values(self):
+        """Cap at 300 values: 301st value fails closed."""
+        import subprocess
+        import sys
+
+        # Create 301 inputs, then a button with the 301st value
+        inputs = "".join([f'<input type="text" value="filler{i:04d}">' for i in range(301)])
+        html = f"""<!DOCTYPE html>
+        <html><body>
+            {inputs}
+            <input type="text" value="zqcapreal7731">
+            <button>zqcapreal7731</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "CAP", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            data = json.loads(snapshot_text)
+
+            # Button names should be empty (capped)
+            self.assertEqual(data["controls"]["button"], [])
+            # names_withheld should indicate capping
+            self.assertIn("capped", data["names_withheld"])
+            # The real value should not appear
+            self.assertNotIn("zqcapreal7731", snapshot_text.lower())
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_w200_unselected_options_not_collected(self):
+        """Unselected role=option elements are not collected."""
+        import subprocess
+        import sys
+
+        # 320 unselected options, 1 selected option, buttons with the selected value and "Save"
+        unselected = "".join([f'<div role="option">unsel{i:04d}</div>' for i in range(320)])
+        html = f"""<!DOCTYPE html>
+        <html><body>
+            <div role="listbox">
+                {unselected}
+                <div role="option" aria-selected="true">zqoptsel5521</div>
+            </div>
+            <button>zqoptsel5521</button>
+            <button>Save</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "OPT", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            data = json.loads(snapshot_text)
+
+            # Save button should be present (not capped by unselected options)
+            self.assertIn("Save", str(data["controls"]["button"]))
+            # Selected option value should not appear (value-matched)
+            self.assertNotIn("zqoptsel5521", snapshot_text.lower())
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_w200_min_length_3_chars(self):
+        """Values under 3 characters are not collected."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="slider">s</div>
+            <button>Save</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "MIN", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            data = json.loads(snapshot_text)
+
+            # Save button should be present (short value "s" not collected)
+            self.assertIn("Save", str(data["controls"]["button"]))
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_w200_slider_aria_valuetext_collected(self):
+        """role=slider aria-valuetext is collected and matched."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="slider" aria-valuetext="zqslidervt3390"></div>
+            <button>zqslidervt3390</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "SLIDER", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+
+            # Slider aria-valuetext should be collected and matched
+            self.assertNotIn("zqslidervt3390", snapshot_text.lower())
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_w200_aria_hidden_case_insensitive(self):
+        """aria-hidden compared case-insensitively."""
+        import subprocess
+        import sys
+
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button>Visible <span aria-hidden="TRUE">zqhiddenup4410</span></button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+from workshop_validator.guide_walk import _redact_aria_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "ARIA", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=_redact_aria_snapshot
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text()
+            data = json.loads(snapshot_text)
+
+            # Visible should be present, hidden text should not
+            self.assertIn("Visible", str(data["controls"]["button"]))
+            self.assertNotIn("zqhiddenup4410", snapshot_text.lower())
 
 if __name__ == "__main__":
     unittest.main()
