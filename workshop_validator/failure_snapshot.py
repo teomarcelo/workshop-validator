@@ -176,7 +176,7 @@ function hasControlAncestor(el) {
     let steps = 0;
     const MAX_STEPS = 200;
     while (current) {
-        if (seen.has(current) || steps >= MAX_STEPS) break;
+        if (seen.has(current) || steps >= MAX_STEPS) return true;
         seen.add(current);
         steps++;
         // At each step: try assignedSlot first, then parentElement, then host
@@ -241,11 +241,12 @@ function collectValuesFromPage(doc) {
     const MAX_VALUES = 300;
     const MIN_LENGTH = 3;
     let capped = false;
+    const designModeOn = doc.designMode === 'on';
 
     function addValue(val) {
         if (capped) return;
         if (val && typeof val === 'string') {
-            const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
+            const normalized = val.replace(/\s+/g, '').toLowerCase();
             if (normalized && normalized.length >= MIN_LENGTH) {
                 valueSet.add(normalized);
                 if (valueSet.size > MAX_VALUES) {
@@ -307,7 +308,7 @@ function collectValuesFromPage(doc) {
     if (root) {
         collectFromElement(root);
     }
-    return {values: Array.from(valueSet), capped: capped};
+    return {values: Array.from(valueSet), capped: capped, designModeOn: designModeOn};
 }
 """
 
@@ -376,9 +377,9 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
     // Fail closed if value collection capped
     if (valuesResult.capped) return '';
 
-    const nameLower = text.toLowerCase();
+    const nameNoSpace = text.toLowerCase().replace(/\s+/g, '');
     for (const value of valuesResult.values) {
-        if (nameLower.includes(value)) {
+        if (nameNoSpace.includes(value)) {
             return '';
         }
     }
@@ -397,9 +398,9 @@ _ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
     // Fail closed if value collection capped
     if (valuesResult.capped) return '';
 
-    const ariaLabelLower = ariaLabel.toLowerCase();
+    const ariaLabelNoSpace = ariaLabel.toLowerCase().replace(/\s+/g, '');
     for (const value of valuesResult.values) {
-        if (ariaLabelLower.includes(value)) {
+        if (ariaLabelNoSpace.includes(value)) {
             return '';
         }
     }
@@ -492,6 +493,7 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
         all_values = []
         collection_failed = False
         collection_capped = False
+        design_mode_detected = False
 
         for root in roots[:ROOT_LIMIT]:
             try:
@@ -499,6 +501,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                 # Fix 4: Check that result is a dict with the right keys
                 if not isinstance(values_result, dict) or "values" not in values_result or "capped" not in values_result:
                     collection_failed = True
+                    break
+                if values_result.get("designModeOn"):
+                    design_mode_detected = True
                     break
                 if values_result.get("capped"):
                     collection_capped = True
@@ -511,6 +516,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
         # Build merged values_result
         if collection_failed:
             names_withheld = "value collection failed"
+            merged_values_result = {"values": [], "capped": True}
+        elif design_mode_detected:
+            names_withheld = "editable document present"
             merged_values_result = {"values": [], "capped": True}
         elif collection_capped:
             names_withheld = "value collection capped"

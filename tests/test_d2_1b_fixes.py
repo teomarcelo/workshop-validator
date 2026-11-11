@@ -409,5 +409,463 @@ with sync_playwright() as p:
                             "aria-hidden='TRUE' text leaked (should be case-insensitive)")
 
 
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_designmode_iframe_mirror_withheld(self):
+        """HIGH: Text typed into designMode iframe must not leak into page button names."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <iframe id="editor-frame" srcdoc="<html><body>placeholder</body></html>"></iframe>
+            <button id="mirror-btn">zqdesignmode41</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Set iframe to designMode and type text
+    iframe = page.frame_locator("#editor-frame")
+    page.evaluate('''
+        const frame = document.getElementById("editor-frame");
+        frame.contentDocument.designMode = "on";
+        frame.contentDocument.body.textContent = "zqdesignmode41";
+    ''')
+
+    # Collect from page and frames
+    roots = [page] + page.frames
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=roots, redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_data = json.loads(snapshot_path.read_text())
+
+            # Button marker must be absent
+            self.assertNotIn("zqdesignmode41", snapshot_path.read_text().lower(),
+                            "designMode iframe text leaked into button name")
+            # names_withheld must be set
+            self.assertEqual(snapshot_data.get("names_withheld"), "editable document present",
+                           "names_withheld not set for designMode iframe")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_designmode_page_mirror_withheld(self):
+        """HIGH: Text typed into designMode page must not leak into frame button names."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            zqdesignmode42
+            <iframe id="child-frame" srcdoc="<button id='mirror-btn'>zqdesignmode42</button>"></iframe>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Set page to designMode
+    page.evaluate('document.designMode = "on"')
+
+    # Collect from page and frames
+    roots = [page] + page.frames
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=roots, redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_data = json.loads(snapshot_path.read_text())
+
+            # Button marker must be absent
+            self.assertNotIn("zqdesignmode42", snapshot_path.read_text().lower(),
+                            "designMode page text leaked into frame button name")
+            # names_withheld must be set
+            self.assertEqual(snapshot_data.get("names_withheld"), "editable document present",
+                           "names_withheld not set for designMode page")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_no_designmode_button_named(self):
+        """HIGH (positive): With no designMode, button is named."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button id="keep-btn">KeepPage</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+
+            # Button must be present (no designMode blocking)
+            self.assertIn("keeppage", snapshot_path.read_text().lower(),
+                         "Button name missing without designMode")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_deep_walk_205_withheld(self):
+        """HIGH: Button inside 205-level chain under textbox must be withheld."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="textbox" id="control">OUTER</div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Build 205-level deep chain ending in button
+    page.evaluate('''
+        let container = document.getElementById("control");
+        for (let i = 0; i < 205; i++) {{
+            const div = document.createElement("div");
+            container.appendChild(div);
+            container = div;
+        }}
+        const button = document.createElement("button");
+        button.textContent = "zqdeep205";
+        container.appendChild(button);
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+
+            # Deep button must be absent (cap fails closed)
+            self.assertNotIn("zqdeep205", snapshot_path.read_text().lower(),
+                            "Deep button leaked (walk cap should fail closed)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_shallow_walk_50_named(self):
+        """HIGH (positive): Button inside 50-level chain with no control is named."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div id="container"></div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Build 50-level chain (below cap) ending in button
+    page.evaluate('''
+        let container = document.getElementById("container");
+        for (let i = 0; i < 50; i++) {{
+            const div = document.createElement("div");
+            container.appendChild(div);
+            container = div;
+        }}
+        const button = document.createElement("button");
+        button.textContent = "Deep ok";
+        container.appendChild(button);
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+
+            # Shallow button must be present (below cap)
+            self.assertIn("deep ok", snapshot_path.read_text().lower(),
+                         "Shallow button missing (should be named below cap)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_whitespace_removed_in_match(self):
+        """HIGH: Whitespace removed from both sides when matching."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="input" value="Zara Quillfeather" />
+            <button id="mirror-btn">Zara<br>Quillfeather</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Both forms must be absent (whitespace removed on both sides)
+            self.assertNotIn("zara quillfeather", snapshot_text,
+                            "Spaced form leaked (should match with whitespace removed)")
+            self.assertNotIn("zaraquillfeather", snapshot_text,
+                            "Joined form leaked (should match with whitespace removed)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_whitespace_short_value_ignored(self):
+        """HIGH (positive): Short value after whitespace removal is ignored."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="input" value="s a" />
+            <button id="save-btn">Save</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+
+            # Save button must be present (short value ignored)
+            self.assertIn("save", snapshot_path.read_text().lower(),
+                         "Save button missing (short value should be ignored)")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -773,19 +773,14 @@ with sync_playwright() as p:
             for plant in planted_values:
                 self.assertNotIn(plant, snapshot_text, f"Leaked {plant}")
 
-            # Positive checks: static text in controls should appear
-            self.assertIn('"Save"', snapshot_text)
-            self.assertIn('"Open report"', snapshot_text)
-            self.assertIn('"Pick"', snapshot_text)
-            self.assertIn('"Visible"', snapshot_text)
-
-            # Dialog heading with no control keeps its name
-            found_example_panel = False
-            for panel in snapshot_data["panels"]:
-                if "Example Panel" in panel.get("headings", []):
-                    found_example_panel = True
-                    break
-            self.assertTrue(found_example_panel, "Dialog heading 'Example Panel' not found")
+            # designMode is set, so names_withheld should be set
+            self.assertEqual(snapshot_data.get("names_withheld"), "editable document present",
+                           "names_withheld should be set when designMode is present")
+            # All control names should be empty when designMode is present
+            self.assertEqual(snapshot_data["controls"]["button"], [],
+                           "Button names should be withheld when designMode is present")
+            self.assertEqual(snapshot_data["controls"]["link"], [],
+                           "Link names should be withheld when designMode is present")
 
             # Buttons and links with controls inside have no static text (e.g., "Label", "Link", "Cell", "Grid")
             # These words appear in the HTML before the controls but must not appear in the snapshot
