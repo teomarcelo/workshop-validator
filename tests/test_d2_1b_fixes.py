@@ -809,6 +809,71 @@ with sync_playwright() as p:
                             "Joined form leaked (should match with whitespace removed)")
 
     @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_aria_label_whitespace_mirror(self):
+        """HIGH: aria-label mirror with spaces must be withheld (whitespace removed in match)."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <input type="text" id="input" value="zq mirror 77" />
+            <button aria-label="Open zq mirror 77" id="mirror-btn">Go</button>
+            <button id="keep-btn">KeepMe</button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Both forms must be absent (whitespace removed on both sides)
+            self.assertNotIn("zq mirror 77", snapshot_text,
+                            "Spaced aria-label leaked (should match with whitespace removed)")
+            self.assertNotIn("zqmirror77", snapshot_text,
+                            "Joined aria-label leaked (should match with whitespace removed)")
+            # Positive control must be present
+            self.assertIn("keepme", snapshot_text,
+                         "Positive control button missing")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
     def test_whitespace_short_value_ignored(self):
         """HIGH (positive): Short value after whitespace removal is ignored."""
         html = """<!DOCTYPE html>
