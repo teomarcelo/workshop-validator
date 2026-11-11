@@ -335,13 +335,16 @@ _SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
         const hasSlotlessRender = el.shadowRoot && el.shadowRoot.querySelector('slot') === null;
         if (!hasSlotlessRender) {
             for (const node of el.childNodes) {
+                // Skip closed details body (both text and element nodes, except SUMMARY)
+                const isClosedDetails = el.tagName === 'DETAILS' && !el.hasAttribute('open');
+                const isSummary = node.nodeType === 1 && node.tagName === 'SUMMARY';
+                if (isClosedDetails && !isSummary) {
+                    continue;
+                }
+
                 if (node.nodeType === 3) {
                     text += node.textContent;
                 } else if (node.nodeType === 1) {
-                    // Skip closed details body (not the summary)
-                    if (el.tagName === 'DETAILS' && !el.hasAttribute('open') && node.tagName !== 'SUMMARY') {
-                        continue;
-                    }
                     if (!isControl(node)) {
                         text += collectText(node, seen);
                     }

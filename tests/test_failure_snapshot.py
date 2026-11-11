@@ -2749,5 +2749,220 @@ with sync_playwright() as p:
                             "Closed details body leaked (should be skipped)")
 
 
+class MutantKillerTests(unittest.TestCase):
+    """Tests that kill specific mutants in unrendered text guards."""
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_unslotted_bare_text_node_skipped(self):
+        """Bare text node in light DOM is skipped when shadow has no slot."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <button id="btn"></button>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Build: button contains "Vis " text node, then x-ns custom element
+    # x-ns light DOM: bare text node "zqunslotted34"
+    # x-ns shadow: <span>Shown</span> (no slot)
+    page.evaluate('''
+        const btn = document.getElementById("btn");
+        btn.appendChild(document.createTextNode("Vis "));
+        const custom = document.createElement("x-ns");
+        custom.appendChild(document.createTextNode("zqunslotted34"));
+        const shadow = custom.attachShadow({{mode: 'open'}});
+        const span = document.createElement("span");
+        span.textContent = "Shown";
+        shadow.appendChild(span);
+        btn.appendChild(custom);
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Unslotted light DOM text should not appear
+            self.assertNotIn("zqunslotted34", snapshot_text,
+                            "Unslotted light DOM text leaked (should be skipped)")
+            # Shadow content should appear
+            self.assertIn("shown", snapshot_text,
+                          "Shadow content missing (should be present)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_closed_details_bare_text_node_skipped(self):
+        """Bare text node in closed details body is skipped (not summary)."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="dialog">
+                <h2 id="heading"></h2>
+            </div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Build: h2 contains <details><summary>VisS</summary>zqdetails35</details>
+    # The body "zqdetails35" is a bare text node
+    page.evaluate('''
+        const h2 = document.getElementById("heading");
+        const details = document.createElement("details");
+        const summary = document.createElement("summary");
+        summary.textContent = "VisS";
+        details.appendChild(summary);
+        details.appendChild(document.createTextNode("zqdetails35"));
+        h2.appendChild(details);
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # Closed details body (bare text) should not appear
+            self.assertNotIn("zqdetails35", snapshot_text,
+                            "Closed details body text leaked (should be skipped)")
+            # Summary should appear
+            self.assertIn("viss", snapshot_text,
+                          "Summary text missing (should be present)")
+
+    @unittest.skipUnless(os.getenv("RUN_BROWSER_SMOKE"), "browser test")
+    def test_shadow_text_nodes_joined_without_space(self):
+        """Adjacent shadow text nodes are joined without space, triggering host redaction."""
+        html = """<!DOCTYPE html>
+        <html><body>
+            <div role="dialog">
+                <h2 id="heading"></h2>
+            </div>
+        </body></html>
+        """
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = f"""
+import json
+import sys
+from pathlib import Path
+from playwright.sync_api import sync_playwright
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from workshop_validator.failure_snapshot import save_failure_snapshot
+
+run_dir = Path({repr(tmp)}) / "run"
+run_dir.mkdir()
+
+html_content = {repr(html)}
+
+with sync_playwright() as p:
+    browser = p.chromium.launch()
+    page = browser.new_page()
+    page.set_content(html_content)
+
+    # Build: h2 with shadow root containing two adjacent text nodes
+    # "acme-dev-ed" + ".my.salesforce.example" -> host when joined without space
+    page.evaluate('''
+        const h2 = document.getElementById("heading");
+        const shadow = h2.attachShadow({{mode: 'open'}});
+        shadow.appendChild(document.createTextNode("acme-dev-ed"));
+        shadow.appendChild(document.createTextNode(".my.salesforce.example"));
+    ''')
+
+    href = save_failure_snapshot(
+        page, run_dir, 1, "TEST", "UI_MISMATCH", "test",
+        roots=[page], redact_tree=lambda x: x
+    )
+    print(json.dumps({{"href": href}}))
+    browser.close()
+"""
+            script_path = Path(tmp) / "run_test.py"
+            script_path.write_text(script)
+
+            repo_root = Path(__file__).parent.parent
+            env = os.environ.copy()
+            env["PYTHONPATH"] = str(repo_root)
+            result = subprocess.run(
+                [sys.executable, str(script_path)],
+                capture_output=True, text=True, timeout=30, env=env,
+            )
+            self.assertEqual(result.returncode, 0, f"Script failed: {result.stderr}")
+
+            output = json.loads(result.stdout.strip())
+            snapshot_path = Path(tmp) / "run" / output["href"]
+            snapshot_text = snapshot_path.read_text().lower()
+
+            # When joined without space, becomes a host and is redacted
+            self.assertNotIn("acme-dev-ed", snapshot_text,
+                            "Shadow text not redacted (should be joined without space and redacted as host)")
+
+
 if __name__ == "__main__":
     unittest.main()
