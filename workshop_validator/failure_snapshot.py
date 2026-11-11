@@ -140,117 +140,332 @@ def _visible(loc, cap: int, budget: _Budget):
             yield item
 
 
-_SAFE_TEXT_JS = """
-(element) => {
-    // Returns visible text from text nodes only, never from controls or editable contexts.
-    // Returns "" if element is or contains a control, or is inside an editable ancestor.
-    const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
-    const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option']);
-    const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+_SHARED_GUARDS_JS = r"""
+// Shared guards used by both text and aria-label extraction (each guard exactly once)
+const CONTROL_TAGS = new Set(['INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OUTPUT']);
+const CONTROL_ROLES = new Set(['textbox', 'combobox', 'searchbox', 'spinbutton', 'listbox', 'option', 'slider']);
+const HIDDEN_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEMPLATE']);
+const SKIPPED_INPUT_TYPES = new Set(['hidden', 'submit', 'button', 'reset', 'checkbox', 'radio', 'image', 'file']);
 
-    function isControl(el) {
-        if (CONTROL_TAGS.has(el.tagName)) return true;
-        const role = el.getAttribute('role');
-        if (role && CONTROL_ROLES.has(role)) return true;
-        const editable = el.getAttribute('contenteditable');
-        if (editable !== null && editable !== 'false') return true;
-        return false;
+function getRoleTokens(el) {
+    const roleAttr = el.getAttribute('role');
+    if (!roleAttr) return [];
+    const tokens = roleAttr.toLowerCase().split(/\s+/);
+    return tokens;
+}
+
+function isControl(el) {
+    if (CONTROL_TAGS.has(el.tagName)) return true;
+    if (el.isContentEditable) return true;
+    if (el.ownerDocument && el.ownerDocument.designMode === 'on') return true;
+    try {
+        const style = window.getComputedStyle(el);
+        const userModify = style.webkitUserModify || style.getPropertyValue('-webkit-user-modify');
+        if (userModify && userModify !== 'read-only') return true;
+    } catch (e) {}
+    const tokens = getRoleTokens(el);
+    for (const token of tokens) {
+        if (CONTROL_ROLES.has(token)) return true;
     }
+    return false;
+}
 
-    function isHidden(el) {
-        if (HIDDEN_TAGS.has(el.tagName)) return true;
-        if (el.hasAttribute('hidden')) return true;
-        if (el.getAttribute('aria-hidden') === 'true') return true;
+function hasControlAncestor(el) {
+    let current = el;
+    const seen = new Set();
+    let steps = 0;
+    const MAX_STEPS = 200;
+    while (current) {
+        if (seen.has(current) || steps >= MAX_STEPS) break;
+        seen.add(current);
+        steps++;
+        // At each step: try assignedSlot first, then parentElement, then host
+        if (current.assignedSlot) {
+            current = current.assignedSlot;
+        } else if (current.parentElement) {
+            current = current.parentElement;
+        } else {
+            const root = current.getRootNode();
+            if (root && root.host) {
+                current = root.host;
+            } else {
+                break;
+            }
+        }
+        if (isControl(current)) return true;
+    }
+    return false;
+}
+
+function isHidden(el) {
+    if (HIDDEN_TAGS.has(el.tagName)) return true;
+    if (el.hasAttribute('hidden')) return true;
+    const ariaHidden = el.getAttribute('aria-hidden');
+    if (ariaHidden && ariaHidden.toLowerCase() === 'true') return true;
+    try {
+        if (!el.checkVisibility({visibilityProperty: true})) return true;
+    } catch (e) {
         try {
             const style = window.getComputedStyle(el);
-            if (style.display === 'none' || style.visibility === 'hidden') return true;
-        } catch (e) {
-            // getComputedStyle can fail on detached elements
+            if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse') return true;
+        } catch (e2) {}
+    }
+    return false;
+}
+
+function traverse(el, seen) {
+    const children = [];
+    // Skip SCRIPT, STYLE, TEMPLATE - they never contribute visible text
+    const tag = el.tagName;
+    if (tag === 'SCRIPT' || tag === 'STYLE' || tag === 'TEMPLATE') {
+        return children;
+    }
+    for (const child of el.childNodes) {
+        if (child.nodeType === 1 && !seen.has(child)) {
+            children.push(child);
         }
-        return false;
+    }
+    if (el.shadowRoot) {
+        for (const child of el.shadowRoot.childNodes) {
+            if (child.nodeType === 1 && !seen.has(child)) {
+                children.push(child);
+            }
+        }
+    }
+    return children;
+}
+
+function collectValuesFromPage(doc) {
+    const valueSet = new Set();
+    const seen = new Set();
+    const MAX_VALUES = 300;
+    const MIN_LENGTH = 3;
+    let capped = false;
+
+    function addValue(val) {
+        if (capped) return;
+        if (val && typeof val === 'string') {
+            const normalized = val.replace(/\s+/g, ' ').trim().toLowerCase();
+            if (normalized && normalized.length >= MIN_LENGTH) {
+                valueSet.add(normalized);
+                if (valueSet.size > MAX_VALUES) {
+                    capped = true;
+                    valueSet.clear();
+                }
+            }
+        }
     }
 
-    // Check if element itself is contentEditable or in designMode document
-    if (element.isContentEditable) return '';
-    if (element.ownerDocument && element.ownerDocument.designMode === 'on') return '';
+    function collectFromElement(elem) {
+        if (capped) return;
+        if (seen.has(elem)) return;
+        seen.add(elem);
 
-    // Check if element is inside an editable ancestor (but not if element itself is a control)
-    const ancestorSelector = 'input,select,textarea,option,output,[contenteditable]:not([contenteditable="false"]),[role=textbox],[role=combobox],[role=searchbox],[role=spinbutton],[role=listbox],[role=option]';
-    const closestAncestor = element.closest(ancestorSelector);
-    if (closestAncestor && closestAncestor !== element) return '';
+        const tag = elem.tagName;
+        if (tag === 'INPUT') {
+            const type = (elem.getAttribute('type') || 'text').toLowerCase();
+            if (!SKIPPED_INPUT_TYPES.has(type)) {
+                addValue(elem.value);
+            }
+        }
+        if (tag === 'TEXTAREA') {
+            addValue(elem.value);
+        }
+        if (tag === 'SELECT') {
+            for (const option of elem.options) {
+                if (option.selected) {
+                    addValue(option.textContent);
+                }
+            }
+        }
+        const tokens = getRoleTokens(elem);
+        // For role=option, only collect if aria-selected="true"
+        if (tokens.includes('option')) {
+            const ariaSelected = elem.getAttribute('aria-selected');
+            if (ariaSelected && ariaSelected.toLowerCase() === 'true') {
+                addValue(elem.textContent);
+            }
+        } else if (isControl(elem) && elem.ownerDocument.designMode !== 'on' && tag !== 'SELECT' && tag !== 'OPTION') {
+            addValue(elem.textContent);
+        }
+        const inputRoles = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton', 'slider']);
+        for (const token of tokens) {
+            if (inputRoles.has(token)) {
+                addValue(elem.textContent);
+                addValue(elem.getAttribute('aria-valuetext'));
+                break;
+            }
+        }
 
-    function containsControl(el) {
+        // Use shared traverse to walk light children and shadow roots
+        for (const child of traverse(elem, seen)) {
+            collectFromElement(child);
+        }
+    }
+
+    const root = doc.body || doc.documentElement;
+    if (root) {
+        collectFromElement(root);
+    }
+    return {values: Array.from(valueSet), capped: capped};
+}
+"""
+
+_COLLECT_VALUES_JS = _SHARED_GUARDS_JS + r"""
+() => {
+    return collectValuesFromPage(document);
+}
+"""
+
+_SAFE_TEXT_JS = _SHARED_GUARDS_JS + r"""
+(element, valuesResult) => {
+    function containsControl(el, seen) {
         if (isControl(el)) return true;
-        for (const child of el.children) {
-            if (containsControl(child)) return true;
+        for (const child of traverse(el, seen)) {
+            seen.add(child);
+            if (containsControl(child, seen)) return true;
         }
         return false;
     }
 
-    function collectText(el) {
+    function collectText(el, seen) {
         if (isHidden(el)) return '';
         let text = '';
-        for (const node of el.childNodes) {
-            if (node.nodeType === 3) {  // TEXT_NODE
-                text += node.textContent;
-            } else if (node.nodeType === 1) {  // ELEMENT_NODE
-                if (!isControl(node)) {
-                    text += collectText(node);
+        // Skip light DOM children if this element has a shadow root with no slot
+        const hasSlotlessRender = el.shadowRoot && el.shadowRoot.querySelector('slot') === null;
+        if (!hasSlotlessRender) {
+            for (const node of el.childNodes) {
+                // Skip closed details body (both text and element nodes, except SUMMARY)
+                const isClosedDetails = el.tagName === 'DETAILS' && !el.hasAttribute('open');
+                const isSummary = node.nodeType === 1 && node.tagName === 'SUMMARY';
+                if (isClosedDetails && !isSummary) {
+                    continue;
+                }
+
+                if (node.nodeType === 3) {
+                    text += node.textContent;
+                } else if (node.nodeType === 1) {
+                    if (!isControl(node)) {
+                        text += collectText(node, seen);
+                    }
+                }
+            }
+        }
+        if (el.shadowRoot) {
+            for (const node of el.shadowRoot.childNodes) {
+                if (node.nodeType === 3) {
+                    text += node.textContent;
+                } else if (node.nodeType === 1) {
+                    if (!isControl(node)) {
+                        text += collectText(node, seen);
+                    }
                 }
             }
         }
         return text;
     }
 
-    if (containsControl(element)) return '';
-    return collectText(element);
+    if (isControl(element)) return '';
+    if (hasControlAncestor(element)) return '';
+    const seen = new Set();
+    if (containsControl(element, seen)) return '';
+    let text = collectText(element, new Set());
+    text = text.replace(/\s+/g, ' ').trim();
+    if (text.length > 400) return '';
+
+    // Fail closed if value collection capped
+    if (valuesResult.capped) return '';
+
+    const nameLower = text.toLowerCase();
+    for (const value of valuesResult.values) {
+        if (nameLower.includes(value)) {
+            return '';
+        }
+    }
+    return text;
+}
+"""
+
+_ARIA_LABEL_JS = _SHARED_GUARDS_JS + r"""
+(element, valuesResult) => {
+    if (isControl(element)) return '';
+    if (hasControlAncestor(element)) return '';
+    const ariaLabel = (element.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    if (!ariaLabel) return '';
+    if (ariaLabel.length > 400) return '';
+
+    // Fail closed if value collection capped
+    if (valuesResult.capped) return '';
+
+    const ariaLabelLower = ariaLabel.toLowerCase();
+    for (const value of valuesResult.values) {
+        if (ariaLabelLower.includes(value)) {
+            return '';
+        }
+    }
+    return ariaLabel;
 }
 """
 
 
-def _name(item, *, read_text: bool, budget: _Budget) -> str:
-    """aria-label, then safe text from visible text nodes only.
+def _name(item, *, read_text: bool, budget: _Budget, values_result=None) -> str:
+    """aria-label or safe text from visible text nodes only.
 
-    Safe text never descends into input, select, textarea, option, output, contenteditable
-    elements, or elements with role textbox/combobox/searchbox/spinbutton/listbox/option.
+    aria-label is read only AFTER control and ancestor checks (done in JS).
+    Safe text never descends into controls or editable contexts.
     Returns "" if element is or contains a control, or is inside an editable ancestor.
-    Never reads title (apps mirror values into it)."""
+    Value-match: returns "" if the collected name contains any current control value.
+    Never reads title (apps mirror values into it).
+    Over 400 characters: dropped whole. Python applies redact_text before trimming."""
     # Every read gets a budget-bound timeout; a detached element would otherwise
     # wait the page default (about 20 s).
     if budget.over():
         return ""
 
-    # Try aria-label first
+    # Collect values once per document if not provided
+    if values_result is None:
+        try:
+            values_result = item.evaluate(_COLLECT_VALUES_JS, timeout=budget.timeout_ms(500))
+            if values_result is None:
+                values_result = {"values": [], "capped": True}
+        except Exception:
+            values_result = {"values": [], "capped": True}
+
+    if budget.over():
+        return ""
+
+    # Try aria-label first (with control/ancestor checks and value-match)
     try:
-        value = " ".join(str(item.get_attribute("aria-label", timeout=budget.timeout_ms(500)) or "").split())
-        if value and len(value) <= 200:
-            return redact_text(value)
+        value = str(item.evaluate(_ARIA_LABEL_JS, values_result, timeout=budget.timeout_ms(500)) or "")
+        if value:
+            return redact_text(value, NAME_LIMIT)
     except Exception:
         pass
 
     if budget.over():
         return ""
 
-    # Try safe text from visible text nodes only
+    # Try safe text from visible text nodes (includes value-match and full checks)
     if read_text:
         try:
-            value = " ".join(str(item.evaluate(_SAFE_TEXT_JS, timeout=budget.timeout_ms(500)) or "").split())
-            if value and len(value) <= 200:
-                return redact_text(value)
+            value = str(item.evaluate(_SAFE_TEXT_JS, values_result, timeout=budget.timeout_ms(500)) or "")
+            if value:
+                # Python redacts first, then trims (no pre-trim in Python)
+                return redact_text(value, NAME_LIMIT)
         except Exception:
             pass
 
     return ""
 
 
-def _headings(panel, budget: _Budget) -> list[str]:
+def _headings(panel, budget: _Budget, values_result=None) -> list[str]:
     names = []
     try:
         loc = panel.get_by_role("heading")
     except Exception:
         return names
     for item in _visible(loc, HEADINGS_PER_PANEL * 2, budget):
-        name = _name(item, read_text=True, budget=budget)
+        name = _name(item, read_text=True, budget=budget, values_result=values_result)
         if name and name not in names:
             names.append(name)
         if len(names) >= HEADINGS_PER_PANEL:
@@ -258,9 +473,53 @@ def _headings(panel, budget: _Budget) -> list[str]:
     return names
 
 
-def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict]]:
+def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[str]], list[dict], str]:
     controls: dict[str, list[str]] = {role: [] for role in CONTROL_ROLES}
     panels: list[dict] = []
+    names_withheld = ""
+
+    # HIGH: Fail closed if more roots than we can check
+    if len(roots) > ROOT_LIMIT:
+        names_withheld = "too many frames to check values"
+        merged_values_result = {"values": [], "capped": True}
+    # Fix 5: Skip value collection if budget is nearly spent (< ~1s left)
+    elif budget.left() < 1.0:
+        names_withheld = "value collection skipped (time)"
+        # Use empty values_result for all roots
+        merged_values_result = {"values": [], "capped": True}
+    else:
+        # Fix 3: Collect values from ALL roots first, then merge
+        all_values = []
+        collection_failed = False
+        collection_capped = False
+
+        for root in roots[:ROOT_LIMIT]:
+            try:
+                values_result = root.evaluate(_COLLECT_VALUES_JS)
+                # Fix 4: Check that result is a dict with the right keys
+                if not isinstance(values_result, dict) or "values" not in values_result or "capped" not in values_result:
+                    collection_failed = True
+                    break
+                if values_result.get("capped"):
+                    collection_capped = True
+                    break
+                all_values.extend(values_result.get("values", []))
+            except Exception:
+                collection_failed = True
+                break
+
+        # Build merged values_result
+        if collection_failed:
+            names_withheld = "value collection failed"
+            merged_values_result = {"values": [], "capped": True}
+        elif collection_capped:
+            names_withheld = "value collection capped"
+            merged_values_result = {"values": [], "capped": True}
+        else:
+            # Dedupe the merged values
+            merged_values_result = {"values": list(dict.fromkeys(all_values)), "capped": False}
+
+    # Now use merged_values_result for all roots
     for root in roots[:ROOT_LIMIT]:
         for role in CONTROL_ROLES:
             try:
@@ -271,9 +530,9 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
             for item in _visible(loc, CANDIDATES_PER_ROLE, budget):
                 if len(controls[role]) >= NAMES_PER_ROLE or budget.over():
                     break
-                name = _name(item, read_text=role != "dialog", budget=budget)
+                name = _name(item, read_text=role != "dialog", budget=budget, values_result=merged_values_result)
                 if not name and role == "dialog":
-                    heads = _headings(item, budget)
+                    heads = _headings(item, budget, values_result=merged_values_result)
                     name = heads[0] if heads else ""
                 if name and name not in controls[role]:
                     controls[role].append(name)
@@ -287,10 +546,10 @@ def _controls_and_panels(roots: list, budget: _Budget) -> tuple[dict[str, list[s
                     break
                 panels.append({
                     "role": role,
-                    "name": _name(item, read_text=False, budget=budget),
-                    "headings": _headings(item, budget),
+                    "name": _name(item, read_text=False, budget=budget, values_result=merged_values_result),
+                    "headings": _headings(item, budget, values_result=merged_values_result),
                 })
-    return controls, panels
+    return controls, panels, names_withheld
 
 
 def _screenshot(page, roots: list, budget: _Budget) -> bytes:
@@ -377,7 +636,7 @@ def save_failure_snapshot(
     png_error = ""
     title = _title(page, budget)
     tree = _tree(page, redact_tree, budget)
-    controls, panels = _controls_and_panels(roots, budget)
+    controls, panels, names_withheld = _controls_and_panels(roots, budget)
     try:
         if budget.over():
             raise TimeoutError("snapshot time used")
@@ -400,6 +659,8 @@ def save_failure_snapshot(
         "screenshot": png_href or f"unavailable ({png_error or 'empty'})",
         # Set only when a read was skipped because the cap was reached.
         "truncated": TRUNCATED_NOTE if budget.hit else "",
+        # Set when value collection failed or was capped.
+        "names_withheld": names_withheld,
         # A lookup or Resource Type miss: up to 3 options' tags, roles, classes and nesting,
         # each text node as its length only.
         "option_shapes": list(option_shapes or [])[:3],
